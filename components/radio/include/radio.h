@@ -92,17 +92,31 @@ typedef struct {
     uint16_t max_offset;
 } radio_seek_criteria_t;
 
+/* The user-facing state: what radio_start() begins with and what radio_mem keeps across power
+ * cycles. */
+typedef struct {
+    radio_band_t band;
+    uint32_t khz;    /* FM is rounded to the TEF's 10 kHz */
+    int16_t volume;  /* 0.1 dB, -599..240 */
+    bool mute;
+    bool bw_auto;    /* FM only */
+    uint16_t bw;     /* 0.1 kHz, used when !bw_auto */
+} radio_settings_t;
+
 typedef struct {
     tef6686_config_t tef;
     uint32_t fm_min_khz;
     uint32_t fm_max_khz;
     uint32_t fm_step_khz;
     uint32_t am_step_khz;  /* MW raster: 9 or 10 */
-    uint32_t initial_khz;  /* FM */
-    int16_t initial_volume;
+    radio_settings_t initial; /* must pass radio_settings_valid() */
     uint16_t fm_deemphasis; /* 500 or 750 */
     radio_seek_criteria_t seek;
 } radio_config_t;
+
+/* Within what the API accepts (radio_tune, radio_set_volume, radio_set_bandwidth). Usable
+ * before radio_start(), e.g. on settings read back from flash. */
+bool radio_settings_valid(const radio_settings_t *s);
 
 /* Listeners must be registered before radio_start(). */
 esp_err_t radio_add_listener(radio_listener_t cb, void *ctx);
@@ -121,6 +135,9 @@ esp_err_t radio_set_deemphasis(uint16_t timeconstant);      /* 500 or 750 */
 esp_err_t radio_reinit(void);
 
 void radio_get_status(radio_status_t *out);
+/* The settings part of the status. false while a seek runs (khz is moving) or before
+ * radio_start(). */
+bool radio_get_settings(radio_settings_t *out);
 
 #ifdef __cplusplus
 }

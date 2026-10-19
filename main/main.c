@@ -19,6 +19,7 @@
 #include "nvs_flash.h"
 #include "qn_bridge.h"
 #include "radio.h"
+#include "radio_mem.h"
 #include "sdkconfig.h"
 #include "tef6686.h"
 #include "web_ui.h"
@@ -154,7 +155,7 @@ void app_main(void)
     i2c_master_bus_handle_t tef_bus;
     ESP_ERROR_CHECK(init_tef_bus(&tef_bus));
 
-    const radio_config_t radio_cfg = {
+    radio_config_t radio_cfg = {
         .tef = {
             .bus = tef_bus,
             .address = TEF6686_I2C_ADDR_DEFAULT,
@@ -168,8 +169,14 @@ void app_main(void)
         .fm_max_khz = CONFIG_BRIDGE_FM_MAX_KHZ,
         .fm_step_khz = CONFIG_BRIDGE_FM_STEP_KHZ,
         .am_step_khz = CONFIG_BRIDGE_AM_STEP_KHZ,
-        .initial_khz = CONFIG_BRIDGE_FM_DEFAULT_KHZ,
-        .initial_volume = CONFIG_BRIDGE_DEFAULT_VOLUME_DB * 10,
+        .initial = {
+            .band = RADIO_BAND_FM,
+            .khz = CONFIG_BRIDGE_FM_DEFAULT_KHZ,
+            /* -60 dB would be one step below the TEF's -59.9 dB */
+            .volume = CONFIG_BRIDGE_DEFAULT_VOLUME_DB < -59 ? -599
+                                                            : CONFIG_BRIDGE_DEFAULT_VOLUME_DB * 10,
+            .bw_auto = true,
+        },
         .fm_deemphasis = FM_DEEMPHASIS,
         .seek = {
             .min_level = CONFIG_BRIDGE_SEEK_MIN_LEVEL_DBUV * 10,
@@ -182,7 +189,16 @@ void app_main(void)
 #if CONFIG_BRIDGE_QN_EMU_ENABLE
     ESP_ERROR_CHECK(qn_bridge_init());
 #endif
+#if CONFIG_BRIDGE_MEMORY
+    /* Not fatal: without it the radio starts from the defaults and the web UI hides memory. */
+    const bool memory = radio_mem_init(&radio_cfg.initial) == ESP_OK;
+#endif
     ESP_ERROR_CHECK(radio_start(&radio_cfg));
+#if CONFIG_BRIDGE_MEMORY
+    if (memory && radio_mem_start() != ESP_OK) {
+        ESP_LOGE(TAG, "settings autosave not running");
+    }
+#endif
 
 #if CONFIG_BRIDGE_QN_EMU_ENABLE
     /* Before Wi-Fi: the head unit may probe the chip only once at its boot. */

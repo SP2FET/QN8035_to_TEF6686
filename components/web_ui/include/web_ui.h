@@ -10,6 +10,18 @@
  *   POST /api/mute?on=0|1
  *   POST /api/bandwidth?khz=X      (0 = auto, FM only)
  *   POST /api/reinit
+ *
+ * Memory channels (radio_mem; stand-alone build, else 503). N is the channel number 1..40:
+ *   GET  /api/presets                  {"enabled","rev","max","slots":[{slot,band,khz,name}]}
+ *   POST /api/preset/store[?slot=N][&name=S]  current station; no slot (or 0): the channel
+ *                                      holding it, else the first free one. Reply has "slot".
+ *                                      No name: kept for the same station, else the RDS PS
+ *   POST /api/preset/recall?slot=N     404: empty channel
+ *   POST /api/preset/rename?slot=N&name=S
+ *   POST /api/preset/clear?slot=N
+ *   POST /api/preset/step?dir=up|down  next/previous used channel
+ *   507 on store: memory full. /api/status has "mem" with the "rev" of the channel list.
+ *
  *   POST /api/ota        body: firmware.bin; header X-OTA-Password if one is set.
  *                        Verifies, switches the boot slot and restarts (web_ota.c)
  *   GET  /ws             WebSocket, server pushes log text

@@ -20,6 +20,7 @@
 #include "log_stream.h"
 #include "qn8035_slave.h"
 #include "radio.h"
+#include "radio_mem.h"
 #include "web_ota.h"
 
 static const char *TAG = "web";
@@ -28,7 +29,10 @@ extern const char index_html_start[] asm("_binary_index_html_start");
 extern const char index_html_end[] asm("_binary_index_html_end");
 
 #define STATUS_BUF_SIZE 2048
+/* Per used channel: ~48 bytes of keys and numbers plus the name, escaped at worst 2x. */
+#define PRESETS_BUF_SIZE (96 + PRESETS_MAX * (48 + 2 * PRESET_NAME_SIZE))
 #define QUERY_MAX       128
+#define NAME_PARAM_SIZE (3 * PRESET_NAME_SIZE) /* every byte percent-encoded */
 #define LOG_CHUNK       1024
 #define MAX_CLIENTS     8
 #define PUMP_PERIOD_MS  100
@@ -186,7 +190,13 @@ static esp_err_t status_get(httpd_req_t *req)
     jb_printf(&j, "\"qn\":{\"enabled\":%s,\"writes\":%" PRIu32 ",\"reads\":%" PRIu32 ",\"last\":",
               b(qn.running), qn.writes, qn.reads);
     jb_str(&j, qn.last);
-    jb_printf(&j, "}}");
+
+    radio_mem_info_t mem;
+    radio_mem_get(NULL, &mem);
+    jb_printf(&j,
+              "},\"mem\":{\"enabled\":%s,\"rev\":%" PRIu32 ",\"used\":%u,\"max\":%d,"
+              "\"writes\":%" PRIu32 ",\"errors\":%" PRIu32 "}}",
+              b(mem.enabled), mem.rev, mem.used, PRESETS_MAX, mem.writes, mem.errors);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -243,6 +253,8 @@ static esp_err_t reply(httpd_req_t *req, esp_err_t err)
     char buf[80];
     snprintf(buf, sizeof(buf), "{\"ok\":false,\"err\":\"%s\"}", esp_err_to_name(err));
     httpd_resp_set_status(req, err == ESP_ERR_INVALID_ARG ? "400 Bad Request"
+                               : err == ESP_ERR_NOT_FOUND ? "404 Not Found"
+                               : err == ESP_ERR_NO_MEM    ? "507 Insufficient Storage"
                                                           : "503 Service Unavailable");
     return httpd_resp_sendstr(req, buf);
 }
@@ -308,6 +320,147 @@ static esp_err_t reinit_post(httpd_req_t *req)
 {
     ESP_LOGI(TAG, "tuner re-init requested from web");
     return reply(req, radio_reinit());
+}
+
+/* ---- memory channels ----------------------------------------------------- */
+
+static int hex_digit(char c)
+{
+    return c >= '0' && c <= '9'   ? c - '0'
+           : c >= 'a' && c <= 'f' ? c - 'a' + 10
+           : c >= 'A' && c <= 'F' ? c - 'A' + 10
+                                  : -1;
+}
+
+/* In place: %XX and '+' (URLSearchParams encodes a space as '+'); bad escapes stay as typed. */
+static void url_decode(char *s)
+{
+    char *out = s;
+    for (; *s; s++) {
+        int hi, lo;
+        if (*s == '%' && (hi = hex_digit(s[1])) >= 0 && (lo = hex_digit(s[2])) >= 0) {
+            *out++ = (char)(hi << 4 | lo);
+            s += 2;
+        } else {
+            *out++ = *s == '+' ? ' ' : *s;
+        }
+    }
+    *out = '\0';
+}
+
+/* ?slot=1..PRESETS_MAX (the number shown) to a 0-based slot. With `optional`, an absent
+ * slot or 0 gives -1. */
+static bool get_slot(httpd_req_t *req, bool optional, int *slot)
+{
+    char val[16];
+    char *end;
+    *slot = -1;
+    if (!get_param(req, "slot", val, sizeof(val))) {
+        return optional;
+    }
+    const long v = strtol(val, &end, 10);
+    if (end == val || *end != '\0' || v < (optional ? 0 : 1) || v > PRESETS_MAX) {
+        return false;
+    }
+    *slot = (int)v - 1;
+    return true;
+}
+
+/* ?name=, decoded into buf (NAME_PARAM_SIZE); absent gives NULL. false: too long. The radio_mem
+ * side sanitises it (presets_copy_name). */
+static bool get_name(httpd_req_t *req, char *buf, size_t size, const char **name)
+{
+    char query[QUERY_MAX];
+    *name = NULL;
+    esp_err_t err = httpd_req_get_url_query_str(req, query, sizeof(query));
+    if (err == ESP_OK) {
+        err = httpd_query_key_value(query, "name", buf, size);
+    }
+    if (err == ESP_ERR_NOT_FOUND) {
+        return true;
+    }
+    if (err != ESP_OK) {
+        return false;
+    }
+    url_decode(buf);
+    *name = buf;
+    return true;
+}
+
+static esp_err_t presets_get(httpd_req_t *req)
+{
+    static presets_t p; /* httpd task only, like status_get's buffers */
+    static char buf[PRESETS_BUF_SIZE];
+    radio_mem_info_t info;
+    radio_mem_get(&p, &info);
+
+    jbuf_t j = {.buf = buf, .size = sizeof(buf)};
+    jb_printf(&j, "{\"enabled\":%s,\"rev\":%" PRIu32 ",\"max\":%d,\"slots\":[", b(info.enabled),
+              info.rev, PRESETS_MAX);
+    const char *sep = "";
+    for (int i = 0; i < PRESETS_MAX; i++) {
+        const preset_t *e = &p.slot[i];
+        if (e->khz == 0) {
+            continue;
+        }
+        jb_printf(&j, "%s{\"slot\":%d,\"band\":\"%s\",\"khz\":%" PRIu32 ",\"name\":", sep, i + 1,
+                  e->band == RADIO_BAND_AM ? "AM" : "FM", e->khz);
+        jb_str(&j, e->name);
+        jb_printf(&j, "}");
+        sep = ",";
+    }
+    jb_printf(&j, "]}");
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, buf, (ssize_t)j.len);
+}
+
+static esp_err_t preset_store_post(httpd_req_t *req)
+{
+    char buf[NAME_PARAM_SIZE];
+    const char *name;
+    int slot, stored = -1;
+    if (!get_slot(req, true, &slot) || !get_name(req, buf, sizeof(buf), &name)) {
+        return reply(req, ESP_ERR_INVALID_ARG);
+    }
+    const esp_err_t err = radio_mem_store(slot, name, &stored);
+    if (err != ESP_OK) {
+        return reply(req, err);
+    }
+    char out[32];
+    snprintf(out, sizeof(out), "{\"ok\":true,\"slot\":%d}", stored + 1);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, out);
+}
+
+static esp_err_t preset_recall_post(httpd_req_t *req)
+{
+    int slot;
+    return reply(req, get_slot(req, false, &slot) ? radio_mem_recall(slot) : ESP_ERR_INVALID_ARG);
+}
+
+static esp_err_t preset_rename_post(httpd_req_t *req)
+{
+    char buf[NAME_PARAM_SIZE];
+    const char *name;
+    int slot;
+    if (!get_slot(req, false, &slot) || !get_name(req, buf, sizeof(buf), &name) || !name) {
+        return reply(req, ESP_ERR_INVALID_ARG);
+    }
+    return reply(req, radio_mem_rename(slot, name));
+}
+
+static esp_err_t preset_clear_post(httpd_req_t *req)
+{
+    int slot;
+    return reply(req, get_slot(req, false, &slot) ? radio_mem_erase(slot) : ESP_ERR_INVALID_ARG);
+}
+
+static esp_err_t preset_step_post(httpd_req_t *req)
+{
+    const int dir = get_dir(req);
+    return reply(req, (dir == 1 || dir == -1) ? radio_mem_step(dir) : ESP_ERR_INVALID_ARG);
 }
 
 static esp_err_t index_get(httpd_req_t *req)
@@ -442,7 +595,7 @@ esp_err_t web_ui_start(const web_ui_config_t *ui_cfg)
     ESP_RETURN_ON_FALSE(s_server == NULL, ESP_ERR_INVALID_STATE, TAG, "already started");
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 16;
+    cfg.max_uri_handlers = 24;
     cfg.lru_purge_enable = true;
     cfg.stack_size = 6144;
     ESP_RETURN_ON_ERROR(httpd_start(&s_server, &cfg), TAG, "httpd_start");
@@ -458,7 +611,13 @@ esp_err_t web_ui_start(const web_ui_config_t *ui_cfg)
         {.uri = "/api/mute", .method = HTTP_POST, .handler = mute_post},
         {.uri = "/api/bandwidth", .method = HTTP_POST, .handler = bandwidth_post},
         {.uri = "/api/reinit", .method = HTTP_POST, .handler = reinit_post},
-        {.uri = "/ws", .method = HTTP_GET, .handler = ws_handler, .is_websocket = true},
+        {.uri = "/api/presets", .method = HTTP_GET, .handler = presets_get},
+        {.uri = "/api/preset/store", .method = HTTP_POST, .handler = preset_store_post},
+        {.uri = "/api/preset/recall", .method = HTTP_POST, .handler = preset_recall_post},
+        {.uri = "/api/preset/rename", .method = HTTP_POST, .handler = preset_rename_post},
+        {.uri = "/api/preset/clear", .method = HTTP_POST, .handler = preset_clear_post},
+        {.uri = "/api/preset/step", .method = HTTP_POST, .handler = preset_step_post},
+        {.uri = "/ws",.method = HTTP_GET, .handler = ws_handler, .is_websocket = true},
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_server, &uris[i]), TAG, "register %s",

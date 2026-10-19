@@ -46,6 +46,12 @@ dt{color:var(--dim)}dd{margin:0;word-break:break-word}
 #log{height:320px;overflow:auto;background:#010409;border:1px solid var(--bd);border-radius:6px;padding:6px;font:12px/1.35 ui-monospace,Consolas,monospace}
 #log div{white-space:pre-wrap;overflow-wrap:anywhere}
 .lE{color:var(--er)}.lW{color:var(--wa)}.lD{color:var(--dim)}
+#mname{flex:1 1 12em;width:auto;min-width:0}
+.mgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin-top:8px}
+.mgrid button{text-align:left;padding:6px 10px;line-height:1.25;font-variant-numeric:tabular-nums;min-width:0}
+.mgrid b{color:var(--dim);margin-right:6px}
+.mgrid small{display:block;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mgrid button.sel b,.mgrid button.sel small{color:#fff}
 </style>
 </head>
 <body>
@@ -79,6 +85,20 @@ dt{color:var(--dim)}dd{margin:0;word-break:break-word}
 <div class="row"><label for="vol">Volume</label><input type="range" id="vol" min="-60" max="24" step="0.5" value="-10"><span id="volv" class="mono">—</span></div>
 <div class="row"><button id="mute">Mute</button></div>
 <div class="row"><label for="bw">Bandwidth</label><select id="bw"></select></div>
+</section>
+
+<section class="wide" id="msec" aria-labelledby="h-m" hidden>
+<h2 id="h-m">Memory <span id="mcnt"></span></h2>
+<div class="row">
+<button id="mprev" aria-label="Previous memory channel">&#9664; CH</button><button id="mnext" aria-label="Next memory channel">CH &#9654;</button>
+<label for="mslot">Channel</label><select id="mslot"></select>
+<input type="text" id="mname" placeholder="Name (empty: RDS PS)" autocomplete="off" aria-label="Channel name">
+</div>
+<div class="row">
+<button id="mstore">Store current</button><button id="mren">Rename</button><button id="mclr">Clear</button>
+<span class="hs" id="mmsg"></span>
+</div>
+<div class="mgrid" id="mlist"></div>
 </section>
 
 <section aria-labelledby="h-s">
@@ -140,6 +160,8 @@ const $=id=>document.getElementById(id);
 const FM_BW=[56,64,72,84,97,114,133,151,168,184,200,217,236,254,287,311],AM_BW=[3,4,6,8];
 const DEF={FM:87500,AM:999},MAXLINES=2000;
 let band='FM',bwBand=null,st=null,volDrag=false,volTimer=0,pending=false,toastTimer=0,reTimer=0,uploading=false;
+const NAME_MAX=23; // PRESET_NAME_SIZE - 1, UTF-8 bytes
+let mem=null,memRev=null,memLoading=false,memKey='',clrTimer=0,msgTimer=0;
 let last=Object.assign({},DEF);
 try{Object.assign(last,JSON.parse(localStorage.getItem('tef.last')||'{}'))}catch(e){}
 
@@ -165,14 +187,26 @@ async function poll(){
   }catch(e){on('dhttp',false)}
   finally{clearTimeout(to);pending=false}
 }
-async function cmd(path,params){
+// Resolves to the reply on success, null otherwise (already toasted). errs: messages by err name.
+async function cmd(path,params,errs){
   const q=params?'?'+new URLSearchParams(params):'';
+  let j=null;
   try{
     const r=await fetch('/api/'+path+q,{method:'POST'});
-    const j=await r.json().catch(()=>({ok:false,err:'HTTP '+r.status}));
-    if(!j.ok)toast(j.err||'Command failed');
+    j=await r.json().catch(()=>({ok:false,err:'HTTP '+r.status}));
+    if(!j.ok){toast((errs&&errs[j.err])||j.err||'Command failed');j=null}
   }catch(e){toast('Request failed')}
   poll();
+  return j;
+}
+async function loadMem(){
+  if(memLoading)return;
+  memLoading=true;
+  try{
+    const r=await fetch('/api/presets',{cache:'no-store'});
+    mem=await r.json();memRev=mem.rev;renderMem(true);
+  }catch(e){}
+  finally{memLoading=false}
 }
 
 // ---- Render ----
@@ -228,6 +262,46 @@ function render(s){
   txt('fwv',fw?fw.version+', built '+fw.built+', IDF '+fw.idf:null);
   txt('fws',fw?fw.partition+', '+(fw.ota_state==='pending'?'on probation (confirms 30 s after boot)':fw.ota_state):null);
   $('fwp').hidden=!(fw&&fw.ota_password);
+  const m=s.mem,me=!!(m&&m.enabled);
+  $('msec').hidden=!me;
+  if(me){
+    $('mcnt').textContent=m.used+' / '+m.max+(m.errors?' · '+m.errors+' write errors':'');
+    if(m.rev!==memRev)loadMem();
+    const k=band+':'+f;
+    if(k!==memKey){memKey=k;renderMem(false)}
+  }
+}
+const fmtF=(b,k)=>b==='AM'?k+' kHz':(k/1000).toFixed(2)+' MHz';
+const slotOf=n=>mem&&mem.slots.find(e=>e.slot===n);
+// full: the channel list changed (rebuild the select too); else only the station did.
+function renderMem(full){
+  if(!mem)return;
+  const list=$('mlist');
+  list.textContent='';
+  for(const e of mem.slots){
+    const b=document.createElement('button'),n=document.createElement('b'),sm=document.createElement('small');
+    n.textContent=e.slot;sm.textContent=e.name||' ';
+    b.append(n,fmtF(e.band,e.khz),sm);
+    b.title='Channel '+e.slot+(e.name?': '+e.name:'');
+    b.classList.toggle('sel',!!st&&st.band===e.band&&st.freq_khz===e.khz);
+    b.onclick=()=>{$('mslot').value=e.slot;$('mname').value=e.name;cmd('preset/recall',{slot:e.slot})};
+    list.appendChild(b);
+  }
+  if(!mem.slots.length){
+    const p=document.createElement('span');p.className='hs';
+    p.textContent='Nothing stored yet: tune a station and press Store current.';
+    list.appendChild(p);
+  }
+  if(!full)return;
+  const sel=$('mslot'),v=sel.value;
+  sel.textContent='';
+  const add=(val,l)=>{const o=document.createElement('option');o.value=val;o.textContent=l;sel.appendChild(o)};
+  add(0,'Auto');
+  for(let i=1;i<=mem.max;i++){
+    const e=slotOf(i);
+    add(i,i+' · '+(e?fmtF(e.band,e.khz)+(e.name?' '+e.name:''):'empty'));
+  }
+  sel.value=[...sel.options].some(o=>o.value===v)?v:'0';
 }
 function fmtUp(t){
   const d=Math.floor(t/86400),h=Math.floor(t%86400/3600),m=Math.floor(t%3600/60);
@@ -268,6 +342,45 @@ $('reinit').onclick=()=>{
   if(reTimer){clearTimeout(reTimer);reTimer=0;b.textContent='Re-init';b.classList.remove('danger');cmd('reinit');return}
   b.textContent='Confirm?';b.classList.add('danger');
   reTimer=setTimeout(()=>{reTimer=0;b.textContent='Re-init';b.classList.remove('danger')},3000);
+};
+
+// ---- Memory channels (/api/preset/*) ----
+function clip(s){ // to NAME_MAX UTF-8 bytes, whole characters
+  s=s.trim();
+  const enc=new TextEncoder();
+  while(enc.encode(s).length>NAME_MAX)s=Array.from(s).slice(0,-1).join('');
+  return s;
+}
+function memMsg(t){
+  const m=$('mmsg');m.textContent=t;
+  clearTimeout(msgTimer);msgTimer=setTimeout(()=>{m.textContent=''},4000);
+}
+const EMPTY={ESP_ERR_NOT_FOUND:'No memory channels stored'};
+$('mprev').onclick=()=>cmd('preset/step',{dir:'down'},EMPTY);
+$('mnext').onclick=()=>cmd('preset/step',{dir:'up'},EMPTY);
+$('mslot').onchange=e=>{const x=slotOf(+e.target.value);$('mname').value=x?x.name:''};
+$('mstore').onclick=async()=>{
+  const sl=+$('mslot').value,x=slotOf(sl),nm=clip($('mname').value),p={};
+  if(sl)p.slot=sl;
+  // A name left as filled in from the channel is not sent: a new station then gets its RDS PS.
+  if(nm&&!(x&&nm===x.name))p.name=nm;
+  const j=await cmd('preset/store',p,{
+    ESP_ERR_NO_MEM:'Memory full: pick a channel to overwrite or clear one',
+    ESP_ERR_INVALID_STATE:'Not while seeking'});
+  if(j){$('mname').value='';memMsg('Stored in channel '+j.slot)}
+};
+$('mren').onclick=()=>{
+  const sl=+$('mslot').value;
+  if(!sl)return toast('Pick a channel to rename');
+  cmd('preset/rename',{slot:sl,name:clip($('mname').value)},{ESP_ERR_NOT_FOUND:'Channel '+sl+' is empty'});
+};
+$('mclr').onclick=()=>{
+  const sl=+$('mslot').value,b=$('mclr');
+  const reset=()=>{clrTimer=0;b.textContent='Clear';b.classList.remove('danger')};
+  if(!sl)return toast('Pick a channel to clear');
+  if(clrTimer){clearTimeout(clrTimer);reset();$('mname').value='';cmd('preset/clear',{slot:sl});return}
+  b.textContent='Clear '+sl+'?';b.classList.add('danger');
+  clrTimer=setTimeout(reset,3000);
 };
 
 // ---- Firmware update (POST /api/ota, raw firmware.bin) ----

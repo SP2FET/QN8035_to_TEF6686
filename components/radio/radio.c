@@ -50,6 +50,13 @@ static const char *TAG = "radio";
 
 #define FM_DEFAULT_BW 2360 /* 236 kHz, automatic */
 #define AM_DEFAULT_BW 40   /* 4 kHz */
+/* Set_Bandwidth limits, 0.1 kHz. */
+#define FM_MIN_BW 560
+#define FM_MAX_BW 3110
+#define AM_MIN_BW 30
+#define AM_MAX_BW 80
+#define VOLUME_MIN -599 /* 0.1 dB */
+#define VOLUME_MAX 240
 
 typedef enum {
     CMD_TUNE,
@@ -697,6 +704,20 @@ esp_err_t radio_add_listener(radio_listener_t cb, void *ctx)
     return ESP_OK;
 }
 
+bool radio_settings_valid(const radio_settings_t *st)
+{
+    band_range_t r;
+    if (st == NULL || st->volume < VOLUME_MIN || st->volume > VOLUME_MAX) {
+        return false;
+    }
+    if (st->band == RADIO_BAND_FM) {
+        return st->khz >= FM_ABS_MIN_KHZ && st->khz <= FM_ABS_MAX_KHZ &&
+               (st->bw_auto || (st->bw >= FM_MIN_BW && st->bw <= FM_MAX_BW));
+    }
+    return st->band == RADIO_BAND_AM && am_range(st->khz, &r) && !st->bw_auto &&
+           st->bw >= AM_MIN_BW && st->bw <= AM_MAX_BW;
+}
+
 esp_err_t radio_start(const radio_config_t *cfg)
 {
     ESP_RETURN_ON_FALSE(cfg, ESP_ERR_INVALID_ARG, TAG, "null config");
@@ -705,19 +726,24 @@ esp_err_t radio_start(const radio_config_t *cfg)
                             cfg->fm_min_khz < cfg->fm_max_khz && cfg->fm_step_khz >= 10 &&
                             cfg->fm_step_khz % 10 == 0 && cfg->am_step_khz > 0,
                         ESP_ERR_INVALID_ARG, TAG, "bad band plan");
+    ESP_RETURN_ON_FALSE(radio_settings_valid(&cfg->initial), ESP_ERR_INVALID_ARG, TAG,
+                        "bad initial settings");
 
     s.cfg = *cfg;
     s.lock = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(s.lock, ESP_ERR_NO_MEM, TAG, "mutex");
     ESP_RETURN_ON_ERROR(tef6686_new(&cfg->tef, &s.tef), TAG, "tef6686_new");
 
+    const radio_settings_t *in = &cfg->initial;
+    const bool fm = in->band == RADIO_BAND_FM;
     s.status = (radio_status_t){
         .patch = "none",
-        .band = RADIO_BAND_FM,
-        .freq_khz = MIN(MAX(cfg->initial_khz, cfg->fm_min_khz), cfg->fm_max_khz) / 10 * 10,
-        .volume = cfg->initial_volume,
-        .bw_auto = true,
-        .bw = FM_DEFAULT_BW,
+        .band = in->band,
+        .freq_khz = fm ? (in->khz + 5) / 10 * 10 : in->khz,
+        .volume = in->volume,
+        .mute = in->mute,
+        .bw_auto = fm && in->bw_auto,
+        .bw = fm && in->bw_auto ? FM_DEFAULT_BW : in->bw,
     };
     rds_reset(&s.status.rds);
 
@@ -767,7 +793,8 @@ esp_err_t radio_scan(uint32_t start_khz, uint32_t stop_khz, uint32_t step_khz)
 
 esp_err_t radio_set_volume(int16_t volume)
 {
-    ESP_RETURN_ON_FALSE(volume >= -599 && volume <= 240, ESP_ERR_INVALID_ARG, TAG, "bad volume");
+    ESP_RETURN_ON_FALSE(volume >= VOLUME_MIN && volume <= VOLUME_MAX, ESP_ERR_INVALID_ARG, TAG,
+                        "bad volume");
     return post(&(radio_cmd_t){.type = CMD_VOLUME, .volume = volume});
 }
 
@@ -788,10 +815,11 @@ esp_err_t radio_set_bandwidth(bool automatic, uint16_t bw)
         if (automatic) {
             bw = FM_DEFAULT_BW;
         }
-        ESP_RETURN_ON_FALSE(bw >= 560 && bw <= 3110, ESP_ERR_INVALID_ARG, TAG, "bad FM bandwidth");
+        ESP_RETURN_ON_FALSE(bw >= FM_MIN_BW && bw <= FM_MAX_BW, ESP_ERR_INVALID_ARG, TAG,
+                            "bad FM bandwidth");
     } else {
-        ESP_RETURN_ON_FALSE(!automatic && bw >= 30 && bw <= 80, ESP_ERR_INVALID_ARG, TAG,
-                            "bad AM bandwidth");
+        ESP_RETURN_ON_FALSE(!automatic && bw >= AM_MIN_BW && bw <= AM_MAX_BW, ESP_ERR_INVALID_ARG,
+                            TAG, "bad AM bandwidth");
     }
     return post(&(radio_cmd_t){.type = CMD_BANDWIDTH, .bw = {.automatic = automatic, .bw = bw}});
 }
@@ -818,4 +846,22 @@ void radio_get_status(radio_status_t *out)
     lock();
     *out = s.status;
     unlock();
+}
+
+bool radio_get_settings(radio_settings_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (s.lock == NULL) {
+        return false;
+    }
+    lock();
+    out->band = s.status.band;
+    out->khz = s.status.freq_khz;
+    out->volume = s.status.volume;
+    out->mute = s.status.mute;
+    out->bw_auto = s.status.bw_auto;
+    out->bw = s.status.bw;
+    const bool seeking = s.status.seeking;
+    unlock();
+    return !seeking;
 }

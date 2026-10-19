@@ -121,6 +121,21 @@ menu "QN8035 -> TEF6686 bridge"
                 2 kHz at 100 MHz); the seek averages out the swing caused by programme
                 audio. A channel next to a strong station reads 20 kHz or more, so
                 8 kHz still rejects it.
+
+        config BRIDGE_MEMORY
+            bool "Remember the last station and settings, keep memory channels"
+            depends on !BRIDGE_QN_EMU_ENABLE
+            default y
+            help
+                Stand-alone build only. Band, frequency, volume, mute and bandwidth
+                survive a power cycle (saved 2 s after the last change), and 40 memory
+                channels are managed from the web UI. Both live in the nvs partition;
+                with this enabled the two "after power-up" values above apply only
+                until something has been saved.
+
+                Not available with QN8035 emulation: there the head unit owns the
+                radio state, and a flash write stops the CPU for tens of milliseconds
+                while the head unit may be waiting on a stretched clock.
     endmenu
 
     menu "QN8035 emulation (I2C slave to the head unit)"

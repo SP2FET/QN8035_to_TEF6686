@@ -8,6 +8,7 @@ idf_component_register(
         nvs_flash
         tef6686
         radio
+        radio_mem
         bridge
         qn8035_slave
         log_stream
