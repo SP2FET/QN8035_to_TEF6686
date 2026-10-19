@@ -3,3 +3,8 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+# Generated from sdkconfig.defaults; delete together with .pio/build/<env> after changing defaults
+sdkconfig.lolin_s2_mini
+sdkconfig*.old
+# idf.py build output
+build/
