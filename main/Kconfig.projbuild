@@ -185,6 +185,15 @@ menu "QN8035 -> TEF6686 bridge"
             int "Web console history (bytes)"
             range 1024 65536
             default 8192
+
+        config BRIDGE_OTA_PASSWORD
+            string "Firmware upload password (empty = none)"
+            default ""
+            help
+                Required in the X-OTA-Password header of POST /api/ota;
+                scripts/ota_upload.py takes it from the OTA_PASSWORD environment
+                variable. Empty lets anyone who can reach the web UI replace the
+                firmware (the access point itself is WPA2-protected).
     endmenu
 
 endmenu

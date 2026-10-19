@@ -4,6 +4,7 @@ idf_component_register(
     PRIV_REQUIRES
         esp_driver_i2c
         esp_app_format
+        app_update
         nvs_flash
         tef6686
         radio

@@ -19,6 +19,7 @@ The head unit's software must not notice the swap.
 | TEF6686 driver: boot/patch, tune, quality, RDS, audio | **Runs on the bench**: TEF6686 /V102 identified, patch V102 p2.24 loads, tunes, stereo and RDS lock on air |
 | Radio service, seek, RDS decoder | Implemented; RDS decoder host-tested and decodes PI/PS/RT on air. Seek not yet checked |
 | Web UI (REST + WebSocket log) | Runs on the bench (SoftAP) |
+| Web OTA (`/api/ota`, `scripts/ota_upload.py`, bootloader rollback) | Builds; script tested against a mock server. **Not yet tried on the device** (needs one USB flash first) |
 | QN8035 register model | Implemented, host-tested (13 tests) |
 | QN8035 I2C slave port + bridge | Skeleton, compiles, **disabled by default**, untested |
 | Head-unit protocol capture | Not started; see Roadmap |
@@ -60,6 +61,7 @@ The layout is a plain ESP-IDF project (`main/` + `components/`), so
 ```sh
 pio run -e lolin_s2_mini                 # build
 pio run -e lolin_s2_mini -t upload       # flash over native USB
+pio run -e lolin_s2_mini -t ota          # build + flash over Wi-Fi (web OTA)
 pio device monitor                       # USB CDC console
 pio run -e lolin_s2_mini -t menuconfig   # "QN8035 -> TEF6686 bridge" menu
 pio test -e native                       # host unit tests (needs gcc on PATH)
@@ -85,6 +87,20 @@ component, touch `main/CMakeLists.txt` to force a re-configure.
 Web UI: join Wi-Fi **`TEF-Bridge`** (password `tef6686bridge`) and open
 **http://192.168.4.1/**. You can also set a station SSID in menuconfig to
 join an existing network (the IP address is logged).
+
+**Web OTA.** `-t ota` (`scripts/pio_ota.py`) runs `scripts/ota_upload.py`,
+which POSTs `firmware.bin` to `/api/ota`, waits for the restart and then for
+the confirmation. Plain `python scripts/ota_upload.py [--info] firmware.bin`
+works too. Host: `$OTA_HOST`, else `custom_ota_host` in platformio.ini (the AP
+address). The optional password (`BRIDGE_OTA_PASSWORD`) goes in `$OTA_PASSWORD`,
+never in the repo. The device writes the image to the inactive slot, checks the
+project name, lets `esp_ota_end` verify it, then restarts. The new image runs
+on probation (`BOOTLOADER_APP_ROLLBACK_ENABLE`). `main.c` confirms it after
+30 s; a reset or crash before that boots the previous image again, and
+`/api/ota` refuses uploads until then. The rollback lives in the bootloader, so
+it only exists after a USB flash. A USB upload also blanks `otadata`, so USB
+always boots slot `ota_0` and stays the recovery path. During an upload the
+httpd task serves nothing else (about 10–20 s).
 
 ## Architecture
 
@@ -115,7 +131,7 @@ join an existing network (the IP address is logged).
 | `bridge` | Maps QN8035 events ↔ radio commands/events, RSSI/SNR mapping | radio, qn8035_slave | no |
 | `log_stream` | Tees ESP_LOG output into a ring buffer (history + follow) | log | no |
 | `net_wifi` | SoftAP (always), optional STA with back-off | esp_wifi | no |
-| `web_ui` | Embedded `www/index.html`, JSON API, WebSocket log pump | radio, log_stream, qn8035_slave | no |
+| `web_ui` | Embedded `www/index.html`, JSON API, WebSocket log pump, firmware upload (`web_ota.c`) | radio, log_stream, qn8035_slave, app_update | no |
 
 ### Tasks and ownership
 
@@ -134,7 +150,9 @@ The I2C slave callbacks run in ISR context. They only copy into a queue.
 `GET /api/status` returns JSON. Commands are `POST` with query parameters:
 `/api/tune?band=FM|AM&khz=N`, `/api/step?dir=up|down`,
 `/api/seek?dir=up|down|stop`, `/api/volume?db=X`, `/api/mute?on=0|1`,
-`/api/bandwidth?khz=X` (0 = auto) and `/api/reinit`. `GET /ws` is a
+`/api/bandwidth?khz=X` (0 = auto) and `/api/reinit`. `POST /api/ota` takes
+the raw `firmware.bin` as its body (`X-OTA-Password` header if a password is
+set); `/api/status` reports the running build under `fw`. `GET /ws` is a
 WebSocket that pushes raw log text. The full list is in
 [web_ui.h](components/web_ui/include/web_ui.h). The page must stay
 self-contained, with no CDN or web fonts: the AP has no internet.
@@ -255,7 +273,6 @@ before changing protocol code.
 3. **Emulation on the bench**: enable `BRIDGE_QN_EMU_ENABLE`. Replay the
    captured sequences from a second MCU acting as master; compare responses.
 4. **In the car.**
-5. Later: persist last frequency/volume in NVS, web OTA (the partition table
-   already has two OTA slots), TEF DSP tuning (PE5PVB init table), mono/
+5. Later: persist last frequency/volume in NVS, TEF DSP tuning (PE5PVB init table), mono/
    stereo-blend mapping for FORCE_MO, AM on the head unit side (QN8035 is
    FM-only).

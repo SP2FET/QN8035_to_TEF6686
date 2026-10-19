@@ -17,7 +17,7 @@ section{background:var(--card);border:1px solid var(--bd);border-radius:8px;padd
 .dot{display:inline-block;width:12px;height:12px;border-radius:50%;background:var(--er);margin-right:4px;vertical-align:middle}
 .dot.on{background:var(--ok)}
 .hs{font-size:.85rem;color:var(--dim)}
-button,select,input[type=text]{min-height:44px;font:inherit;color:var(--fg);background:#21262d;border:1px solid var(--bd);border-radius:6px;padding:0 12px}
+button,select,input[type=text],input[type=password]{min-height:44px;font:inherit;color:var(--fg);background:#21262d;border:1px solid var(--bd);border-radius:6px;padding:0 12px}
 button{cursor:pointer;min-width:44px}
 button:active{background:#30363d}
 button.hl{background:var(--wa);color:#000;border-color:var(--wa)}
@@ -30,7 +30,9 @@ button.danger{background:var(--er);color:#fff;border-color:var(--er)}
 .badge.on{background:var(--ok);border-color:var(--ok);color:#000}
 .badge.warn.on{background:var(--wa);border-color:var(--wa)}
 input[type=range]{flex:1 1 160px;min-height:44px;accent-color:var(--ac)}
-input[type=text]{width:9em}
+input[type=text],input[type=password]{width:9em}
+input[type=file]{font:inherit;color:var(--dim);max-width:100%}
+button:disabled{opacity:.5;cursor:default}
 dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:0}
 dt{color:var(--dim)}dd{margin:0;word-break:break-word}
 .bar{height:14px;background:#21262d;border-radius:7px;overflow:hidden;margin:2px 0 8px}
@@ -109,8 +111,15 @@ dt{color:var(--dim)}dd{margin:0;word-break:break-word}
 <dt>Patch</dt><dd id="tpatch">—</dd>
 <dt>Error</dt><dd id="terr">—</dd>
 <dt>QN8035</dt><dd id="qn">—</dd>
+<dt>Firmware</dt><dd id="fwv">—</dd>
+<dt>Slot</dt><dd id="fws">—</dd>
 </dl>
 <div class="row"><button id="reinit">Re-init</button></div>
+<div class="row">
+<label for="fwf" class="hs">Update</label><input type="file" id="fwf" accept=".bin">
+<input type="password" id="fwp" placeholder="Password" autocomplete="off" aria-label="OTA password" hidden>
+<button id="fwu">Upload</button><span class="hs" id="fwmsg"></span>
+</div>
 </section>
 
 <section class="wide" aria-labelledby="h-l">
@@ -130,7 +139,7 @@ dt{color:var(--dim)}dd{margin:0;word-break:break-word}
 const $=id=>document.getElementById(id);
 const FM_BW=[56,64,72,84,97,114,133,151,168,184,200,217,236,254,287,311],AM_BW=[3,4,6,8];
 const DEF={FM:87500,AM:999},MAXLINES=2000;
-let band='FM',bwBand=null,st=null,volDrag=false,volTimer=0,pending=false,toastTimer=0,reTimer=0;
+let band='FM',bwBand=null,st=null,volDrag=false,volTimer=0,pending=false,toastTimer=0,reTimer=0,uploading=false;
 let last=Object.assign({},DEF);
 try{Object.assign(last,JSON.parse(localStorage.getItem('tef.last')||'{}'))}catch(e){}
 
@@ -147,7 +156,7 @@ function toast(m){
 
 // ---- HTTP ----
 async function poll(){
-  if(pending)return;
+  if(pending||uploading)return; // the server serves one request at a time
   pending=true;
   const ac=new AbortController(),to=setTimeout(()=>ac.abort(),1500);
   try{
@@ -215,6 +224,10 @@ function render(s){
   txt('tpatch',tef.patch);
   const te=$('terr');te.textContent=tef.error||'—';te.classList.toggle('err',!!tef.error);
   txt('qn',s.qn?(qn.enabled?'on':'off')+', writes '+qn.writes+', reads '+qn.reads+', last '+(qn.last||'—'):null);
+  const fw=s.fw;
+  txt('fwv',fw?fw.version+', built '+fw.built+', IDF '+fw.idf:null);
+  txt('fws',fw?fw.partition+', '+(fw.ota_state==='pending'?'on probation (confirms 30 s after boot)':fw.ota_state):null);
+  $('fwp').hidden=!(fw&&fw.ota_password);
 }
 function fmtUp(t){
   const d=Math.floor(t/86400),h=Math.floor(t%86400/3600),m=Math.floor(t%3600/60);
@@ -255,6 +268,27 @@ $('reinit').onclick=()=>{
   if(reTimer){clearTimeout(reTimer);reTimer=0;b.textContent='Re-init';b.classList.remove('danger');cmd('reinit');return}
   b.textContent='Confirm?';b.classList.add('danger');
   reTimer=setTimeout(()=>{reTimer=0;b.textContent='Re-init';b.classList.remove('danger')},3000);
+};
+
+// ---- Firmware update (POST /api/ota, raw firmware.bin) ----
+$('fwu').onclick=()=>{
+  const f=$('fwf').files[0],m=$('fwmsg'),u=$('fwu');
+  if(!f)return toast('Choose firmware.bin first');
+  const x=new XMLHttpRequest();
+  const done=()=>{uploading=false;u.disabled=false};
+  x.open('POST','/api/ota');
+  x.setRequestHeader('Content-Type','application/octet-stream');
+  if($('fwp').value)x.setRequestHeader('X-OTA-Password',$('fwp').value);
+  x.upload.onprogress=e=>{if(e.lengthComputable)m.textContent='Uploading '+Math.round(e.loaded/e.total*100)+' %'};
+  x.onload=()=>{
+    let j={};try{j=JSON.parse(x.responseText)}catch(e){}
+    if(x.status===200){m.textContent='Verified, restarting…'}
+    else{m.textContent='';toast('Update failed: '+(j.msg||'HTTP '+x.status))}
+    done();
+  };
+  x.onerror=()=>{m.textContent='';toast('Upload failed');done()};
+  uploading=true;u.disabled=true;m.textContent='Uploading 0 %';
+  x.send(f);
 };
 
 // ---- Log ----

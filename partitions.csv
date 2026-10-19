@@ -1,4 +1,4 @@
-# 4 MB flash, two OTA slots (web OTA is on the roadmap), core dump kept in flash.
+# 4 MB flash, two OTA slots (web OTA: components/web_ui/web_ota.c), core dump kept in flash.
 # Name,    Type, SubType,  Offset,   Size
 nvs,       data, nvs,      0x9000,   0x6000
 otadata,   data, ota,      0xF000,   0x2000

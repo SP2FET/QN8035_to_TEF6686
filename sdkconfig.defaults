@@ -36,3 +36,9 @@ CONFIG_BRIDGE_TEF_REFCLK_9M216=y
 CONFIG_HTTPD_WS_SUPPORT=y
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 CONFIG_HTTPD_MAX_URI_LEN=512
+
+# --- Firmware update (web OTA) ---
+# A new image boots on probation; main.c confirms it after it has run for a while
+# and a reset before that rolls back. Lives in the bootloader: takes effect only
+# after one USB flash.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

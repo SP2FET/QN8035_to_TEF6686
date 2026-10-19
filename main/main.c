@@ -10,7 +10,10 @@
 #include "esp_app_desc.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "log_stream.h"
 #include "net_wifi.h"
 #include "nvs_flash.h"
@@ -25,6 +28,9 @@ static const char *TAG = "main";
 #define TEF_I2C_PORT I2C_NUM_0 /* the head-unit side uses I2C_NUM_1 */
 #define QN_I2C_PORT  I2C_NUM_1
 #define PROBE_TIMEOUT_MS 50
+/* A web OTA image must run this long before it is confirmed; a crash or reset earlier
+ * makes the bootloader return to the previous image (BOOTLOADER_APP_ROLLBACK_ENABLE). */
+#define OTA_PROBATION_S 30
 
 #if CONFIG_BRIDGE_TEF_REFCLK_4M
 #define TEF_REFCLK_HZ 4000000
@@ -114,6 +120,26 @@ static esp_err_t init_tef_bus(i2c_master_bus_handle_t *bus)
     return ESP_OK;
 }
 
+/* Blocks the main task (which has nothing else to do) for the probation time. */
+static void confirm_ota_image(void)
+{
+    esp_ota_img_states_t state;
+    if (esp_ota_get_state_partition(esp_ota_get_running_partition(), &state) != ESP_OK ||
+        state != ESP_OTA_IMG_PENDING_VERIFY) {
+        return;
+    }
+    ESP_LOGW(TAG, "new firmware on probation: confirming in %d s, a reset before that rolls back",
+             OTA_PROBATION_S);
+    vTaskDelay(pdMS_TO_TICKS(OTA_PROBATION_S * 1000));
+    const esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "new firmware confirmed");
+    } else {
+        ESP_LOGE(TAG, "confirming firmware failed (%s): the next reset rolls back",
+                 esp_err_to_name(err));
+    }
+}
+
 void app_main(void)
 {
     /* First, so the web console also shows the boot messages. */
@@ -181,5 +207,10 @@ void app_main(void)
         .sta_password = CONFIG_BRIDGE_WIFI_STA_PASSWORD,
     };
     ESP_ERROR_CHECK(net_wifi_start(&wifi_cfg));
-    ESP_ERROR_CHECK(web_ui_start());
+    const web_ui_config_t web_cfg = {
+        .ota_password = CONFIG_BRIDGE_OTA_PASSWORD,
+    };
+    ESP_ERROR_CHECK(web_ui_start(&web_cfg));
+
+    confirm_ota_image();
 }
