@@ -1,1 +1,185 @@
-void app_main() {}
+/*
+ * QN8035 -> TEF6686 bridge: application wiring.
+ *
+ * Owns the start-up order and turns Kconfig into component configuration.
+ * Components never read CONFIG_BRIDGE_* themselves.
+ */
+#include <stdbool.h>
+
+#include "driver/i2c_master.h"
+#include "esp_app_desc.h"
+#include "esp_check.h"
+#include "esp_log.h"
+#include "esp_system.h"
+#include "log_stream.h"
+#include "net_wifi.h"
+#include "nvs_flash.h"
+#include "qn_bridge.h"
+#include "radio.h"
+#include "sdkconfig.h"
+#include "tef6686.h"
+#include "web_ui.h"
+
+static const char *TAG = "main";
+
+#define TEF_I2C_PORT I2C_NUM_0 /* the head-unit side uses I2C_NUM_1 */
+#define QN_I2C_PORT  I2C_NUM_1
+#define PROBE_TIMEOUT_MS 50
+
+#if CONFIG_BRIDGE_TEF_REFCLK_4M
+#define TEF_REFCLK_HZ 4000000
+#elif CONFIG_BRIDGE_TEF_REFCLK_9M216
+#define TEF_REFCLK_HZ 9216000
+#elif CONFIG_BRIDGE_TEF_REFCLK_55M
+#define TEF_REFCLK_HZ 55466670
+#else
+#define TEF_REFCLK_HZ 12000000
+#endif
+
+#if CONFIG_BRIDGE_FM_DEEMPHASIS_75
+#define FM_DEEMPHASIS 750
+#else
+#define FM_DEEMPHASIS 500
+#endif
+
+#if CONFIG_BRIDGE_QN_TRACE
+#define QN_TRACE true
+#else
+#define QN_TRACE false
+#endif
+
+#if CONFIG_BRIDGE_TEF_PATCH_V102
+#define TEF_PATCH TEF6686_PATCH_V102
+#elif CONFIG_BRIDGE_TEF_PATCH_V205
+#define TEF_PATCH TEF6686_PATCH_V205
+#else
+#define TEF_PATCH TEF6686_PATCH_AUTO
+#endif
+
+static esp_err_t init_nvs(void)
+{
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "NVS layout changed, erasing");
+        ESP_RETURN_ON_ERROR(nvs_flash_erase(), TAG, "nvs erase");
+        err = nvs_flash_init();
+    }
+    return err;
+}
+
+static esp_err_t new_bus(int sda, int scl, i2c_master_bus_handle_t *bus)
+{
+    const i2c_master_bus_config_t cfg = {
+        .i2c_port = TEF_I2C_PORT,
+        .sda_io_num = sda,
+        .scl_io_num = scl,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        /* ~45 kOhm only: fit 2.2-4.7 kOhm to 3V3 if the module has none. */
+        .flags.enable_internal_pullup = true,
+    };
+    return i2c_new_master_bus(&cfg, bus);
+}
+
+/* Create the tuner bus; with AUTOSWAP, also try SDA/SCL exchanged. The bus
+ * is returned even if nothing answers: the radio task keeps retrying. */
+static esp_err_t init_tef_bus(i2c_master_bus_handle_t *bus)
+{
+    int sda = CONFIG_BRIDGE_TEF_I2C_SDA_GPIO;
+    int scl = CONFIG_BRIDGE_TEF_I2C_SCL_GPIO;
+
+    ESP_RETURN_ON_ERROR(new_bus(sda, scl, bus), TAG, "i2c bus");
+    esp_err_t err = i2c_master_probe(*bus, TEF6686_I2C_ADDR_DEFAULT, PROBE_TIMEOUT_MS);
+#if CONFIG_BRIDGE_TEF_I2C_AUTOSWAP
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "no tuner on SDA=%d SCL=%d (%s), trying swapped pins", sda, scl,
+                 esp_err_to_name(err));
+        ESP_RETURN_ON_ERROR(i2c_del_master_bus(*bus), TAG, "del bus");
+        ESP_RETURN_ON_ERROR(new_bus(scl, sda, bus), TAG, "i2c bus (swapped)");
+        err = i2c_master_probe(*bus, TEF6686_I2C_ADDR_DEFAULT, PROBE_TIMEOUT_MS);
+        if (err == ESP_OK) {
+            ESP_LOGW(TAG, "tuner found with SDA=%d SCL=%d: fix the pins in menuconfig", scl, sda);
+            return ESP_OK;
+        }
+        ESP_RETURN_ON_ERROR(i2c_del_master_bus(*bus), TAG, "del bus");
+        ESP_RETURN_ON_ERROR(new_bus(sda, scl, bus), TAG, "i2c bus");
+    }
+#endif
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "tuner ACKs 0x%02x on SDA=%d SCL=%d", TEF6686_I2C_ADDR_DEFAULT, sda, scl);
+    } else {
+        ESP_LOGE(TAG, "no ACK from 0x%02x: check power, wiring and pull-ups; will keep retrying",
+                 TEF6686_I2C_ADDR_DEFAULT);
+    }
+    return ESP_OK;
+}
+
+void app_main(void)
+{
+    /* First, so the web console also shows the boot messages. */
+    ESP_ERROR_CHECK(log_stream_init(CONFIG_BRIDGE_LOG_RING_SIZE));
+
+    const esp_app_desc_t *app = esp_app_get_description();
+    ESP_LOGI(TAG, "%s %s (ESP-IDF %s), reset reason %d", app->project_name, app->version,
+             app->idf_ver, (int)esp_reset_reason());
+
+    ESP_ERROR_CHECK(init_nvs());
+
+    i2c_master_bus_handle_t tef_bus;
+    ESP_ERROR_CHECK(init_tef_bus(&tef_bus));
+
+    const radio_config_t radio_cfg = {
+        .tef = {
+            .bus = tef_bus,
+            .address = TEF6686_I2C_ADDR_DEFAULT,
+            .scl_speed_hz = CONFIG_BRIDGE_TEF_I2C_FREQ_HZ,
+            .ref_clock_hz = TEF_REFCLK_HZ,
+            .ref_clock_type = TEF_REFCLK_HZ == 55466670 ? TEF6686_REFCLK_EXTERNAL
+                                                         : TEF6686_REFCLK_CRYSTAL,
+            .patch = TEF_PATCH,
+        },
+        .fm_min_khz = CONFIG_BRIDGE_FM_MIN_KHZ,
+        .fm_max_khz = CONFIG_BRIDGE_FM_MAX_KHZ,
+        .fm_step_khz = CONFIG_BRIDGE_FM_STEP_KHZ,
+        .am_step_khz = CONFIG_BRIDGE_AM_STEP_KHZ,
+        .initial_khz = CONFIG_BRIDGE_FM_DEFAULT_KHZ,
+        .initial_volume = CONFIG_BRIDGE_DEFAULT_VOLUME_DB * 10,
+        .fm_deemphasis = FM_DEEMPHASIS,
+        .seek = {
+            .min_level = CONFIG_BRIDGE_SEEK_MIN_LEVEL_DBUV * 10,
+            .max_usn = CONFIG_BRIDGE_SEEK_MAX_USN_PCT * 10,
+            .max_wam = CONFIG_BRIDGE_SEEK_MAX_WAM_PCT * 10,
+            .max_offset = CONFIG_BRIDGE_SEEK_MAX_OFFSET_KHZ * 10,
+        },
+    };
+
+#if CONFIG_BRIDGE_QN_EMU_ENABLE
+    ESP_ERROR_CHECK(qn_bridge_init());
+#endif
+    ESP_ERROR_CHECK(radio_start(&radio_cfg));
+
+#if CONFIG_BRIDGE_QN_EMU_ENABLE
+    /* Before Wi-Fi: the head unit may probe the chip only once at its boot. */
+    const qn8035_slave_config_t qn_cfg = {
+        .i2c_port = QN_I2C_PORT,
+        .sda_gpio = CONFIG_BRIDGE_QN_I2C_SDA_GPIO,
+        .scl_gpio = CONFIG_BRIDGE_QN_I2C_SCL_GPIO,
+        .int_gpio = CONFIG_BRIDGE_QN_INT_GPIO,
+        .address = QN8035_I2C_ADDR,
+        .trace = QN_TRACE,
+    };
+    ESP_ERROR_CHECK(qn_bridge_start(&qn_cfg));
+#else
+    ESP_LOGI(TAG, "QN8035 emulation disabled (menuconfig: QN8035 emulation)");
+#endif
+
+    const net_wifi_config_t wifi_cfg = {
+        .ap_ssid = CONFIG_BRIDGE_WIFI_AP_SSID,
+        .ap_password = CONFIG_BRIDGE_WIFI_AP_PASSWORD,
+        .ap_channel = CONFIG_BRIDGE_WIFI_AP_CHANNEL,
+        .sta_ssid = CONFIG_BRIDGE_WIFI_STA_SSID,
+        .sta_password = CONFIG_BRIDGE_WIFI_STA_PASSWORD,
+    };
+    ESP_ERROR_CHECK(net_wifi_start(&wifi_cfg));
+    ESP_ERROR_CHECK(web_ui_start());
+}

@@ -1,0 +1,185 @@
+menu "QN8035 -> TEF6686 bridge"
+
+    menu "TEF6686 tuner (I2C master)"
+        config BRIDGE_TEF_I2C_SDA_GPIO
+            int "SDA GPIO"
+            range 0 46
+            default 16
+
+        config BRIDGE_TEF_I2C_SCL_GPIO
+            int "SCL GPIO"
+            range 0 46
+            default 17
+
+        config BRIDGE_TEF_I2C_AUTOSWAP
+            bool "Try swapped SDA/SCL if the tuner does not answer"
+            default y
+            help
+                Bring-up aid: if nothing ACKs the tuner address with the
+                configured pins, retry with SDA and SCL exchanged and log
+                which order worked. Disable once the wiring is known.
+
+        config BRIDGE_TEF_I2C_FREQ_HZ
+            int "I2C clock (Hz)"
+            range 10000 400000
+            default 400000
+
+        choice BRIDGE_TEF_REFCLK
+            prompt "Reference clock"
+            default BRIDGE_TEF_REFCLK_12M
+            help
+                Must match the crystal (or clock) on the TEF6686 module.
+                Read the marking on the crystal next to the chip. If it is
+                shielded: a wrong value still tunes, but stations sit off the
+                broadcast grid and neither the stereo pilot nor RDS locks,
+                even at a strong level. Try each value on a known station.
+
+            config BRIDGE_TEF_REFCLK_4M
+                bool "4.000 MHz crystal"
+            config BRIDGE_TEF_REFCLK_9M216
+                bool "9.216 MHz crystal"
+            config BRIDGE_TEF_REFCLK_12M
+                bool "12.000 MHz crystal"
+            config BRIDGE_TEF_REFCLK_55M
+                bool "55.46667 MHz external clock"
+        endchoice
+
+        choice BRIDGE_TEF_PATCH
+            prompt "Firmware patch"
+            default BRIDGE_TEF_PATCH_AUTO
+
+            config BRIDGE_TEF_PATCH_AUTO
+                bool "Auto (load V102, switch to V205 if identified)"
+            config BRIDGE_TEF_PATCH_V102
+                bool "V102 p2.24"
+            config BRIDGE_TEF_PATCH_V205
+                bool "V205 p5.12"
+        endchoice
+    endmenu
+
+    menu "Radio"
+        config BRIDGE_FM_MIN_KHZ
+            int "FM band start (kHz)"
+            range 65000 108000
+            default 87500
+
+        config BRIDGE_FM_MAX_KHZ
+            int "FM band end (kHz)"
+            range 65000 108000
+            default 108000
+
+        config BRIDGE_FM_STEP_KHZ
+            int "FM step (kHz)"
+            range 10 200
+            default 100
+
+        config BRIDGE_FM_DEFAULT_KHZ
+            int "FM frequency after power-up (kHz)"
+            range 65000 108000
+            default 87500
+
+        choice BRIDGE_FM_DEEMPHASIS
+            prompt "FM de-emphasis"
+            default BRIDGE_FM_DEEMPHASIS_50
+            config BRIDGE_FM_DEEMPHASIS_50
+                bool "50 us (Europe, Asia)"
+            config BRIDGE_FM_DEEMPHASIS_75
+                bool "75 us (Americas)"
+        endchoice
+
+        config BRIDGE_AM_STEP_KHZ
+            int "MW step (kHz)"
+            range 1 10
+            default 9
+
+        config BRIDGE_DEFAULT_VOLUME_DB
+            int "Volume after power-up (dB)"
+            range -60 24
+            default 0
+
+        config BRIDGE_SEEK_MIN_LEVEL_DBUV
+            int "Seek: minimum level (dBuV)"
+            range 0 100
+            default 25
+
+        config BRIDGE_SEEK_MAX_USN_PCT
+            int "Seek: maximum USN (ultrasonic noise, %)"
+            range 0 100
+            default 20
+
+        config BRIDGE_SEEK_MAX_WAM_PCT
+            int "Seek: maximum WAM (multipath, %)"
+            range 0 100
+            default 20
+
+        config BRIDGE_SEEK_MAX_OFFSET_KHZ
+            int "Seek: maximum frequency offset (kHz)"
+            range 1 50
+            default 2
+    endmenu
+
+    menu "QN8035 emulation (I2C slave to the head unit)"
+        config BRIDGE_QN_EMU_ENABLE
+            bool "Emulate a QN8035 towards the head unit"
+            default n
+            help
+                Leave disabled until the head-unit bus is wired and its
+                voltage level is checked. With it disabled the firmware is
+                a stand-alone TEF6686 test bench.
+
+        config BRIDGE_QN_I2C_SDA_GPIO
+            int "SDA GPIO"
+            depends on BRIDGE_QN_EMU_ENABLE
+            range 0 46
+            default 33
+
+        config BRIDGE_QN_I2C_SCL_GPIO
+            int "SCL GPIO"
+            depends on BRIDGE_QN_EMU_ENABLE
+            range 0 46
+            default 35
+
+        config BRIDGE_QN_INT_GPIO
+            int "INT output GPIO (-1 = not connected)"
+            depends on BRIDGE_QN_EMU_ENABLE
+            range -1 46
+            default -1
+
+        config BRIDGE_QN_TRACE
+            bool "Log every head-unit bus transaction"
+            depends on BRIDGE_QN_EMU_ENABLE
+            default y
+            help
+                Sniffer mode for bring-up: each register read/write from the
+                head unit appears in the log (serial and web console).
+    endmenu
+
+    menu "Wi-Fi and web UI"
+        config BRIDGE_WIFI_AP_SSID
+            string "Access point SSID"
+            default "TEF-Bridge"
+
+        config BRIDGE_WIFI_AP_PASSWORD
+            string "Access point password (8+ characters, empty = open)"
+            default "tef6686bridge"
+
+        config BRIDGE_WIFI_AP_CHANNEL
+            int "Access point channel"
+            range 1 13
+            default 6
+
+        config BRIDGE_WIFI_STA_SSID
+            string "Also join this network (empty = AP only)"
+            default ""
+
+        config BRIDGE_WIFI_STA_PASSWORD
+            string "Station password"
+            default ""
+
+        config BRIDGE_LOG_RING_SIZE
+            int "Web console history (bytes)"
+            range 1024 65536
+            default 8192
+    endmenu
+
+endmenu
