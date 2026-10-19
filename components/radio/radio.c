@@ -325,10 +325,22 @@ static void publish_af(void)
     unlock();
 }
 
-/* New station: forget its AFs and PI. */
-static void af_restart(void)
+/* Another station: its AFs, bans, counters and tries are not this one's. An AF switch keeps
+ * them (same programme). */
+static void af_new_station(void)
 {
     af_reset(&s.af.st, now_ms());
+    s.af.switches = 0;
+    s.af.pi_fails = 0;
+    lock();
+    s.status.af.ev_n = 0;
+    unlock();
+}
+
+/* Tuned: forget the AF state and the PI. */
+static void af_restart(void)
+{
+    af_new_station();
     s.af.pi_known = false;
     s.af.verifying = false;
     publish_af();
@@ -342,7 +354,7 @@ static void af_follow_rds(void)
         return;
     }
     if (s.af.pi_known && r->pi != s.af.pi) {
-        af_reset(&s.af.st, now_ms()); /* another station: its AFs are other ones */
+        af_new_station(); /* the decoder confirmed another PI */
     }
     s.af.pi = r->pi;
     s.af.pi_known = true;

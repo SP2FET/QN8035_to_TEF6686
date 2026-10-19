@@ -78,8 +78,10 @@ typedef struct {
     bool poor;          /**< smoothed score below the trigger: AFs are being measured */
     bool checking_pi;   /**< sitting (muted) on a candidate until its PI answers */
     int16_t score;      /**< smoothed score of the tuned station, 0.1 dB, AF_SCORE_NONE if none */
-    uint32_t switches;  /**< since boot */
-    uint32_t pi_fails;  /**< candidates rejected by the PI check since boot */
+    /** Since the station was tuned (a tune, seek or PI change resets them and the tries below;
+     * an AF switch does not). */
+    uint32_t switches;
+    uint32_t pi_fails;  /**< candidates rejected by the PI check */
     uint32_t now_ms;    /**< clock of the entries' times */
     uint8_t n;
     af_entry_t e[AF_MAX];
