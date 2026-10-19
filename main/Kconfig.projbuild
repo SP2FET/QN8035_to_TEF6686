@@ -115,7 +115,12 @@ menu "QN8035 -> TEF6686 bridge"
         config BRIDGE_SEEK_MAX_OFFSET_KHZ
             int "Seek: maximum frequency offset (kHz)"
             range 1 50
-            default 2
+            default 8
+            help
+                Crystal tolerance alone shifts every station by a few kHz (20 ppm is
+                2 kHz at 100 MHz); the seek averages out the swing caused by programme
+                audio. A channel next to a strong station reads 20 kHz or more, so
+                8 kHz still rejects it.
     endmenu
 
     menu "QN8035 emulation (I2C slave to the head unit)"

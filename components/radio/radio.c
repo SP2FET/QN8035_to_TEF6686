@@ -25,10 +25,21 @@ static const char *TAG = "radio";
 #define REBOOT_RETRY_MS     5000
 #define MAX_IO_ERRORS       5
 
-/* Seek: wait for >= 10 ms of quality data after each search step. */
-#define SEEK_MIN_QUALITY_AGE   100 /* 0.1 ms units; 1000 means >32 ms */
-#define SEEK_MEASURE_TIMEOUT_MS 60
-#define SEEK_POLL_MS           5
+/* Seek: judge a channel only on settled quality. A Search tuning settles in ~32 ms on FM
+ * and ~60 ms on AM (UM V102 §3.1.1); earlier data is of time-stamp-dependent reliability
+ * (§4.1), and USN/WAM sampled at 10 ms made the seek skip stations at random. */
+#define SEEK_SETTLED_QUALITY_AGE 320 /* 0.1 ms units; the chip reports 1000 beyond 32 ms */
+#define SEEK_AM_SETTLE_MS        70  /* 60 ms + the 10 ms mute slope of the first step */
+#define SEEK_MEASURE_TIMEOUT_MS  150
+#define SEEK_POLL_MS             5
+/* Programme audio moves a single offset reading by several kHz (a clean 70 dBuV station read
+ * 8.7 kHz where others read 2-3), so offset is judged on a mean over ~45 ms. */
+#define SEEK_OFFSET_SAMPLES      10
+
+#define SEEK_FAIL_LEVEL  (1u << 0)
+#define SEEK_FAIL_USN    (1u << 1)
+#define SEEK_FAIL_WAM    (1u << 2)
+#define SEEK_FAIL_OFFSET (1u << 3)
 /* AM seek limits, fixed until there is a reason to expose them. */
 #define AM_SEEK_MIN_LEVEL   350 /* 35 dBuV */
 #define AM_SEEK_MAX_OFFSET  20  /* 2 kHz */
@@ -81,6 +92,9 @@ typedef struct {
     uint32_t origin, cur, stop, step, min, max;
     uint32_t steps_left;
     TickType_t t_tuned;
+    unsigned samples;          /* settled samples taken on cur */
+    int32_t offset_sum;        /* 0.1 kHz */
+    tef6686_quality_t first;   /* first settled sample on cur */
 } seek_t;
 
 typedef struct {
@@ -269,14 +283,38 @@ static void seek_finish(bool found)
     tune_to(s.status.band, khz, !k->wrap, found);
 }
 
-static bool is_station(const tef6686_quality_t *q)
+/* SEEK_FAIL_* limits missed; offset (0.1 kHz) comes separately because it is averaged. */
+static unsigned seek_failures(const tef6686_quality_t *q, int offset)
 {
     const radio_seek_criteria_t *c = &s.cfg.seek;
+    unsigned fail = 0;
     if (s.status.band == RADIO_BAND_AM) {
-        return q->level >= AM_SEEK_MIN_LEVEL && abs(q->offset) <= AM_SEEK_MAX_OFFSET;
+        fail |= q->level < AM_SEEK_MIN_LEVEL ? SEEK_FAIL_LEVEL : 0;
+        fail |= abs(offset) > AM_SEEK_MAX_OFFSET ? SEEK_FAIL_OFFSET : 0;
+        return fail;
     }
-    return q->level >= c->min_level && q->usn <= c->max_usn && q->wam <= c->max_wam &&
-           abs(q->offset) <= c->max_offset;
+    fail |= q->level < c->min_level ? SEEK_FAIL_LEVEL : 0;
+    fail |= q->usn > c->max_usn ? SEEK_FAIL_USN : 0;
+    fail |= q->wam > c->max_wam ? SEEK_FAIL_WAM : 0;
+    fail |= abs(offset) > c->max_offset ? SEEK_FAIL_OFFSET : 0;
+    return fail;
+}
+
+static void seek_conclude(unsigned fail, int offset)
+{
+    seek_t *k = &s.seek;
+    k->measuring = false;
+    /* Every channel above the level limit is logged: shows which limit a missed station failed. */
+    if (!(fail & SEEK_FAIL_LEVEL)) {
+        ESP_LOGI(TAG, "seek %lu kHz: %s%s%s%s, level %d usn %u wam %u offset %d (0.1 units)",
+                 (unsigned long)k->cur, fail ? "rejected:" : "station",
+                 (fail & SEEK_FAIL_USN) ? " usn" : "", (fail & SEEK_FAIL_WAM) ? " wam" : "",
+                 (fail & SEEK_FAIL_OFFSET) ? " offset" : "", k->first.level, k->first.usn,
+                 k->first.wam, offset);
+    }
+    if (!fail) {
+        seek_finish(true);
+    }
 }
 
 static void seek_poll(void)
@@ -307,6 +345,8 @@ static void seek_poll(void)
         }
         k->measuring = true;
         k->t_tuned = now;
+        k->samples = 0;
+        k->offset_sum = 0;
         lock();
         s.status.freq_khz = k->cur; /* lets the UI follow the seek */
         unlock();
@@ -317,16 +357,35 @@ static void seek_poll(void)
     if (!io_ok(tef6686_get_quality(s.tef, (tef6686_band_t)s.status.band, &q), "seek quality")) {
         return;
     }
-    const bool timed_out = reached(now, k->t_tuned + pdMS_TO_TICKS(SEEK_MEASURE_TIMEOUT_MS));
-    if (tef6686_quality_age(&q) < SEEK_MIN_QUALITY_AGE && !timed_out) {
-        return; /* quality not settled yet */
+    const uint16_t age = tef6686_quality_age(&q);
+    bool settled = age >= SEEK_SETTLED_QUALITY_AGE;
+    if (s.status.band == RADIO_BAND_AM) {
+        settled = settled && reached(now, k->t_tuned + pdMS_TO_TICKS(SEEK_AM_SETTLE_MS));
     }
-    k->measuring = false;
-    ESP_LOGD(TAG, "seek %lu kHz: level %d usn %u wam %u offset %d", (unsigned long)k->cur, q.level,
-             q.usn, q.wam, q.offset);
-    if (is_station(&q)) {
-        seek_finish(true);
+    if (!settled) {
+        if (reached(now, k->t_tuned + pdMS_TO_TICKS(SEEK_MEASURE_TIMEOUT_MS))) {
+            /* Unsettled data is not evidence either way: skip the channel. */
+            ESP_LOGW(TAG, "seek %lu kHz: quality not settled (time stamp %u), skipped",
+                     (unsigned long)k->cur, age);
+            k->measuring = false;
+        }
+        return;
     }
+    if (k->samples == 0) {
+        k->first = q;
+        /* Level and noise are steady once settled: empty channels fail here at no extra cost. */
+        const unsigned fail = seek_failures(&q, 0);
+        if (fail) {
+            seek_conclude(fail, q.offset);
+            return;
+        }
+    }
+    k->offset_sum += q.offset;
+    if (++k->samples < SEEK_OFFSET_SAMPLES) {
+        return;
+    }
+    const int offset = (int)(k->offset_sum / (int32_t)k->samples);
+    seek_conclude(seek_failures(&k->first, offset), offset);
 }
 
 /* ---- polling ------------------------------------------------------------- */
