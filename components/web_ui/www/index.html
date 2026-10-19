@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TEF6686 Bridge</title>
+<style>
+:root{--bg:#0d1117;--card:#161b22;--bd:#30363d;--fg:#e6edf3;--dim:#8b949e;--ac:#2f81f7;--ok:#3fb950;--er:#f85149;--wa:#d29922}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,sans-serif}
+header{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;padding:10px 12px;background:var(--card);border-bottom:1px solid var(--bd)}
+h1{font-size:1.2rem;margin:0;flex:1 1 auto}
+h2{font-size:.85rem;margin:0 0 8px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+main{display:grid;gap:10px;padding:10px;grid-template-columns:1fr;max-width:1200px;margin:auto}
+@media(min-width:900px){main{grid-template-columns:1fr 1fr}.wide{grid-column:1/-1}}
+section{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:12px;min-width:0}
+.dot{display:inline-block;width:12px;height:12px;border-radius:50%;background:var(--er);margin-right:4px;vertical-align:middle}
+.dot.on{background:var(--ok)}
+.hs{font-size:.85rem;color:var(--dim)}
+button,select,input[type=text]{min-height:44px;font:inherit;color:var(--fg);background:#21262d;border:1px solid var(--bd);border-radius:6px;padding:0 12px}
+button{cursor:pointer;min-width:44px}
+button:active{background:#30363d}
+button.hl{background:var(--wa);color:#000;border-color:var(--wa)}
+button.sel{background:var(--ac);border-color:var(--ac);color:#fff}
+button.danger{background:var(--er);color:#fff;border-color:var(--er)}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}
+.row>label{color:var(--dim)}
+.freq{font-size:2.6rem;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
+.badge{display:inline-block;padding:2px 10px;border-radius:12px;border:1px solid var(--bd);color:var(--dim);font-size:.85rem;font-weight:600}
+.badge.on{background:var(--ok);border-color:var(--ok);color:#000}
+.badge.warn.on{background:var(--wa);border-color:var(--wa)}
+input[type=range]{flex:1 1 160px;min-height:44px;accent-color:var(--ac)}
+input[type=text]{width:9em}
+dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:0}
+dt{color:var(--dim)}dd{margin:0;word-break:break-word}
+.bar{height:14px;background:#21262d;border-radius:7px;overflow:hidden;margin:2px 0 8px}
+.bar>i{display:block;height:100%;width:0;background:var(--ac)}
+.mono{font-family:ui-monospace,Consolas,monospace}
+#ps{font-size:1.8rem;white-space:pre;min-height:1.4em}
+#rt{white-space:pre-wrap;overflow-wrap:anywhere;min-height:1.4em}
+.err{color:var(--er)}
+#toast{position:fixed;left:10px;right:10px;bottom:10px;padding:10px 14px;background:var(--er);color:#fff;border-radius:6px;display:none;z-index:9}
+#toast.show{display:block}
+#log{height:320px;overflow:auto;background:#010409;border:1px solid var(--bd);border-radius:6px;padding:6px;font:12px/1.35 ui-monospace,Consolas,monospace}
+#log div{white-space:pre-wrap;overflow-wrap:anywhere}
+.lE{color:var(--er)}.lW{color:var(--wa)}.lD{color:var(--dim)}
+</style>
+</head>
+<body>
+<header>
+<h1>TEF6686 Bridge</h1>
+<span class="hs"><i class="dot" id="dws"></i>WS <i class="dot" id="dhttp"></i>HTTP</span>
+<span class="hs">Up <span id="up">—</span></span>
+<span class="hs">Heap <span id="heap">—</span></span>
+</header>
+<main>
+<section aria-labelledby="h-t">
+<h2 id="h-t">Tuner</h2>
+<div class="freq" id="freq">—</div>
+<div class="row"><span class="badge" id="st">ST</span><span class="badge warn" id="mb">MUTE</span></div>
+<div class="row" role="group" aria-label="Band">
+<button id="bFM">FM</button><button id="bAM">AM</button>
+</div>
+<div class="row">
+<label for="fin" id="flab">MHz</label><input type="text" id="fin" inputmode="decimal" autocomplete="off">
+<button id="tune">Tune</button>
+</div>
+<div class="row">
+<button id="sd" aria-label="Step down">&#9664;</button><button id="su" aria-label="Step up">&#9654;</button>
+<button id="kd" aria-label="Seek down">&#9664;&#9664;</button><button id="ku" aria-label="Seek up">&#9654;&#9654;</button>
+<button id="ks">Stop</button>
+</div>
+</section>
+
+<section aria-labelledby="h-a">
+<h2 id="h-a">Audio</h2>
+<div class="row"><label for="vol">Volume</label><input type="range" id="vol" min="-60" max="24" step="0.5" value="-10"><span id="volv" class="mono">—</span></div>
+<div class="row"><button id="mute">Mute</button></div>
+<div class="row"><label for="bw">Bandwidth</label><select id="bw"></select></div>
+</section>
+
+<section aria-labelledby="h-s">
+<h2 id="h-s">Signal</h2>
+<dl>
+<dt>Level</dt><dd><span id="lvl">—</span><div class="bar"><i id="lvlb"></i></div></dd>
+<dt id="t1">USN</dt><dd id="usn">—</dd>
+<dt id="t2">WAM</dt><dd id="wam">—</dd>
+<dt>Offset</dt><dd id="off">—</dd>
+<dt>Bandwidth</dt><dd id="qbw">—</dd>
+<dt>Modulation</dt><dd><span id="mod">—</span><div class="bar"><i id="modb"></i></div></dd>
+<dt>Valid</dt><dd><span class="badge" id="qv">—</span></dd>
+</dl>
+</section>
+
+<section aria-labelledby="h-r">
+<h2 id="h-r">RDS</h2>
+<div class="row"><span class="badge" id="rsync">SYNC</span><span class="mono">PI <span id="pi">—</span></span></div>
+<div class="mono" id="ps">—</div>
+<div class="mono" id="rt">—</div>
+<div class="hs">Groups <span id="rg">—</span> / Errors <span id="re">—</span></div>
+</section>
+
+<section class="wide" aria-labelledby="h-d">
+<h2 id="h-d">Device</h2>
+<dl>
+<dt>TEF</dt><dd id="tstate">—</dd>
+<dt>Variant</dt><dd id="tvar">—</dd>
+<dt>Device/HW/SW</dt><dd id="tid">—</dd>
+<dt>Patch</dt><dd id="tpatch">—</dd>
+<dt>Error</dt><dd id="terr">—</dd>
+<dt>QN8035</dt><dd id="qn">—</dd>
+</dl>
+<div class="row"><button id="reinit">Re-init</button></div>
+</section>
+
+<section class="wide" aria-labelledby="h-l">
+<h2 id="h-l">Log</h2>
+<div class="row">
+<button id="lpause">Pause</button><button id="lauto" class="sel">Autoscroll</button><button id="lclear">Clear</button>
+<label for="lfilt" class="hs">Filter</label><input type="text" id="lfilt" autocomplete="off">
+<span class="hs" id="lcnt">0 lines</span>
+</div>
+<div id="log" role="log" tabindex="0"></div>
+</section>
+</main>
+<div id="toast" role="status" aria-live="polite"></div>
+<script>
+(function(){
+'use strict';
+const $=id=>document.getElementById(id);
+const FM_BW=[56,64,72,84,97,114,133,151,168,184,200,217,236,254,287,311],AM_BW=[3,4,6,8];
+const DEF={FM:87500,AM:999},MAXLINES=2000;
+let band='FM',bwBand=null,st=null,volDrag=false,volTimer=0,pending=false,toastTimer=0,reTimer=0;
+let last=Object.assign({},DEF);
+try{Object.assign(last,JSON.parse(localStorage.getItem('tef.last')||'{}'))}catch(e){}
+
+const num=(v,d,u)=>typeof v==='number'?v.toFixed(d)+(u||''):'—';
+const hex=v=>typeof v==='number'?'0x'+v.toString(16).toUpperCase().padStart(4,'0'):'—';
+const txt=(id,v)=>{$(id).textContent=v==null||v===''?'—':v};
+const on=(id,f)=>$(id).classList.toggle('on',!!f);
+const pct=(v,max)=>Math.max(0,Math.min(100,(v||0)/max*100))+'%';
+
+function toast(m){
+  const t=$('toast');t.textContent=m;t.classList.add('show');
+  clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove('show'),4000);
+}
+
+// ---- HTTP ----
+async function poll(){
+  if(pending)return;
+  pending=true;
+  const ac=new AbortController(),to=setTimeout(()=>ac.abort(),1500);
+  try{
+    const r=await fetch('/api/status',{signal:ac.signal,cache:'no-store'});
+    st=await r.json();on('dhttp',true);render(st);
+  }catch(e){on('dhttp',false)}
+  finally{clearTimeout(to);pending=false}
+}
+async function cmd(path,params){
+  const q=params?'?'+new URLSearchParams(params):'';
+  try{
+    const r=await fetch('/api/'+path+q,{method:'POST'});
+    const j=await r.json().catch(()=>({ok:false,err:'HTTP '+r.status}));
+    if(!j.ok)toast(j.err||'Command failed');
+  }catch(e){toast('Request failed')}
+  poll();
+}
+
+// ---- Render ----
+function fillBw(b){
+  if(bwBand===b)return;
+  bwBand=b;
+  const s=$('bw');s.textContent='';
+  const add=(v,l)=>{const o=document.createElement('option');o.value=v;o.textContent=l;s.appendChild(o)};
+  if(b==='FM')add(0,'Auto');
+  (b==='FM'?FM_BW:AM_BW).forEach(v=>add(v,v+' kHz'));
+}
+function render(s){
+  const tef=s.tef||{},q=s.q||{},rds=s.rds||{},qn=s.qn||{};
+  if(s.band==='FM'||s.band==='AM'){
+    band=s.band;
+    if(typeof s.freq_khz==='number'&&last[band]!==s.freq_khz){
+      last[band]=s.freq_khz;
+      try{localStorage.setItem('tef.last',JSON.stringify(last))}catch(e){}
+    }
+  }
+  const am=band==='AM',f=s.freq_khz;
+  txt('up',typeof s.uptime_s==='number'?fmtUp(s.uptime_s):null);
+  txt('heap',typeof s.heap_free==='number'?(s.heap_free/1024).toFixed(0)+' KB':null);
+  $('freq').textContent=typeof f!=='number'?'—':am?f+' kHz':(f/1000).toFixed(2)+' MHz';
+  $('bFM').classList.toggle('sel',!am);$('bAM').classList.toggle('sel',am);
+  $('flab').textContent=am?'kHz':'MHz';
+  $('ks').classList.toggle('hl',!!s.seeking);
+  on('st',q.stereo);on('mb',s.mute);
+  $('mute').textContent=s.mute?'Unmute':'Mute';
+  $('mute').classList.toggle('sel',!!s.mute);
+  if(!volDrag&&typeof s.volume_db==='number'){$('vol').value=s.volume_db;txt('volv',s.volume_db.toFixed(1)+' dB')}
+  fillBw(band);
+  const sel=$('bw');
+  if(document.activeElement!==sel){
+    const v=s.bw_auto&&!am?0:Math.round(s.bw_khz);
+    if([...sel.options].some(o=>+o.value===v))sel.value=v;
+  }
+  txt('lvl',num(q.level,1,' dBµV'));$('lvlb').style.width=pct(q.level,80);
+  txt('t1',am?'Noise':'USN');txt('t2',am?'':'WAM');
+  $('t2').style.display=$('wam').style.display=am?'none':'';
+  txt('usn',num(am?q.noise:q.usn,1,' %'));txt('wam',num(q.wam,1,' %'));
+  txt('off',num(q.offset,1,' kHz'));txt('qbw',num(q.bw,1,' kHz'));
+  txt('mod',num(q.mod,1,' %'));$('modb').style.width=pct(q.mod,120);
+  const qv=$('qv');qv.textContent=q.valid?'valid':q.valid===false?'invalid':'—';qv.classList.toggle('on',!!q.valid);
+  on('rsync',rds.sync);txt('pi',rds.pi);
+  txt('ps',rds.ps);txt('rt',rds.rt);txt('rg',rds.groups);txt('re',rds.errors);
+  txt('tstate',(tef.ready?'ready':'not ready')+' / '+(tef.state||'—')+' / op '+(tef.op_status==null?'—':tef.op_status));
+  txt('tvar',tef.variant);txt('tid',[tef.device,tef.hw,tef.sw].map(hex).join(' / '));
+  txt('tpatch',tef.patch);
+  const te=$('terr');te.textContent=tef.error||'—';te.classList.toggle('err',!!tef.error);
+  txt('qn',s.qn?(qn.enabled?'on':'off')+', writes '+qn.writes+', reads '+qn.reads+', last '+(qn.last||'—'):null);
+}
+function fmtUp(t){
+  const d=Math.floor(t/86400),h=Math.floor(t%86400/3600),m=Math.floor(t%3600/60);
+  return (d?d+'d ':'')+h+'h '+m+'m '+t%60+'s';
+}
+
+// ---- Controls ----
+function tuneTo(b,khz){
+  const lim=b==='FM'?[65000,108000]:[144,27000];
+  if(!(khz>=lim[0]&&khz<=lim[1]))return toast('Out of range: '+b+' '+lim[0]+'..'+lim[1]+' kHz');
+  cmd('tune',{band:b,khz:Math.round(khz)});
+}
+function tuneInput(){
+  const v=parseFloat($('fin').value.replace(',','.'));
+  if(isNaN(v))return toast('Enter a frequency');
+  tuneTo(band,band==='FM'?v*1000:v);
+}
+function setBand(b){tuneTo(b,last[b]||DEF[b])}
+$('bFM').onclick=()=>setBand('FM');
+$('bAM').onclick=()=>setBand('AM');
+$('tune').onclick=tuneInput;
+$('fin').onkeydown=e=>{if(e.key==='Enter')tuneInput()};
+$('sd').onclick=()=>cmd('step',{dir:'down'});
+$('su').onclick=()=>cmd('step',{dir:'up'});
+$('kd').onclick=()=>cmd('seek',{dir:'down'});
+$('ku').onclick=()=>cmd('seek',{dir:'up'});
+$('ks').onclick=()=>cmd('seek',{dir:'stop'});
+$('mute').onclick=()=>cmd('mute',{on:st&&st.mute?0:1});
+$('bw').onchange=e=>{cmd('bandwidth',{khz:e.target.value});e.target.blur()};
+const sendVol=()=>cmd('volume',{db:$('vol').value});
+$('vol').oninput=()=>{
+  volDrag=true;txt('volv',(+$('vol').value).toFixed(1)+' dB');
+  clearTimeout(volTimer);volTimer=setTimeout(sendVol,150);
+};
+$('vol').onchange=()=>{clearTimeout(volTimer);sendVol();volDrag=false};
+$('reinit').onclick=()=>{
+  const b=$('reinit');
+  if(reTimer){clearTimeout(reTimer);reTimer=0;b.textContent='Re-init';b.classList.remove('danger');cmd('reinit');return}
+  b.textContent='Confirm?';b.classList.add('danger');
+  reTimer=setTimeout(()=>{reTimer=0;b.textContent='Re-init';b.classList.remove('danger')},3000);
+};
+
+// ---- Log ----
+const log=$('log');
+let queue=[],partial='',paused=false,auto=true,raf=0,filt='';
+const ANSI=/\x1b\[[0-9;]*m/g;
+const lineCls=l=>l.startsWith('E (')?'lE':l.startsWith('W (')?'lW':/^[DV] \(/.test(l)?'lD':'';
+const shown=l=>!filt||l.toLowerCase().includes(filt);
+function count(){$('lcnt').textContent=log.childElementCount+' lines'+(paused&&queue.length?' (+'+queue.length+' paused)':'')}
+function flush(){
+  raf=0;
+  if(paused||!queue.length)return;
+  const frag=document.createDocumentFragment();
+  for(const l of queue){
+    const d=document.createElement('div');d.textContent=l;
+    const c=lineCls(l);if(c)d.className=c;
+    if(!shown(l))d.hidden=true;
+    frag.appendChild(d);
+  }
+  queue=[];
+  log.appendChild(frag);
+  while(log.childElementCount>MAXLINES)log.removeChild(log.firstChild);
+  if(auto)log.scrollTop=log.scrollHeight;
+  count();
+}
+function sched(){if(!raf)raf=requestAnimationFrame(flush)}
+function addText(t){
+  const parts=(partial+t.replace(ANSI,'')).split('\n');
+  partial=parts.pop();
+  for(const p of parts)queue.push(p.replace(/\r$/,''));
+  if(parts.length)sched();
+}
+$('lpause').onclick=e=>{
+  paused=!paused;e.target.textContent=paused?'Resume':'Pause';e.target.classList.toggle('hl',paused);
+  if(paused)count();else sched();
+};
+$('lauto').onclick=e=>{
+  auto=!auto;e.target.classList.toggle('sel',auto);
+  if(auto)log.scrollTop=log.scrollHeight;
+};
+$('lclear').onclick=()=>{log.textContent='';queue=[];partial='';count()};
+$('lfilt').oninput=e=>{
+  filt=e.target.value.toLowerCase();
+  for(const d of log.children)d.hidden=!shown(d.textContent);
+  if(auto)log.scrollTop=log.scrollHeight;
+};
+
+// ---- WebSocket ----
+const DELAYS=[1000,2000,5000];
+let tries=0;
+function connect(){
+  let ws;
+  try{ws=new WebSocket('ws://'+location.host+'/ws')}catch(e){return retry()}
+  ws.onopen=()=>{tries=0;on('dws',true)};
+  ws.onmessage=e=>{if(typeof e.data==='string')addText(e.data)};
+  ws.onclose=()=>{on('dws',false);retry()};
+  ws.onerror=()=>ws.close();
+}
+function retry(){setTimeout(connect,DELAYS[Math.min(tries++,DELAYS.length-1)])}
+
+connect();
+poll();
+setInterval(poll,500);
+})();
+</script>
+</body>
+</html>
