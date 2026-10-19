@@ -76,17 +76,22 @@ Join the Wi-Fi network **`TEF-Bridge`** (password `tef6686bridge`) and open
 **http://192.168.4.1/**. The device can also join an existing network (station SSID in
 menuconfig); it logs its address.
 
-The page is self-contained (the access point has no internet) and has these cards:
+The page is self-contained (the access point has no internet) and has three tabs; the address
+keeps the open one (`#radio`, `#tuning`, `#log`):
 
-- **Tuner, Audio**: band, frequency, step, seek, volume, mute, IF bandwidth.
-- **Signal**: level, USN (noise), WAM (multipath), offset, bandwidth, modulation, and how hard
-  soft mute, high cut and stereo blend are working at the moment.
-- **RDS**: PI, PS, RadioText, group and error counts.
-- **AF**: whether AF following is active, the tuned station's score and each alternative
-  frequency with its last measurement.
-- **Reception tuning**: every weak-signal and AF parameter, changed live; see below.
-- **Memory** (stand-alone build): 40 memory channels.
-- **Device, Log**: tuner state, firmware, OTA upload, live log over WebSocket.
+- **Radio**
+  - Tuner, Audio: band, frequency, step, seek, volume, mute, IF bandwidth.
+  - Memory (stand-alone build): 40 memory channels.
+  - Signal: level, USN (noise), WAM (multipath), offset, bandwidth, modulation, and how hard
+    soft mute, high cut and stereo blend are working at the moment.
+  - RDS: PI, PS, RadioText, group and error counts.
+  - AF: whether AF following is active, the tuned station's score and each alternative
+    frequency with its last measurement.
+  - Device: tuner state, firmware, OTA upload.
+- **Tuning**: every weak-signal, AF and seek parameter, changed live (see below), under a live
+  strip with the signal values and the processing bars. A dot on the tab marks unsaved changes.
+- **Log**: the live log over WebSocket, with pause, filter and autoscroll. While another tab is
+  open, the tab counts new lines (red if one is an error).
 
 The JSON API (`/api/status`, `/api/tune`, `/api/tuning`, ...) is listed in
 [web_ui.h](components/web_ui/include/web_ui.h).

@@ -7,13 +7,19 @@
 <style>
 :root{--bg:#0d1117;--card:#161b22;--bd:#30363d;--fg:#e6edf3;--dim:#8b949e;--ac:#2f81f7;--ok:#3fb950;--er:#f85149;--wa:#d29922}
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,sans-serif}
 header{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;padding:10px 12px;background:var(--card);border-bottom:1px solid var(--bd)}
 h1{font-size:1.2rem;margin:0;flex:1 1 auto}
-h2{font-size:.85rem;margin:0 0 8px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+h2{font-size:.85rem;margin:0;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+.hd{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px}
+.meta{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:6px;color:var(--dim);font-size:.85rem}
+.hd .badge{font-size:.75rem;padding:1px 8px}
 main{display:grid;gap:10px;padding:10px;grid-template-columns:1fr;max-width:1200px;margin:auto}
-@media(min-width:900px){main{grid-template-columns:1fr 1fr}.wide{grid-column:1/-1}}
-section{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:12px;min-width:0}
+@media(min-width:900px){main{grid-template-columns:1fr 1fr}.wide{grid-column:1/-1}
+#p-radio main{grid-template-areas:"tuner audio" "mem mem" "signal rds" "signal af" "dev dev";align-items:start}
+.a-t{grid-area:tuner}.a-a{grid-area:audio}.a-m{grid-area:mem}.a-s{grid-area:signal}.a-r{grid-area:rds}.a-af{grid-area:af}.a-d{grid-area:dev}}
+section{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:14px;min-width:0}
 .dot{display:inline-block;width:12px;height:12px;border-radius:50%;background:var(--er);margin-right:4px;vertical-align:middle}
 .dot.on{background:var(--ok)}
 .hs{font-size:.85rem;color:var(--dim)}
@@ -21,31 +27,55 @@ button,select,input[type=text],input[type=password]{min-height:44px;font:inherit
 button{cursor:pointer;min-width:44px}
 button:active{background:#30363d}
 button.hl{background:var(--wa);color:#000;border-color:var(--wa)}
-button.sel{background:var(--ac);border-color:var(--ac);color:#fff}
+button.sel,button.pri{background:var(--ac);border-color:var(--ac);color:#fff}
 button.danger{background:var(--er);color:#fff;border-color:var(--er)}
-.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}
+.seg{display:inline-flex}
+.seg button{border-radius:0;margin-left:-1px;position:relative}
+.seg button:first-child{border-radius:6px 0 0 6px;margin-left:0}
+.seg button:last-child{border-radius:0 6px 6px 0}
+.seg button:only-child{border-radius:6px}
+.seg button.sel,.seg button.hl{z-index:1}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 10px}
+.row:last-child{margin-bottom:0}
 .row>label{color:var(--dim)}
 .freq{font-size:2.6rem;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
+#tps{color:var(--dim);min-height:1.4em;margin-bottom:10px;white-space:pre}
 .badge{display:inline-block;padding:2px 10px;border-radius:12px;border:1px solid var(--bd);color:var(--dim);font-size:.85rem;font-weight:600}
 .badge.on{background:var(--ok);border-color:var(--ok);color:#000}
 .badge.warn.on{background:var(--wa);border-color:var(--wa)}
+.badge.er.on{background:var(--er);border-color:var(--er);color:#fff}
 input[type=range]{flex:1 1 160px;min-height:44px;accent-color:var(--ac)}
 input[type=text],input[type=password]{width:9em}
 input[type=file]{font:inherit;color:var(--dim);max-width:100%}
+input[type=file]::file-selector-button{font:inherit;color:var(--fg);background:#21262d;border:1px solid var(--bd);border-radius:6px;min-height:44px;padding:0 12px;margin-right:10px;cursor:pointer}
 button:disabled{opacity:.5;cursor:default}
 dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:0}
 dt{color:var(--dim)}dd{margin:0;word-break:break-word}
-.bar{height:14px;background:#21262d;border-radius:7px;overflow:hidden;margin:2px 0 8px}
-.bar>i{display:block;height:100%;width:0;background:var(--ac)}
+.bar{height:8px;background:#21262d;border-radius:4px;overflow:hidden;margin:0}
+.bar>i{display:block;height:100%;width:0;background:var(--ac);transition:width .3s}
+.meter{display:grid;grid-template-columns:7.5em 5.5em 1fr;align-items:center;gap:8px;margin-bottom:8px}
+.meter>span:first-child{color:var(--dim)}
+.meter .v{text-align:right;font-variant-numeric:tabular-nums}
+.stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0 0 12px}
+@media(min-width:600px){.stats{grid-template-columns:repeat(4,minmax(0,1fr))}}
+#afb .stats{grid-template-columns:repeat(3,minmax(0,1fr))}
+.stat{background:var(--bg);border:1px solid var(--bd);border-radius:6px;padding:6px 10px;min-width:0}
+.stat small{display:block;color:var(--dim);font-size:.75rem}
+.stat b{font-weight:600;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.sub{font-size:.75rem;text-transform:uppercase;color:var(--dim);margin:12px 0 6px}
 .mono{font-family:ui-monospace,Consolas,monospace}
 #ps{font-size:1.8rem;white-space:pre;min-height:1.4em}
-#rt{white-space:pre-wrap;overflow-wrap:anywhere;min-height:1.4em}
+#rt{white-space:pre-wrap;overflow-wrap:anywhere;min-height:1.4em;margin-bottom:8px}
+#volv{min-width:5.5em;text-align:right}
+.actions{margin-top:10px;border-top:1px solid var(--bd);padding-top:10px}
 .err{color:var(--er)}
 #toast{position:fixed;left:10px;right:10px;bottom:10px;padding:10px 14px;background:var(--er);color:#fff;border-radius:6px;display:none;z-index:9}
 #toast.show{display:block}
-#log{height:320px;overflow:auto;background:#010409;border:1px solid var(--bd);border-radius:6px;padding:6px;font:12px/1.35 ui-monospace,Consolas,monospace}
-#log div{white-space:pre-wrap;overflow-wrap:anywhere}
+#logv{height:max(240px,calc(100vh - 300px));overflow:auto;background:#010409;border:1px solid var(--bd);border-radius:6px;padding:6px;font:12px/1.35 ui-monospace,Consolas,monospace}
+#logv div{white-space:pre-wrap;overflow-wrap:anywhere}
 .lE{color:var(--er)}.lW{color:var(--wa)}.lD{color:var(--dim)}
+#lfilt{flex:1 1 8em;width:auto;min-width:0}
+#lcnt{margin-left:auto}
 #mname{flex:1 1 12em;width:auto;min-width:0}
 .mgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin-top:8px}
 .mgrid button{text-align:left;padding:6px 10px;line-height:1.25;font-variant-numeric:tabular-nums;min-width:0}
@@ -53,13 +83,43 @@ dt{color:var(--dim)}dd{margin:0;word-break:break-word}
 .mgrid small{display:block;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mgrid button.sel b,.mgrid button.sel small{color:#fff}
 .aft{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
-.aft th,.aft td{padding:4px 8px;text-align:right;white-space:nowrap;border-bottom:1px solid var(--bd)}
-.aft th{color:var(--dim);font-weight:600}
+.aft th,.aft td{padding:6px 8px;text-align:right;white-space:nowrap;border-bottom:1px solid rgba(139,148,158,.2)}
+.aft th:first-child,.aft td:first-child{text-align:left}
+.aft th{color:var(--dim);font-weight:600;font-size:.75rem;text-transform:uppercase}
+.aft tr:last-child td{border-bottom:0}
+.aft tr.ban{opacity:.55}
+.aft .badge{font-size:.75rem;padding:1px 8px}
 details{border:1px solid var(--bd);border-radius:6px;margin:8px 0;padding:0 10px}
-summary{min-height:44px;display:flex;align-items:center;cursor:pointer;font-weight:600}
-details .row>label{flex:1 1 9em}
+summary{min-height:44px;display:flex;align-items:center;cursor:pointer;font-weight:600;list-style:none}
+summary::-webkit-details-marker{display:none}
+summary::before{content:"\25B8";display:inline-block;margin-right:8px;color:var(--dim);transition:transform .15s}
+details[open]>summary::before{transform:rotate(90deg)}
+summary .badge{margin-left:auto}
+.help{font-size:.85rem;color:var(--dim);border-left:3px solid var(--bd);padding-left:10px;margin:0 0 8px}
+.prow{display:grid;grid-template-columns:1fr 6.5em 3.2em 44px;gap:4px 8px;align-items:center;padding:6px 0;border-top:1px solid var(--bd)}
+.help+.prow{border-top:0}
+.prow>label{grid-column:1/-1;color:var(--dim)}
+.prow.chg>label{color:var(--fg)}
+.prow.chg>label::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--wa);margin-right:6px;vertical-align:middle}
+.prow>select{grid-column:1/3;justify-self:start;min-width:8em}
+.prow input[type=range],.prow input[type=number]{width:100%;min-width:0;flex:none}
+@media(min-width:600px){
+.prow{grid-template-columns:minmax(10em,1.1fr) minmax(8em,2fr) 6.5em 3.2em 44px}
+.prow>label{grid-column:auto}
+.prow>select{grid-column:2/4}}
 input[type=number]{width:6em;min-height:44px;font:inherit;color:var(--fg);background:#21262d;border:1px solid var(--bd);border-radius:6px;padding:0 6px}
-#tsv{color:var(--dim)}#tsv.dirty{color:var(--wa)}
+nav{display:flex;gap:6px;padding:6px 10px;background:var(--card);border-bottom:1px solid var(--bd);position:sticky;top:0;z-index:5}
+nav button{flex:1 1 0;display:flex;align-items:center;justify-content:center;gap:6px}
+#tdot{color:var(--wa)}
+.live{position:sticky;top:57px;z-index:4;padding:6px 12px;background:var(--card);border-bottom:1px solid var(--bd);font-size:.85rem;font-variant-numeric:tabular-nums}
+.live b{font-size:1.1rem}
+.la{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center}
+.lb{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:6px}
+.ls{min-width:0}
+.ls small{display:block;font-size:.7rem;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.live .bar{height:6px;margin:2px 0 0}
+#p-tuning main{grid-template-columns:1fr}
+@media(min-width:900px){#tbody{columns:2;column-gap:10px}#tbody details{break-inside:avoid}}
 </style>
 </head>
 <body>
@@ -69,34 +129,37 @@ input[type=number]{width:6em;min-height:44px;font:inherit;color:var(--fg);backgr
 <span class="hs">Up <span id="up">—</span></span>
 <span class="hs">Heap <span id="heap">—</span></span>
 </header>
+<nav role="tablist" aria-label="Pages">
+<button role="tab" id="tab-radio" aria-controls="p-radio" aria-selected="true" class="sel">Radio</button>
+<button role="tab" id="tab-tuning" aria-controls="p-tuning" aria-selected="false" tabindex="-1">Tuning<span id="tdot" hidden aria-label="unsaved changes">•</span></button>
+<button role="tab" id="tab-log" aria-controls="p-log" aria-selected="false" tabindex="-1">Log<span class="badge" id="lbadge" hidden></span></button>
+</nav>
+<div role="tabpanel" id="p-radio" aria-labelledby="tab-radio">
 <main>
-<section aria-labelledby="h-t">
-<h2 id="h-t">Tuner</h2>
+<section class="a-t" aria-labelledby="h-t">
+<div class="hd"><h2 id="h-t">Tuner</h2><span class="meta"><span class="badge" id="st">ST</span><span class="badge warn" id="mb">MUTE</span><span class="badge warn" id="mob">MONO</span></span></div>
 <div class="freq" id="freq">—</div>
-<div class="row"><span class="badge" id="st">ST</span><span class="badge warn" id="mb">MUTE</span><span class="badge warn" id="mob">MONO</span></div>
-<div class="row" role="group" aria-label="Band">
-<button id="bFM">FM</button><button id="bAM">AM</button>
-</div>
+<div class="mono" id="tps"></div>
+<div class="row"><span class="seg" role="group" aria-label="Band"><button id="bFM">FM</button><button id="bAM">AM</button></span></div>
 <div class="row">
 <label for="fin" id="flab">MHz</label><input type="text" id="fin" inputmode="decimal" autocomplete="off">
 <button id="tune">Tune</button>
 </div>
 <div class="row">
-<button id="sd" aria-label="Step down">&#9664;</button><button id="su" aria-label="Step up">&#9654;</button>
-<button id="kd" aria-label="Seek down">&#9664;&#9664;</button><button id="ku" aria-label="Seek up">&#9654;&#9654;</button>
+<span class="seg"><button id="sd" aria-label="Step down">&#9664;</button><button id="su" aria-label="Step up">&#9654;</button></span>
+<span class="seg"><button id="kd" aria-label="Seek down">&#9664;&#9664;</button><button id="ku" aria-label="Seek up">&#9654;&#9654;</button></span>
 <button id="ks">Stop</button>
 </div>
 </section>
 
-<section aria-labelledby="h-a">
-<h2 id="h-a">Audio</h2>
-<div class="row"><label for="vol">Volume</label><input type="range" id="vol" min="-60" max="24" step="0.5" value="-10"><span id="volv" class="mono">—</span></div>
-<div class="row"><button id="mute">Mute</button></div>
+<section class="a-a" aria-labelledby="h-a">
+<div class="hd"><h2 id="h-a">Audio</h2></div>
+<div class="row"><label for="vol">Volume</label><input type="range" id="vol" min="-60" max="24" step="0.5" value="-10"><span id="volv" class="mono">—</span><button id="mute">Mute</button></div>
 <div class="row"><label for="bw">Bandwidth</label><select id="bw"></select></div>
 </section>
 
-<section class="wide" id="msec" aria-labelledby="h-m" hidden>
-<h2 id="h-m">Memory <span id="mcnt"></span></h2>
+<section class="wide a-m" id="msec" aria-labelledby="h-m" hidden>
+<div class="hd"><h2 id="h-m">Memory</h2><span class="meta" id="mcnt"></span></div>
 <div class="row">
 <button id="mprev" aria-label="Previous memory channel">&#9664; CH</button><button id="mnext" aria-label="Next memory channel">CH &#9654;</button>
 <label for="mslot">Channel</label><select id="mslot"></select>
@@ -109,49 +172,45 @@ input[type=number]{width:6em;min-height:44px;font:inherit;color:var(--fg);backgr
 <div class="mgrid" id="mlist"></div>
 </section>
 
-<section aria-labelledby="h-s">
-<h2 id="h-s">Signal</h2>
-<dl>
-<dt>Level</dt><dd><span id="lvl">—</span><div class="bar"><i id="lvlb"></i></div></dd>
-<dt id="t1">USN</dt><dd id="usn">—</dd>
-<dt id="t2">WAM</dt><dd id="wam">—</dd>
-<dt>Offset</dt><dd id="off">—</dd>
-<dt>Bandwidth</dt><dd id="qbw">—</dd>
-<dt>Modulation</dt><dd><span id="mod">—</span><div class="bar"><i id="modb"></i></div></dd>
-<dt class="dsp">Soft mute</dt><dd class="dsp"><span id="dsm">—</span><div class="bar"><i id="dsmb"></i></div></dd>
-<dt class="dsp">High cut</dt><dd class="dsp"><span id="dhc">—</span><div class="bar"><i id="dhcb"></i></div></dd>
-<dt class="dsp">Stereo blend</dt><dd class="dsp"><span id="dsb">—</span><div class="bar"><i id="dsbb"></i></div></dd>
-<dt class="dsp">High blend</dt><dd class="dsp"><span id="dhb">—</span><div class="bar"><i id="dhbb"></i></div></dd>
-<dt>Valid</dt><dd><span class="badge" id="qv">—</span></dd>
-</dl>
+<section class="a-s" aria-labelledby="h-s">
+<div class="hd"><h2 id="h-s">Signal</h2><span class="meta"><span class="badge" id="qv">—</span></span></div>
+<div class="meter"><span>Level</span><span class="v" id="lvl">—</span><div class="bar"><i id="lvlb"></i></div></div>
+<div class="meter"><span>Modulation</span><span class="v" id="mod">—</span><div class="bar"><i id="modb"></i></div></div>
+<div class="stats">
+<div class="stat"><small id="t1">USN</small><b id="usn">—</b></div>
+<div class="stat"><small id="t2">WAM</small><b id="wam">—</b></div>
+<div class="stat"><small>Offset</small><b id="off">—</b></div>
+<div class="stat"><small>Bandwidth</small><b id="qbw">—</b></div>
+</div>
+<div class="sub dsp">Weak-signal processing</div>
+<div class="meter dsp"><span>Soft mute</span><span class="v" id="dsm">—</span><div class="bar"><i id="dsmb"></i></div></div>
+<div class="meter dsp"><span>High cut</span><span class="v" id="dhc">—</span><div class="bar"><i id="dhcb"></i></div></div>
+<div class="meter dsp"><span>Stereo blend</span><span class="v" id="dsb">—</span><div class="bar"><i id="dsbb"></i></div></div>
+<div class="meter dsp"><span>High blend</span><span class="v" id="dhb">—</span><div class="bar"><i id="dhbb"></i></div></div>
 </section>
 
-<section aria-labelledby="h-r">
-<h2 id="h-r">RDS</h2>
-<div class="row"><span class="badge" id="rsync">SYNC</span><span class="mono">PI <span id="pi">—</span></span></div>
+<section class="a-r" aria-labelledby="h-r">
+<div class="hd"><h2 id="h-r">RDS</h2><span class="meta"><span class="badge" id="rsync">SYNC</span><span class="mono">PI <span id="pi">—</span></span></span></div>
 <div class="mono" id="ps">—</div>
 <div class="mono" id="rt">—</div>
 <div class="hs">Groups <span id="rg">—</span> / Errors <span id="re">—</span></div>
 </section>
 
-<section aria-labelledby="h-af">
-<h2 id="h-af">AF</h2>
+<section class="a-af" aria-labelledby="h-af">
+<div class="hd"><h2 id="h-af">AF</h2><span class="meta" id="afh"><span class="badge" id="afa">AF</span><span class="badge warn" id="afc">CHECKING</span><span class="badge warn" id="afp">PI CHECK</span></span></div>
 <div id="afb">
-<div class="row"><span class="badge" id="afa">AF</span><span class="badge warn" id="afc">CHECKING</span><span class="badge warn" id="afp">PI CHECK</span></div>
-<div class="hs" id="afl">—</div>
+<div class="stats">
+<div class="stat"><small>Score</small><b id="afs">—</b></div>
+<div class="stat"><small>Switches</small><b id="afw">—</b></div>
+<div class="stat"><small>PI fails</small><b id="afpf">—</b></div>
+</div>
 <div id="aft" style="overflow-x:auto"></div>
 </div>
 <div class="hs" id="afm" hidden>FM only</div>
 </section>
 
-<section class="wide" aria-labelledby="h-u">
-<h2 id="h-u">Reception tuning</h2>
-<div class="row"><button id="tsave">Save</button><button id="trev">Revert</button><button id="tdef">Defaults</button><span id="tsv">—</span></div>
-<div id="tbody"></div>
-</section>
-
-<section class="wide" aria-labelledby="h-d">
-<h2 id="h-d">Device</h2>
+<section class="wide a-d" aria-labelledby="h-d">
+<div class="hd"><h2 id="h-d">Device</h2></div>
 <dl>
 <dt>TEF</dt><dd id="tstate">—</dd>
 <dt>Variant</dt><dd id="tvar">—</dd>
@@ -162,24 +221,56 @@ input[type=number]{width:6em;min-height:44px;font:inherit;color:var(--fg);backgr
 <dt>Firmware</dt><dd id="fwv">—</dd>
 <dt>Slot</dt><dd id="fws">—</dd>
 </dl>
+<div class="actions">
 <div class="row"><button id="reinit">Re-init</button></div>
 <div class="row">
 <label for="fwf" class="hs">Update</label><input type="file" id="fwf" accept=".bin">
 <input type="password" id="fwp" placeholder="Password" autocomplete="off" aria-label="OTA password" hidden>
 <button id="fwu">Upload</button><span class="hs" id="fwmsg"></span>
 </div>
+</div>
 </section>
 
+</main>
+</div>
+
+<div role="tabpanel" id="p-tuning" aria-labelledby="tab-tuning" hidden>
+<div class="live" aria-label="Live reception">
+<div class="la">
+<b id="vfreq">—</b><span class="badge" id="vst">ST</span><span class="badge warn" id="vmo">MONO</span>
+<span>Level <span id="vlvl">—</span></span><span>USN <span id="vusn">—</span></span><span>WAM <span id="vwam">—</span></span>
+<span>AF <span id="vaf">—</span></span>
+</div>
+<div class="lb">
+<div class="ls"><small>Soft mute</small><span id="vsm">—</span><div class="bar"><i id="vsmb"></i></div></div>
+<div class="ls"><small>High cut</small><span id="vhc">—</span><div class="bar"><i id="vhcb"></i></div></div>
+<div class="ls"><small>Stereo blend</small><span id="vsb">—</span><div class="bar"><i id="vsbb"></i></div></div>
+<div class="ls"><small>High blend</small><span id="vhb">—</span><div class="bar"><i id="vhbb"></i></div></div>
+</div>
+</div>
+<main>
+<section class="wide" aria-labelledby="h-u">
+<div class="hd"><h2 id="h-u">Reception tuning</h2></div>
+<div class="row"><button id="tsave" class="pri">Save</button><button id="trev">Revert</button><button id="tdef">Defaults</button><span class="badge" id="tsv">—</span></div>
+<div id="tbody"></div>
+</section>
+
+</main>
+</div>
+
+<div role="tabpanel" id="p-log" aria-labelledby="tab-log" hidden>
+<main>
 <section class="wide" aria-labelledby="h-l">
-<h2 id="h-l">Log</h2>
+<div class="hd"><h2 id="h-l">Log</h2></div>
 <div class="row">
-<button id="lpause">Pause</button><button id="lauto" class="sel">Autoscroll</button><button id="lclear">Clear</button>
+<span class="seg"><button id="lpause">Pause</button><button id="lauto" class="sel">Autoscroll</button><button id="lclear">Clear</button></span>
 <label for="lfilt" class="hs">Filter</label><input type="text" id="lfilt" autocomplete="off">
 <span class="hs" id="lcnt">0 lines</span>
 </div>
-<div id="log" role="log" tabindex="0"></div>
+<div id="logv" role="log" tabindex="0"></div>
 </section>
 </main>
+</div>
 <div id="toast" role="status" aria-live="polite"></div>
 <script>
 (function(){
@@ -188,6 +279,7 @@ const $=id=>document.getElementById(id);
 const FM_BW=[56,64,72,84,97,114,133,151,168,184,200,217,236,254,287,311],AM_BW=[3,4,6,8];
 const DEF={FM:87500,AM:999},MAXLINES=2000;
 let band='FM',bwBand=null,st=null,volDrag=false,volTimer=0,pending=false,toastTimer=0,reTimer=0,uploading=false;
+let curTab='radio',unread=0,unE=false,unW=false;
 const NAME_MAX=23; // PRESET_NAME_SIZE - 1, UTF-8 bytes
 let mem=null,memRev=null,memLoading=false,memKey='',clrTimer=0,msgTimer=0;
 let last=Object.assign({},DEF);
@@ -274,7 +366,7 @@ function render(s){
   }
   txt('lvl',num(q.level,1,' dBµV'));$('lvlb').style.width=pct(q.level,80);
   txt('t1',am?'Noise':'USN');txt('t2',am?'':'WAM');
-  $('t2').style.display=$('wam').style.display=am?'none':'';
+  $('t2').parentNode.style.display=am?'none':'';
   txt('usn',num(am?q.noise:q.usn,1,' %'));txt('wam',num(q.wam,1,' %'));
   txt('off',num(q.offset,1,' kHz'));txt('qbw',num(q.bw,1,' kHz'));
   txt('mod',num(q.mod,1,' %'));$('modb').style.width=pct(q.mod,120);
@@ -284,8 +376,15 @@ function render(s){
   if(dd)[['dsm','softmute'],['dhc','highcut'],['dsb','stereo'],['dhb','sthiblend']].forEach(([i,k])=>{
     txt(i,num(dd[k],1,' %'));$(i+'b').style.width=pct(dd[k],100);
   });
+  txt('vfreq',$('freq').textContent);on('vst',q.stereo);on('vmo',s.force_mono);
+  txt('vlvl',num(q.level,1,' dBµV'));txt('vusn',am?null:num(q.usn,1,' %'));txt('vwam',am?null:num(q.wam,1,' %'));
+  [['vsm','softmute'],['vhc','highcut'],['vsb','stereo'],['vhb','sthiblend']].forEach(([i,k])=>{
+    const v=am||!dd?null:dd[k];txt(i,num(v,1,' %'));$(i+'b').style.width=pct(v,100);
+  });
+  txt('vaf',am||!s.af?null:num(s.af.score,1,' dB'));
   renderAf(s.af||{},am);
   on('rsync',rds.sync);txt('pi',rds.pi);
+  $('tps').textContent=rds.ps||'';
   txt('ps',rds.ps);txt('rt',rds.rt);txt('rg',rds.groups);txt('re',rds.errors);
   txt('tstate',(tef.ready?'ready':'not ready')+' / '+(tef.state||'—')+' / op '+(tef.op_status==null?'—':tef.op_status));
   txt('tvar',tef.variant);txt('tid',[tef.device,tef.hw,tef.sw].map(hex).join(' / '));
@@ -306,10 +405,10 @@ function render(s){
   }
 }
 function renderAf(a,am){
-  $('afb').hidden=am;$('afm').hidden=!am;
+  $('afb').hidden=am;$('afm').hidden=!am;$('afh').hidden=am;
   if(am)return;
   on('afa',a.active);on('afc',a.poor);on('afp',a.checking_pi);
-  $('afl').textContent='Score '+num(a.score,1,' dB')+' · switches '+(a.switches||0)+' · PI fails '+(a.pi_fails||0);
+  $('afs').textContent=num(a.score,1,' dB');$('afw').textContent=a.switches||0;$('afpf').textContent=a.pi_fails||0;
   const t=$('aft'),l=a.list||[];
   t.textContent='';
   if(!l.length){
@@ -324,8 +423,12 @@ function renderAf(a,am){
   tb.className='aft';
   row('th',['MHz','Score','Level','Age','']);
   for(const e of l){
-    const r=row('td',[(e.khz/1000).toFixed(2),num(e.score,1),num(e.level,1),typeof e.age_s==='number'?e.age_s+' s':'—',e.banned?'banned':'']);
-    if(e.banned)r.lastChild.className='err';
+    const r=row('td',[(e.khz/1000).toFixed(2),num(e.score,1),num(e.level,1),typeof e.age_s==='number'?e.age_s+' s':'—','']);
+    if(e.banned){
+      r.className='ban';
+      const b=document.createElement('span');b.className='badge er on';b.textContent='banned';
+      r.lastChild.appendChild(b);
+    }
   }
   t.appendChild(tb);
 }
@@ -416,14 +519,15 @@ const dec=p=>Math.round(Math.log10(p.div)),fv=(p,v)=>(v/p.div).toFixed(dec(p));
 const clampV=(p,v)=>Math.max(p.min,Math.min(p.max,Math.round(v)));
 function tstat(){
   const d=tun.params.some(p=>p.v!==p.sv),e=$('tsv');
-  e.textContent=d?'Unsaved changes':'All saved';e.classList.toggle('dirty',d);
+  e.textContent=d?'Unsaved changes':'All saved';e.className='badge'+(d?' warn on':'');$('tdot').hidden=!d;
 }
 function tupd(p){ // refresh the controls of p (not the focused one), its reset button and group
   const a=document.activeElement,s=(e,v)=>{if(a!==e)e.value=v};
   if(p.sel)s(p.sel,p.v);else{s(p.rs,p.v/p.div);s(p.nm,fv(p,p.v))}
-  p.rb.hidden=p.v===p.def;
+  p.rb.style.visibility=p.v===p.def?'hidden':'';
+  p.r.classList.toggle('chg',p.v!==p.def);
   const n=p.G.ps.filter(x=>x.v!==x.def).length;
-  p.G.sm.textContent=p.G.name+(n?' · '+n+' changed':'');
+  p.G.bd.textContent=n+' changed';p.G.bd.hidden=!n;
   tstat();
 }
 async function tset(p,v){
@@ -443,13 +547,14 @@ function renderTun(){
   for(const p of tun.params){
     let g=gs.get(p.g);
     if(!g){
-      g={name:p.g,ps:[],d:mk('details'),sm:mk('summary')};
+      g={name:p.g,ps:[],d:mk('details'),sm:mk('summary'),bd:mk('span','badge warn on')};
       g.d.dataset.g=p.g;g.d.open=open.has(p.g);
-      g.d.append(g.sm,mk('p','hs',HELP[p.g]||''));
+      g.sm.append(mk('span',null,p.g),g.bd);
+      g.d.append(g.sm,mk('p','help',HELP[p.g]||''));
       gs.set(p.g,g);body.appendChild(g.d);
     }
     g.ps.push(p);p.G=g;
-    const id='tp_'+p.k,r=mk('div','row'),lb=mk('label',null,p.l);
+    const id='tp_'+p.k,r=p.r=mk('div','prow'),lb=mk('label',null,p.l);
     lb.htmlFor=id;r.appendChild(lb);
     if(p.c){
       const s=p.sel=mk('select');s.id=id;
@@ -552,7 +657,7 @@ $('fwu').onclick=()=>{
 };
 
 // ---- Log ----
-const log=$('log');
+const log=$('logv');
 let queue=[],partial='',paused=false,auto=true,raf=0,filt='';
 const ANSI=/\x1b\[[0-9;]*m/g;
 const lineCls=l=>l.startsWith('E (')?'lE':l.startsWith('W (')?'lW':/^[DV] \(/.test(l)?'lD':'';
@@ -569,10 +674,19 @@ function flush(){
     frag.appendChild(d);
   }
   queue=[];
+  if(curTab!=='log'){
+    unread+=frag.childElementCount;
+    for(const d of frag.children){if(d.className==='lE')unE=true;else if(d.className==='lW')unW=true}
+    badge();
+  }
   log.appendChild(frag);
   while(log.childElementCount>MAXLINES)log.removeChild(log.firstChild);
   if(auto)log.scrollTop=log.scrollHeight;
   count();
+}
+function badge(){
+  const b=$('lbadge');b.hidden=!unread;b.textContent=unread;
+  b.className='badge'+(unE?' er on':unW?' warn on':'');
 }
 function sched(){if(!raf)raf=requestAnimationFrame(flush)}
 function addText(t){
@@ -609,9 +723,32 @@ function connect(){
 }
 function retry(){setTimeout(connect,DELAYS[Math.min(tries++,DELAYS.length-1)])}
 
+// ---- Tabs ----
+const TABS=['radio','tuning','log'];
+function showTab(){
+  const h=location.hash.slice(1),t=TABS.includes(h)?h:'radio';
+  curTab=t;
+  for(const n of TABS){
+    const b=$('tab-'+n),a=n===t;
+    b.classList.toggle('sel',a);b.setAttribute('aria-selected',a);b.tabIndex=a?0:-1;
+    $('p-'+n).hidden=!a;
+  }
+  if(t==='tuning'&&!tun)loadTun();
+  if(t==='log'){unread=0;unE=unW=false;badge();if(auto)log.scrollTop=log.scrollHeight}
+}
+function goTab(t){history.replaceState(null,'','#'+t);showTab()} // no history entry per tab click
+for(const n of TABS)$('tab-'+n).onclick=()=>goTab(n);
+$('tab-radio').parentNode.onkeydown=e=>{
+  const d=e.key==='ArrowRight'?1:e.key==='ArrowLeft'?-1:0,i=TABS.indexOf(curTab);
+  if(!d||!e.target.matches('[role=tab]'))return;
+  e.preventDefault();
+  const t=TABS[(i+d+TABS.length)%TABS.length];goTab(t);$('tab-'+t).focus();
+};
+addEventListener('hashchange',showTab);
+
+showTab();
 connect();
 poll();
-loadTun();
 setInterval(poll,500);
 })();
 </script>
