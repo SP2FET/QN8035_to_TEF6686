@@ -1,8 +1,11 @@
 #include "radio.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/param.h>
+#include <sys/time.h>
+#include <time.h>
 
 #include "esp_check.h"
 #include "esp_log.h"
@@ -128,6 +131,7 @@ typedef struct {
     uint16_t pi;
     bool verifying;    /* Check-tuned (muted) to cand, waiting for its PI */
     uint32_t cand, origin;
+    int16_t cand_score, cur_score; /* 0.1 dB, at the try (event log) */
     TickType_t t_start;
     uint32_t switches, pi_fails;
 } af_run_t;
@@ -152,6 +156,8 @@ static struct {
     size_t n_listeners;
     seek_t seek;
     af_run_t af;
+    uint32_t ct_seen;   /* rds.ct.count last applied to the clock */
+    int8_t ct_offset;   /* half hours, of the last clock set */
     unsigned io_errors;
     TickType_t next_boot;
 } s;
@@ -343,6 +349,38 @@ static void af_follow_rds(void)
     af_sync(&s.af.st, r->af, r->af_count, s.status.freq_khz);
 }
 
+/* A new RDS clock time: the system clock takes UTC, TZ the station's offset, so localtime() and
+ * the log time stamps (CONFIG_LOG_TIMESTAMP_SOURCE_SYSTEM) show the station's local time. */
+static void follow_ct(void)
+{
+    const rds_ct_t *ct = &s.status.rds.ct; /* written only by this task */
+    const uint32_t seen = s.ct_seen;
+    s.ct_seen = ct->count;
+    if (!ct->valid || ct->count == seen) {
+        return;
+    }
+    /* POSIX TZ counts the other way round: "RDS-2:00" is two hours ahead of UTC. */
+    const int min = ct->offset * 30;
+    char tz[16];
+    snprintf(tz, sizeof(tz), "RDS%c%d:%02d", min > 0 ? '-' : '+', abs(min) / 60, abs(min) % 60);
+    setenv("TZ", tz, 1);
+    tzset();
+    const struct timeval tv = {.tv_sec = (time_t)rds_ct_unix(ct)};
+    settimeofday(&tv, NULL);
+
+    if (!s.status.clock_set || ct->offset != s.ct_offset) {
+        struct tm tm;
+        localtime_r(&tv.tv_sec, &tm);
+        ESP_LOGI(TAG, "clock set from RDS: %04d-%02d-%02d %02d:%02d, UTC%c%d:%02d",
+                 tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min,
+                 min < 0 ? '-' : '+', abs(min) / 60, abs(min) % 60);
+    }
+    s.ct_offset = ct->offset;
+    lock();
+    s.status.clock_set = true;
+    unlock();
+}
+
 /* AF_Update: the tuner visits khz for a few ms, inaudibly, and returns by itself. Its quality
  * is frozen until Get_Quality_Data reads it (UM V102 §4.1), which also releases it. */
 static bool af_measure(uint32_t khz, tef6686_quality_t *q)
@@ -378,14 +416,39 @@ static void af_verify_begin(uint32_t khz, int16_t score)
     s.af.verifying = true;
     s.af.cand = khz;
     s.af.origin = s.status.freq_khz;
+    s.af.cand_score = score;
+    s.af.cur_score = af_current(&s.af.st);
     s.af.t_start = xTaskGetTickCount();
     ESP_LOGI(TAG, "AF: trying %lu kHz (score %d vs %d), checking PI %04X", (unsigned long)khz,
              score, af_current(&s.af.st), s.af.pi);
     publish_af();
 }
 
-/* Back to the tuned station. ban: the candidate failed its PI check (else: aborted). */
-static void af_return(bool ban)
+/* Newest first into the status snapshot, for the web UI. */
+static void af_log_event(radio_af_ev_type_t type, uint16_t pi, uint32_t ban_s)
+{
+    const radio_af_event_t ev = {
+        .t_ms = now_ms(),
+        .type = (uint8_t)type,
+        .from_khz = s.af.origin,
+        .to_khz = s.af.cand,
+        .score = s.af.cand_score,
+        .cur = s.af.cur_score,
+        .pi = pi,
+        .ban_s = ban_s,
+    };
+    lock();
+    radio_af_status_t *a = &s.status.af;
+    memmove(&a->ev[1], &a->ev[0], (RADIO_AF_EVENTS - 1) * sizeof(a->ev[0]));
+    a->ev[0] = ev;
+    if (a->ev_n < RADIO_AF_EVENTS) {
+        a->ev_n++;
+    }
+    unlock();
+}
+
+/* Back to the tuned station. */
+static void af_jump_back(void)
 {
     s.af.verifying = false;
     io_ok(tef_tune(RADIO_BAND_FM, s.af.origin, TEF6686_TUNE_JUMP), "af return");
@@ -395,13 +458,25 @@ static void af_return(bool ban)
     vTaskDelay(pdMS_TO_TICKS(AF_FLUSH_MS));
     tef6686_rds_t stale;
     io_ok(tef6686_fm_get_rds(s.tef, &stale), "af rds flush");
-    if (ban) {
-        const uint32_t base_ms = (uint32_t)s.tuning.v[TUNING_AF_BAN] * 1000u;
-        const uint32_t ms = af_ban(&s.af.st, s.af.cand, now_ms(), base_ms);
-        s.af.pi_fails++;
-        ESP_LOGI(TAG, "AF: %lu kHz skipped for %lu s", (unsigned long)s.af.cand,
-                 (unsigned long)(ms / 1000));
-    }
+}
+
+/* The candidate failed its PI check: back, and skip it for a while. pi: heard (OTHER_PI). */
+static void af_reject(radio_af_ev_type_t why, uint16_t pi)
+{
+    af_jump_back();
+    const uint32_t base_ms = (uint32_t)s.tuning.v[TUNING_AF_BAN] * 1000u;
+    const uint32_t ms = af_ban(&s.af.st, s.af.cand, now_ms(), base_ms);
+    s.af.pi_fails++;
+    ESP_LOGI(TAG, "AF: %lu kHz skipped for %lu s", (unsigned long)s.af.cand,
+             (unsigned long)(ms / 1000));
+    af_log_event(why, pi, ms / 1000);
+    publish_af();
+}
+
+/* A command came in during the PI check: not the candidate's fault. */
+static void af_abort(void)
+{
+    af_jump_back();
     publish_af();
 }
 
@@ -413,6 +488,7 @@ static void af_accept(void)
     io_ok(tef_tune(RADIO_BAND_FM, 0, TEF6686_TUNE_END), "af end");
     af_switched(&s.af.st, s.af.origin, s.af.cand, now_ms());
     s.af.switches++;
+    af_log_event(RADIO_AF_EV_SWITCHED, s.af.pi, 0);
     lock();
     s.status.freq_khz = s.af.cand;
     s.status.q.valid = false;
@@ -446,7 +522,7 @@ static void af_verify_poll(void)
             } else {
                 ESP_LOGI(TAG, "AF: %lu kHz carries PI %04X, not %04X; back to %lu kHz",
                          (unsigned long)s.af.cand, pi, s.af.pi, (unsigned long)s.af.origin);
-                af_return(true);
+                af_reject(RADIO_AF_EV_OTHER_PI, pi);
             }
             return;
         }
@@ -455,7 +531,7 @@ static void af_verify_poll(void)
     if (reached(xTaskGetTickCount(), s.af.t_start + limit)) {
         ESP_LOGI(TAG, "AF: no PI from %lu kHz within %d ms; back to %lu kHz",
                  (unsigned long)s.af.cand, s.tuning.v[TUNING_AF_PI_MS], (unsigned long)s.af.origin);
-        af_return(true);
+        af_reject(RADIO_AF_EV_NO_PI, 0);
     }
 }
 
@@ -756,6 +832,7 @@ static void poll_rds(void)
     }
     unlock();
     af_follow_rds();
+    follow_ct();
     if (!first_pi) {
         notify(&evt);
     }
@@ -861,7 +938,7 @@ static void handle_tuning(uint16_t id, int16_t value)
 static void handle_cmd(const radio_cmd_t *c)
 {
     if (s.af.verifying) {
-        af_return(false); /* leave the muted candidate before anything else */
+        af_abort(); /* leave the muted candidate before anything else */
     }
     const bool ready = s.status.tef_ready;
 

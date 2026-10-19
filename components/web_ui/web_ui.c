@@ -30,8 +30,8 @@ static const char *TAG = "web";
 extern const char index_html_start[] asm("_binary_index_html_start");
 extern const char index_html_end[] asm("_binary_index_html_end");
 
-/* ~1 kB plus up to AF_MAX entries of ~80 bytes. */
-#define STATUS_BUF_SIZE 4096
+/* ~1.3 kB plus up to AF_MAX entries of ~80 bytes and RADIO_AF_EVENTS of ~120. */
+#define STATUS_BUF_SIZE 6144
 /* /api/tuning goes out in chunks; one parameter is < 300 bytes. */
 #define TUNING_CHUNK      1024
 #define TUNING_CHUNK_FILL 640
@@ -155,6 +155,23 @@ static void jb_af(jbuf_t *j, const radio_af_status_t *a)
         }
         jb_printf(j, ",\"banned\":%s}", b(banned));
     }
+    static const char *const ev_names[] = {"switched", "other_pi", "no_pi"};
+    jb_printf(j, "],\"events\":[");
+    for (unsigned i = 0; i < a->ev_n && i < RADIO_AF_EVENTS; i++) {
+        const radio_af_event_t *ev = &a->ev[i];
+        jb_printf(j,
+                  "%s{\"type\":\"%s\",\"age_s\":%" PRIu32 ",\"from\":%" PRIu32 ",\"to\":%" PRIu32
+                  ",\"score\":%.1f,\"cur\":%.1f,\"pi\":",
+                  i ? "," : "", ev->type < 3 ? ev_names[ev->type] : "?",
+                  (a->now_ms - ev->t_ms) / 1000, ev->from_khz, ev->to_khz, ev->score / 10.0,
+                  ev->cur / 10.0);
+        if (ev->type == RADIO_AF_EV_OTHER_PI) {
+            jb_printf(j, "\"%04X\"", ev->pi);
+        } else {
+            jb_printf(j, "null");
+        }
+        jb_printf(j, ",\"ban_s\":%" PRIu32 "}", ev->ban_s);
+    }
     jb_printf(j, "]},");
 }
 
@@ -201,9 +218,10 @@ static esp_err_t status_get(httpd_req_t *req)
     const bool fm = st.band == RADIO_BAND_FM;
     jb_printf(&j,
               "\"band\":\"%s\",\"freq_khz\":%" PRIu32 ",\"seeking\":%s,\"mute\":%s,"
-              "\"volume_db\":%.1f,\"bw_auto\":%s,\"bw_khz\":%.1f,\"force_mono\":%s,",
+              "\"volume_db\":%.1f,\"bw_auto\":%s,\"bw_khz\":%.1f,\"force_mono\":%s,"
+              "\"clock_set\":%s,",
               fm ? "FM" : "AM", st.freq_khz, b(st.seeking), b(st.mute), st.volume / 10.0,
-              b(st.bw_auto), st.bw / 10.0, b(st.force_mono));
+              b(st.bw_auto), st.bw / 10.0, b(st.force_mono), b(st.clock_set));
 
     const radio_quality_t *q = &st.q;
     jb_printf(&j, "\"q\":{\"valid\":%s,\"level\":%.1f,\"offset\":%.1f,\"bw\":%.1f,\"mod\":%.1f,",
@@ -231,8 +249,21 @@ static esp_err_t status_get(httpd_req_t *req)
     jb_str(&j, st.rds.ps);
     jb_printf(&j, ",\"rt\":");
     jb_str(&j, st.rds.rt);
-    jb_printf(&j, ",\"groups\":%" PRIu32 ",\"errors\":%" PRIu32 "},", st.rds.groups,
+    jb_printf(&j, ",\"groups\":%" PRIu32 ",\"errors\":%" PRIu32 ",\"pty\":", st.rds.groups,
               st.rds.rejected);
+    if (st.rds.pty_valid) {
+        jb_printf(&j, "%u", st.rds.pty);
+    } else {
+        jb_printf(&j, "null");
+    }
+    jb_printf(&j, ",\"tp\":%s,\"ta\":%s,\"ct\":", b(st.rds.tp), b(st.rds.ta));
+    if (st.rds.ct.valid) {
+        jb_printf(&j, "{\"unix\":%" PRId64 ",\"off_min\":%d}", rds_ct_unix(&st.rds.ct),
+                  st.rds.ct.offset * 30);
+    } else {
+        jb_printf(&j, "null");
+    }
+    jb_printf(&j, "},");
 
     jb_printf(&j, "\"qn\":{\"enabled\":%s,\"writes\":%" PRIu32 ",\"reads\":%" PRIu32 ",\"last\":",
               b(qn.running), qn.writes, qn.reads);

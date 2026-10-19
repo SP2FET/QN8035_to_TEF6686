@@ -217,6 +217,124 @@ static void test_af_list_full(void)
     TEST_ASSERT_EQUAL_UINT8(RDS_AF_MAX, s.af_count);
 }
 
+static void flags_group(uint16_t pi, uint16_t b, const uint8_t err[4])
+{
+    const uint16_t blk[4] = {pi, b, 0xE0CD, 0x2020};
+    rds_process_group(&s, blk, err);
+}
+
+static void ct_group(unsigned mjd, unsigned h, unsigned m, unsigned off_bits, const uint8_t err[4],
+                     uint16_t type_b)
+{
+    const uint16_t blk[4] = {0x3201, (uint16_t)(type_b | ((mjd >> 15) & 3)),
+                             (uint16_t)(((mjd & 0x7FFF) << 1) | (h >> 4)),
+                             (uint16_t)(((h & 15) << 12) | (m << 6) | off_bits)};
+    rds_process_group(&s, blk, err);
+}
+
+#define B_4A 0x4000
+#define B_4B 0x4800
+
+static void test_pty_tp_any_group_clean_only(void)
+{
+    flags_group(0x3201, (uint16_t)(0x2000 | (1 << 10) | (10 << 5)), OK); /* type 2 */
+    TEST_ASSERT_TRUE(s.pty_valid);
+    TEST_ASSERT_EQUAL_UINT8(10, s.pty);
+    TEST_ASSERT_TRUE(s.tp);
+    const uint8_t small[4] = {0, RDS_ERR_SMALL, 0, 0};
+    flags_group(0x3201, (uint16_t)(31 << 5), small); /* tp=0, pty=31 ignored */
+    TEST_ASSERT_EQUAL_UINT8(10, s.pty);
+    TEST_ASSERT_TRUE(s.tp);
+}
+
+static void test_ta_only_from_type0(void)
+{
+    flags_group(0x3201, 0x2010, OK); /* 2A with bit 4 */
+    TEST_ASSERT_FALSE(s.ta);
+    flags_group(0x3201, 0x0010, OK); /* 0A */
+    TEST_ASSERT_TRUE(s.ta);
+    flags_group(0x3201, 0x2000, OK); /* type 2 does not clear it */
+    TEST_ASSERT_TRUE(s.ta);
+    const uint8_t small[4] = {0, RDS_ERR_SMALL, 0, 0};
+    flags_group(0x3201, 0x0000, small);
+    TEST_ASSERT_TRUE(s.ta);
+    flags_group(0x3201, 0x0800, OK); /* 0B, ta=0 */
+    TEST_ASSERT_FALSE(s.ta);
+}
+
+static void test_ct_valid_and_unix(void)
+{
+    ct_group(61333, 8, 31, 4, OK, B_4A);
+    TEST_ASSERT_TRUE(s.ct.valid);
+    TEST_ASSERT_EQUAL_UINT32(61333, s.ct.mjd);
+    TEST_ASSERT_EQUAL_UINT8(8, s.ct.hour);
+    TEST_ASSERT_EQUAL_UINT8(31, s.ct.minute);
+    TEST_ASSERT_EQUAL_INT8(4, s.ct.offset);
+    TEST_ASSERT_EQUAL_UINT32(1, s.ct.count);
+    TEST_ASSERT_TRUE(rds_ct_unix(&s.ct) == 1792485060LL);
+    ct_group(61333, 8, 32, 4, OK, B_4A);
+    TEST_ASSERT_EQUAL_UINT32(2, s.ct.count);
+}
+
+static void test_ct_negative_offset(void)
+{
+    ct_group(61333, 20, 5, 0x22, OK, B_4A);
+    TEST_ASSERT_TRUE(s.ct.valid);
+    TEST_ASSERT_EQUAL_UINT8(20, s.ct.hour);
+    TEST_ASSERT_EQUAL_INT8(-2, s.ct.offset);
+}
+
+static void test_ct_rejected(void)
+{
+    ct_group(61333, 8, 31, 4, OK, B_4A);
+    const uint8_t eb[4] = {0, RDS_ERR_SMALL, 0, 0};
+    const uint8_t ec[4] = {0, 0, RDS_ERR_SMALL, 0};
+    const uint8_t ed[4] = {0, 0, 0, RDS_ERR_SMALL};
+    ct_group(61334, 9, 10, 0, eb, B_4A);
+    ct_group(61334, 9, 10, 0, ec, B_4A);
+    ct_group(61334, 9, 10, 0, ed, B_4A);
+    ct_group(61334, 9, 10, 0, OK, B_4B);
+    ct_group(0, 0, 0, 0, OK, B_4A);
+    ct_group(61334, 24, 10, 0, OK, B_4A);
+    ct_group(61334, 9, 60, 0, OK, B_4A);
+    ct_group(61334, 9, 10, 25, OK, B_4A);
+    ct_group(88069, 9, 10, 0, OK, B_4A);
+    TEST_ASSERT_TRUE(s.ct.valid);
+    TEST_ASSERT_EQUAL_UINT32(61333, s.ct.mjd);
+    TEST_ASSERT_EQUAL_UINT8(8, s.ct.hour);
+    TEST_ASSERT_EQUAL_UINT8(31, s.ct.minute);
+    TEST_ASSERT_EQUAL_UINT32(1, s.ct.count);
+}
+
+static void set_all_flags(void)
+{
+    ct_group(61333, 8, 31, 4, OK, B_4A); /* its B block also sets pty/tp, so send it first */
+    flags_group(0x3201, (uint16_t)(0x0000 | (1 << 10) | (5 << 5) | 0x10), OK);
+    TEST_ASSERT_TRUE(s.pty_valid && s.tp && s.ta && s.ct.valid);
+}
+
+static void test_pi_change_clears_flags_and_ct(void)
+{
+    set_all_flags();
+    flags_group(0x3202, 0x0000, OK);
+    TEST_ASSERT_TRUE(s.pty_valid); /* once is not enough */
+    flags_group(0x3202, 0x0800, OK);
+    TEST_ASSERT_EQUAL_HEX16(0x3202, s.pi);
+    TEST_ASSERT_FALSE(s.ta);
+    TEST_ASSERT_FALSE(s.tp);
+    TEST_ASSERT_FALSE(s.ct.valid);
+}
+
+static void test_reset_clears_flags_and_ct(void)
+{
+    set_all_flags();
+    rds_reset(&s);
+    TEST_ASSERT_FALSE(s.pty_valid);
+    TEST_ASSERT_FALSE(s.tp);
+    TEST_ASSERT_FALSE(s.ta);
+    TEST_ASSERT_FALSE(s.ct.valid);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -237,5 +355,12 @@ int main(void)
     RUN_TEST(test_pi_version_b_counts_twice);
     RUN_TEST(test_pi_large_error_ignored);
     RUN_TEST(test_af_list_full);
+    RUN_TEST(test_pty_tp_any_group_clean_only);
+    RUN_TEST(test_ta_only_from_type0);
+    RUN_TEST(test_ct_valid_and_unix);
+    RUN_TEST(test_ct_negative_offset);
+    RUN_TEST(test_ct_rejected);
+    RUN_TEST(test_pi_change_clears_flags_and_ct);
+    RUN_TEST(test_reset_clears_flags_and_ct);
     return UNITY_END();
 }

@@ -7,6 +7,10 @@
  * frequency follows. */
 #define RDS_AF_FM_LAST 204
 #define RDS_AF_LFMF    250
+/* Clock time plausibility: Modified Julian Days of 2000-01-01 and 2100-01-01. Stations without a
+ * clock send zeros. */
+#define RDS_MJD_2000 51544u
+#define RDS_MJD_2100 88069u
 
 /* Basic RDS character set overlaps ASCII in 0x20..0x7E; everything else is
  * shown as '?' (control codes as space) until a full table is needed. */
@@ -28,6 +32,10 @@ static void clear_text(rds_state_t *s)
     s->rt_ab = 0xFF;
     s->af_count = 0;
     s->af_lfmf = false;
+    s->pty_valid = false;
+    s->tp = false;
+    s->ta = false;
+    memset(&s->ct, 0, sizeof(s->ct));
 }
 
 void rds_reset(rds_state_t *s)
@@ -79,6 +87,25 @@ static void process_af(rds_state_t *s, uint16_t c)
     }
 }
 
+/* Group 4A: MJD in B[1:0] and C[15:1], UTC hour in C[0] and D[15:12], minute in D[11:6],
+ * local offset in D[5:0] (sign, then half hours). */
+static void process_ct(rds_state_t *s, const uint16_t blk[4])
+{
+    const uint32_t mjd = ((uint32_t)(blk[1] & 0x3u) << 15) | (blk[2] >> 1);
+    const unsigned hour = ((blk[2] & 1u) << 4) | (blk[3] >> 12);
+    const unsigned minute = (blk[3] >> 6) & 0x3Fu;
+    const unsigned halfhours = blk[3] & 0x1Fu;
+    if (mjd < RDS_MJD_2000 || mjd >= RDS_MJD_2100 || hour > 23 || minute > 59 || halfhours > 24) {
+        return;
+    }
+    s->ct.valid = true;
+    s->ct.mjd = mjd;
+    s->ct.hour = (uint8_t)hour;
+    s->ct.minute = (uint8_t)minute;
+    s->ct.offset = (int8_t)((blk[3] & 0x20u) ? -(int)halfhours : (int)halfhours);
+    s->ct.count++;
+}
+
 static void put_rt(rds_state_t *s, unsigned pos, uint8_t c)
 {
     if (pos >= RDS_RT_LEN) {
@@ -102,6 +129,18 @@ bool rds_process_group(rds_state_t *s, const uint16_t blk[4], const uint8_t err[
         update_pi(s, blk[2], err[2]); /* block C' repeats PI */
     }
 
+    if (err[1] == RDS_ERR_NONE) {
+        s->pty = (uint8_t)((b >> 5) & 0x1Fu);
+        s->pty_valid = true;
+        s->tp = (b >> 10) & 1u;
+        if (type == 0) {
+            s->ta = (b >> 4) & 1u;
+        }
+    }
+    if (type == 4 && !version_b && err[1] == RDS_ERR_NONE && err[2] == RDS_ERR_NONE &&
+        err[3] == RDS_ERR_NONE) {
+        process_ct(s, blk);
+    }
     if (type == 0 && !version_b && err[2] <= RDS_ERR_SMALL) {
         process_af(s, blk[2]);
     }

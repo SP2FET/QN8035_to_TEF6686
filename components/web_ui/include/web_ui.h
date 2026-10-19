@@ -27,6 +27,14 @@
  *   "af"          {"active","poor","checking_pi","score","switches","pi_fails",
  *                 "list":[{"khz","score","level","age_s","banned"}]}
  *                 score in dB = level - USN - WAM; null when unknown
+ *   "af.events"   the last 10 AF tries, newest first: {"type":"switched"|"other_pi"|"no_pi",
+ *                 "age_s","from","to","score","cur","pi","ban_s"} (kHz, dB). "pi" is the PI
+ *                 heard on the candidate for other_pi, else null; "ban_s" the skip time given
+ *   "rds.pty"     programme type 0..31 (RDS table); null until known
+ *   "rds.tp","rds.ta"  traffic programme / traffic announcement flags
+ *   "rds.ct"      {"unix": UTC seconds, "off_min": local offset} of the last error-free
+ *                 clock-time group; null until one arrives
+ *   "clock_set"   true once the system clock was set from RDS clock time
  *   "force_mono"  true while mono is forced (head unit FORCE_MO)
  *
  * Memory channels (radio_mem; stand-alone build, else 503). N is the channel number 1..40:

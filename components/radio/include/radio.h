@@ -9,6 +9,9 @@
  *
  * Reception tuning (tuning.h: weak-signal DSP, AF and seek thresholds) is applied
  * at every tuner boot and live on change. This service does not store it.
+ *
+ * RDS clock time sets the system clock (UTC) and TZ (the station's offset), so local
+ * time and log time stamps follow the station once one sends CT.
  */
 #pragma once
 
@@ -48,6 +51,27 @@ typedef struct {
     uint16_t sthiblend;
 } radio_quality_t;
 
+/** What an AF try ended with (radio_af_event_t). */
+typedef enum {
+    RADIO_AF_EV_SWITCHED = 0, /**< PI confirmed: to_khz plays now */
+    RADIO_AF_EV_OTHER_PI,     /**< to_khz carries another programme (pi) */
+    RADIO_AF_EV_NO_PI,        /**< no PI from to_khz within the PI check timeout */
+} radio_af_ev_type_t;
+
+/** One AF try, for the web UI. */
+typedef struct {
+    uint32_t t_ms;     /**< on the clock of radio_af_status_t.now_ms */
+    uint8_t type;      /**< radio_af_ev_type_t */
+    uint32_t from_khz; /**< the tuned station */
+    uint32_t to_khz;   /**< the candidate */
+    int16_t score;     /**< the candidate's measured score, 0.1 dB */
+    int16_t cur;       /**< the tuned station's smoothed score at the try, 0.1 dB */
+    uint16_t pi;       /**< heard on the candidate (OTHER_PI) */
+    uint32_t ban_s;    /**< skip time given (OTHER_PI, NO_PI) */
+} radio_af_event_t;
+
+#define RADIO_AF_EVENTS 10
+
 /** AF following, see af.h. */
 typedef struct {
     bool active;        /**< enabled, FM and the PI is known: AFs are followed */
@@ -59,6 +83,8 @@ typedef struct {
     uint32_t now_ms;    /**< clock of the entries' times */
     uint8_t n;
     af_entry_t e[AF_MAX];
+    uint8_t ev_n;
+    radio_af_event_t ev[RADIO_AF_EVENTS]; /**< the last tries, newest first */
 } radio_af_status_t;
 
 typedef struct {
@@ -76,6 +102,7 @@ typedef struct {
     bool bw_auto;
     uint16_t bw;         /**< 0.1 kHz, used when !bw_auto */
     bool force_mono;     /**< radio_set_force_mono() */
+    bool clock_set;      /**< the system clock was set from RDS clock time */
 
     radio_quality_t q;
     bool rds_sync;

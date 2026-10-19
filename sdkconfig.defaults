@@ -42,3 +42,6 @@ CONFIG_HTTPD_MAX_URI_LEN=512
 # and a reset before that rolls back. Lives in the bootloader: takes effect only
 # after one USB flash.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# Log time stamps from the system clock (wall time once RDS clock time sets it; uptime before)
+CONFIG_LOG_TIMESTAMP_SOURCE_SYSTEM=y

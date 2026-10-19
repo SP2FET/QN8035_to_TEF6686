@@ -1,6 +1,7 @@
 /**
  * @file
- * Minimal RDS group decoder: PI, PS (0A/0B), the AF list (0A) and RadioText (2A/2B).
+ * Minimal RDS group decoder: PI, PS (0A/0B), the AF list (0A), RadioText (2A/2B), programme
+ * type and traffic flags (every group) and clock time (4A).
  * Pure C, no ESP-IDF dependency (host-tested, see test/test_rds).
  */
 #pragma once
@@ -24,6 +25,16 @@ enum {
     RDS_ERR_FATAL = 3,
 };
 
+/** Clock time from group 4A (IEC 62106): a UTC date and time plus the station's local offset. */
+typedef struct {
+    bool valid;
+    uint32_t mjd;   /**< Modified Julian Day of the UTC date */
+    uint8_t hour;   /**< UTC */
+    uint8_t minute;
+    int8_t offset;  /**< local time = UTC + offset half hours, -24..24 */
+    uint32_t count; /**< CT groups taken since reset; changes with each one */
+} rds_ct_t;
+
 typedef struct {
     uint16_t pi;
     bool pi_valid;
@@ -39,6 +50,13 @@ typedef struct {
     uint8_t af[RDS_AF_MAX];
     uint8_t af_count;
     bool af_lfmf;            /**< the next AF code is an LF/MF frequency (after code 250) */
+    /** Programme type 0..31 (RDS table, not RBDS), traffic programme and traffic announcement.
+     * Taken from error-free B blocks only: a miscorrected one would flicker them. */
+    uint8_t pty;
+    bool pty_valid;
+    bool tp;
+    bool ta;
+    rds_ct_t ct;             /**< last clock time; only fully error-free 4A groups count */
     uint32_t groups;         /**< accepted groups */
     uint32_t rejected;       /**< groups dropped because block B was unusable */
 } rds_state_t;
@@ -55,6 +73,12 @@ bool rds_process_group(rds_state_t *s, const uint16_t blk[4], const uint8_t err[
 
 /** First-PI message (only block A valid). */
 void rds_process_pi(rds_state_t *s, uint16_t pi, uint8_t err);
+
+/** Seconds since 1970-01-01 UTC of a valid clock time. */
+static inline int64_t rds_ct_unix(const rds_ct_t *ct)
+{
+    return ((int64_t)ct->mjd - 40587) * 86400 + ct->hour * 3600 + ct->minute * 60;
+}
 
 #ifdef __cplusplus
 }

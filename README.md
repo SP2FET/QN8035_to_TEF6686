@@ -84,14 +84,20 @@ keeps the open one (`#radio`, `#tuning`, `#log`):
   - Memory (stand-alone build): 40 memory channels.
   - Signal: level, USN (noise), WAM (multipath), offset, bandwidth, modulation, and how hard
     soft mute, high cut and stereo blend are working at the moment.
-  - RDS: PI, PS, RadioText, group and error counts.
-  - AF: whether AF following is active, the tuned station's score and each alternative
-    frequency with its last measurement.
+  - RDS: PI, PS, RadioText, programme type, TP/TA, the station's clock, group and error
+    counts.
+  - AF: whether AF following is active, the tuned station's score, each alternative
+    frequency with its last measurement, and the last tries with their outcome.
   - Device: tuner state, firmware, OTA upload.
 - **Tuning**: every weak-signal, AF and seek parameter, changed live (see below), under a live
   strip with the signal values and the processing bars. A dot on the tab marks unsaved changes.
+  **History** (off by default) adds charts of the last two minutes: level, USN/WAM and the
+  processing, drawn in the browser from the status it already polls.
 - **Log**: the live log over WebSocket, with pause, filter and autoscroll. While another tab is
   open, the tab counts new lines (red if one is an error).
+
+Once a station sends RDS clock time, the device's clock follows it, and log lines carry the
+station's local time instead of the uptime.
 
 The JSON API (`/api/status`, `/api/tune`, `/api/tuning`, ...) is listed in
 [web_ui.h](components/web_ui/include/web_ui.h).

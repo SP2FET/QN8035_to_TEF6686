@@ -118,6 +118,15 @@ nav button{flex:1 1 0;display:flex;align-items:center;justify-content:center;gap
 .ls{min-width:0}
 .ls small{display:block;font-size:.7rem;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .live .bar{height:6px;margin:2px 0 0}
+.cbox{position:relative}
+.cbox canvas{display:block;width:100%;height:116px;touch-action:pan-y}
+.lg{display:flex;flex-wrap:wrap;gap:2px 14px;font-size:.75rem;margin-bottom:4px}
+.lg i{display:inline-block;width:10px;height:3px;margin-right:5px;vertical-align:middle}
+.tip{position:absolute;top:4px;z-index:2;pointer-events:none;white-space:nowrap;background:var(--bg);border:1px solid var(--bd);border-radius:6px;padding:4px 8px;font-size:.75rem;font-variant-numeric:tabular-nums}
+.tip div:first-child{color:var(--dim)}
+.afe{display:flex;flex-wrap:wrap;align-items:center;gap:2px 10px;padding:6px 0;border-top:1px solid rgba(139,148,158,.2);font-size:.85rem;font-variant-numeric:tabular-nums}
+.afe:first-child{border-top:0}
+.afe .badge{font-size:.75rem;padding:1px 8px}
 #p-tuning main{grid-template-columns:1fr}
 @media(min-width:900px){#tbody{columns:2;column-gap:10px}#tbody details{break-inside:avoid}}
 </style>
@@ -190,9 +199,10 @@ nav button{flex:1 1 0;display:flex;align-items:center;justify-content:center;gap
 </section>
 
 <section class="a-r" aria-labelledby="h-r">
-<div class="hd"><h2 id="h-r">RDS</h2><span class="meta"><span class="badge" id="rsync">SYNC</span><span class="mono">PI <span id="pi">—</span></span></span></div>
+<div class="hd"><h2 id="h-r">RDS</h2><span class="meta"><span class="badge" id="rtp">TP</span><span class="badge warn" id="rta">TA</span><span class="badge" id="rsync">SYNC</span><span class="mono">PI <span id="pi">—</span></span></span></div>
 <div class="mono" id="ps">—</div>
 <div class="mono" id="rt">—</div>
+<div class="hs" id="rpty">—</div>
 <div class="hs">Groups <span id="rg">—</span> / Errors <span id="re">—</span></div>
 </section>
 
@@ -205,6 +215,8 @@ nav button{flex:1 1 0;display:flex;align-items:center;justify-content:center;gap
 <div class="stat"><small>PI fails</small><b id="afpf">—</b></div>
 </div>
 <div id="aft" style="overflow-x:auto"></div>
+<div class="sub">Recent tries</div>
+<div id="afe"></div>
 </div>
 <div class="hs" id="afm" hidden>FM only</div>
 </section>
@@ -220,6 +232,7 @@ nav button{flex:1 1 0;display:flex;align-items:center;justify-content:center;gap
 <dt>QN8035</dt><dd id="qn">—</dd>
 <dt>Firmware</dt><dd id="fwv">—</dd>
 <dt>Slot</dt><dd id="fws">—</dd>
+<dt>Clock</dt><dd id="clk">—</dd>
 </dl>
 <div class="actions">
 <div class="row"><button id="reinit">Re-init</button></div>
@@ -249,6 +262,11 @@ nav button{flex:1 1 0;display:flex;align-items:center;justify-content:center;gap
 </div>
 </div>
 <main>
+<section class="wide" aria-labelledby="h-hi">
+<div class="hd"><h2 id="h-hi">Signal history</h2><span class="meta"><button id="hbtn" aria-pressed="false">History</button></span></div>
+<div id="hbody" hidden></div>
+</section>
+
 <section class="wide" aria-labelledby="h-u">
 <div class="hd"><h2 id="h-u">Reception tuning</h2></div>
 <div class="row"><button id="tsave" class="pri">Save</button><button id="trev">Revert</button><button id="tdef">Defaults</button><span class="badge" id="tsv">—</span></div>
@@ -383,7 +401,10 @@ function render(s){
   });
   txt('vaf',am||!s.af?null:num(s.af.score,1,' dB'));
   renderAf(s.af||{},am);
-  on('rsync',rds.sync);txt('pi',rds.pi);
+  histPush(s,q,dd,am);
+  on('rsync',rds.sync);txt('pi',rds.pi);on('rtp',rds.tp);on('rta',rds.ta);
+  $('rpty').textContent=(typeof rds.pty==='number'&&PTY[rds.pty]||'—')+(rds.ct&&typeof rds.ct.unix==='number'?' · '+fmtCt(rds.ct):'');
+  txt('clk',s.clock_set==null?null:s.clock_set?'from RDS':'not set (no RDS clock yet)');
   $('tps').textContent=rds.ps||'';
   txt('ps',rds.ps);txt('rt',rds.rt);txt('rg',rds.groups);txt('re',rds.errors);
   txt('tstate',(tef.ready?'ready':'not ready')+' / '+(tef.state||'—')+' / op '+(tef.op_status==null?'—':tef.op_status));
@@ -407,6 +428,7 @@ function render(s){
 function renderAf(a,am){
   $('afb').hidden=am;$('afm').hidden=!am;$('afh').hidden=am;
   if(am)return;
+  renderAfEv(a.events||[]);
   on('afa',a.active);on('afc',a.poor);on('afp',a.checking_pi);
   $('afs').textContent=num(a.score,1,' dB');$('afw').textContent=a.switches||0;$('afpf').textContent=a.pi_fails||0;
   const t=$('aft'),l=a.list||[];
@@ -431,6 +453,27 @@ function renderAf(a,am){
     }
   }
   t.appendChild(tb);
+}
+const PTY=['None','News','Current affairs','Information','Sport','Education','Drama','Culture','Science','Varied','Pop music','Rock music','Easy listening','Light classical','Serious classical','Other music','Weather','Finance',"Children's programmes",'Social affairs','Religion','Phone-in','Travel','Leisure','Jazz music','Country music','National music','Oldies music','Folk music','Documentary','Alarm test','Alarm'];
+function fmtCt(c){ // station clock as local time, read with UTC getters so the browser zone is irrelevant
+  const d=new Date((c.unix+c.off_min*60)*1000),p=v=>String(v).padStart(2,'0'),o=c.off_min,a=Math.abs(o);
+  return d.getUTCFullYear()+'-'+p(d.getUTCMonth()+1)+'-'+p(d.getUTCDate())+' '+p(d.getUTCHours())+':'+p(d.getUTCMinutes())
+    +' (UTC'+(o<0?'-':'+')+Math.floor(a/60)+(a%60?':'+p(a%60):'')+')';
+}
+const fmtAge=n=>typeof n!=='number'?'—':n<60?n+' s ago':n<3600?Math.floor(n/60)+' min ago':Math.floor(n/3600)+' h ago';
+function renderAfEv(l){
+  const t=$('afe');t.textContent='';
+  if(!l.length){const p=document.createElement('div');p.className='hs';p.textContent='No AF tries yet';t.appendChild(p);return}
+  const mk=(c,x)=>{const e=document.createElement('span');if(c)e.className=c;e.textContent=x;return e};
+  for(const e of l){
+    const r=document.createElement('div'),ok=e.type==='switched';
+    r.className='afe';
+    r.append(mk('hs',fmtAge(e.age_s)),mk(null,(e.from/1000).toFixed(2)+' → '+(e.to/1000).toFixed(2)+' MHz'),
+      mk(ok?'badge on':e.type==='other_pi'?'badge er on':'badge warn on',ok?'switched':e.type==='other_pi'?'PI '+(e.pi||'?'):'no PI'),
+      mk('hs','score '+num(e.score,1)+' vs '+num(e.cur,1)+' dB'));
+    if(!ok&&e.ban_s)r.appendChild(mk('hs','skip '+e.ban_s+' s'));
+    t.appendChild(r);
+  }
 }
 const fmtF=(b,k)=>b==='AM'?k+' kHz':(k/1000).toFixed(2)+' MHz';
 const slotOf=n=>mem&&mem.slots.find(e=>e.slot===n);
@@ -596,6 +639,103 @@ $('tdef').onclick=()=>{
   tdTimer=setTimeout(reset,3000);
 };
 
+// ---- Signal history (opt-in, canvas) ----
+const HC=[
+  {n:'Level',u:' dBµV',max:80,tk:[0,40,80],s:['Level']},
+  {n:'USN / WAM',u:' %',max:100,tk:[0,50,100],s:['USN','WAM']},
+  {n:'Processing',u:' %',max:100,tk:[0,50,100],s:['Soft mute','High cut','Stereo blend','High blend']}];
+const HK=[[0],[1,2],[3,4,5,6]],HCOL=['#3987e5','#d95926','#199e70','#c98500'];
+const HN=240,HSPAN=120000,PH=90,PT=8,PB=18,PL=30,PR=36;
+let hOn=false,hs=[],hf=null,hnow=0,hx=null,hci=-1;
+try{hOn=localStorage.getItem('tef.hist')==='1'}catch(e){}
+const hcv=[],htip=[];
+HC.forEach((c,i)=>{
+  const w=document.createElement('div'),h=document.createElement('div'),cv=document.createElement('canvas'),tp=document.createElement('div'),bx=document.createElement('div');
+  h.className='sub';const un=document.createElement('span');un.style.textTransform='none';un.textContent=' ('+c.u.trim()+')';h.append(c.n,un);w.appendChild(h);
+  if(c.s.length>1){
+    const lg=document.createElement('div');lg.className='lg';
+    c.s.forEach((n,k)=>{const sp=document.createElement('span'),sw=document.createElement('i');sw.style.background=HCOL[k];sp.append(sw,n);lg.appendChild(sp)});
+    w.appendChild(lg);
+  }
+  tp.className='tip';tp.hidden=true;bx.className='cbox';bx.append(cv,tp);w.appendChild(bx);
+  $('hbody').appendChild(w);hcv.push(cv);htip.push(tp);
+  cv.onpointermove=e=>{hx=e.clientX-cv.getBoundingClientRect().left;hci=i;drawH()};
+  cv.onpointerleave=cv.onpointercancel=()=>{hx=null;hci=-1;drawH()};
+});
+function tipH(tp,c,k,W){
+  const tt=hnow-HSPAN+(hx-PL)/(W-PR-PL)*HSPAN;
+  let b=null;
+  for(const p of hs)if(!b||Math.abs(p.t-tt)<Math.abs(b.t-tt))b=p;
+  if(!b)return;
+  tp.textContent='';
+  [['−'+Math.round((hnow-b.t)/1000)+' s']].concat(c.s.map((n,j)=>[n+': '+num(b.v[k[j]],1,c.u)])).forEach(([x])=>{
+    const d=document.createElement('div');d.textContent=x;tp.appendChild(d);
+  });
+  tp.hidden=false;
+  let x=hx+12;if(x+tp.offsetWidth>W)x=hx-12-tp.offsetWidth;
+  tp.style.left=Math.max(0,x)+'px';
+}
+function drawH(){
+  if(!hOn||curTab!=='tuning')return;
+  const dpr=window.devicePixelRatio||1,cs=getComputedStyle(document.documentElement),dim=cs.getPropertyValue('--dim'),bd=cs.getPropertyValue('--bd');
+  HC.forEach((c,i)=>{
+    const cv=hcv[i],W=cv.clientWidth,H=PT+PH+PB,k=HK[i];
+    htip[i].hidden=true;
+    if(!W)return;
+    if(cv.width!==Math.round(W*dpr)||cv.height!==Math.round(H*dpr)){cv.width=Math.round(W*dpr);cv.height=Math.round(H*dpr)}
+    const g=cv.getContext('2d'),R=W-PR,X=t=>PL+(R-PL)*(1-(hnow-t)/HSPAN),Y=v=>PT+PH*(1-Math.max(0,Math.min(c.max,v))/c.max);
+    g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,H);
+    g.font='11.2px system-ui,sans-serif';g.lineWidth=1;g.strokeStyle=bd;g.fillStyle=dim;
+    g.textAlign='right';g.textBaseline='middle';
+    for(const v of c.tk){const y=Math.round(Y(v))+.5;g.beginPath();g.moveTo(PL,y);g.lineTo(R,y);g.stroke();g.fillText(v,PL-5,y)}
+    g.textBaseline='top';g.fillText('now',R,PT+PH+5);g.textAlign='left';g.fillText('−2 min',PL,PT+PH+5);
+    const lab=[],last=hs[hs.length-1];
+    g.lineWidth=2;g.lineJoin=g.lineCap='round';
+    k.forEach((n,j)=>{
+      g.strokeStyle=HCOL[j];g.beginPath();
+      let pen=false;
+      for(const p of hs){
+        const v=p.v[n];
+        if(v==null){pen=false;continue}
+        const x=X(p.t),y=Y(v);
+        if(!pen)g.moveTo(x,y);
+        g.lineTo(x,y);pen=true;
+      }
+      g.stroke();
+      if(last&&last.v[n]!=null)lab.push([Y(last.v[n]),last.v[n]]);
+    });
+    lab.sort((a,b)=>a[0]-b[0]);
+    g.fillStyle=dim;g.textBaseline='middle';
+    let py=-99;
+    for(const [y,v] of lab)if(y-py>=10){g.fillText(v.toFixed(c.max===80?1:0),R+4,y);py=y}
+    if(hx!=null&&hx>=PL&&hx<=R){
+      const x=Math.round(hx)+.5;
+      g.lineWidth=1;g.strokeStyle=dim;g.beginPath();g.moveTo(x,PT);g.lineTo(x,PT+PH);g.stroke();
+      if(i===hci)tipH(htip[i],c,k,W);
+    }
+  });
+}
+function histPush(s,q,dd,am){
+  if(!hOn)return;
+  const f=s.band+':'+s.freq_khz;
+  if(f!==hf){hf=f;hs=[]}
+  const ok=q.valid!==false,n=v=>ok&&typeof v==='number'?v:null,d=am||!dd?{}:dd,now=Date.now();
+  hnow=now;
+  hs.push({t:now,v:[n(q.level),am?null:n(q.usn),am?null:n(q.wam),n(d.softmute),n(d.highcut),n(d.stereo),n(d.sthiblend)]});
+  while(hs.length>HN||now-hs[0].t>HSPAN)hs.shift();
+  drawH();
+}
+function histUi(){
+  $('hbtn').classList.toggle('sel',hOn);$('hbtn').setAttribute('aria-pressed',hOn);$('hbody').hidden=!hOn;
+  hs=[];hf=null;hx=null;drawH();
+}
+$('hbtn').onclick=()=>{
+  hOn=!hOn;histUi();
+  try{localStorage.setItem('tef.hist',hOn?'1':'0')}catch(e){}
+};
+addEventListener('resize',drawH);
+histUi();
+
 // ---- Memory channels (/api/preset/*) ----
 function clip(s){ // to NAME_MAX UTF-8 bytes, whole characters
   s=s.trim();
@@ -734,6 +874,7 @@ function showTab(){
     $('p-'+n).hidden=!a;
   }
   if(t==='tuning'&&!tun)loadTun();
+  if(t==='tuning')drawH();
   if(t==='log'){unread=0;unE=unW=false;badge();if(auto)log.scrollTop=log.scrollHeight}
 }
 function goTab(t){history.replaceState(null,'','#'+t);showTab()} // no history entry per tab click
