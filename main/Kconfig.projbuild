@@ -97,31 +97,6 @@ menu "QN8035 -> TEF6686 bridge"
             range -60 24
             default 0
 
-        config BRIDGE_SEEK_MIN_LEVEL_DBUV
-            int "Seek: minimum level (dBuV)"
-            range 0 100
-            default 25
-
-        config BRIDGE_SEEK_MAX_USN_PCT
-            int "Seek: maximum USN (ultrasonic noise, %)"
-            range 0 100
-            default 20
-
-        config BRIDGE_SEEK_MAX_WAM_PCT
-            int "Seek: maximum WAM (multipath, %)"
-            range 0 100
-            default 20
-
-        config BRIDGE_SEEK_MAX_OFFSET_KHZ
-            int "Seek: maximum frequency offset (kHz)"
-            range 1 50
-            default 8
-            help
-                Crystal tolerance alone shifts every station by a few kHz (20 ppm is
-                2 kHz at 100 MHz); the seek averages out the swing caused by programme
-                audio. A channel next to a strong station reads 20 kHz or more, so
-                8 kHz still rejects it.
-
         config BRIDGE_MEMORY
             bool "Remember the last station and settings, keep memory channels"
             depends on !BRIDGE_QN_EMU_ENABLE

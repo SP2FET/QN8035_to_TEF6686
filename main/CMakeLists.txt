@@ -7,6 +7,7 @@ idf_component_register(
         app_update
         nvs_flash
         tef6686
+        tuning_store
         radio
         radio_mem
         bridge

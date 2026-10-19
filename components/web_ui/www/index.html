@@ -52,6 +52,14 @@ dt{color:var(--dim)}dd{margin:0;word-break:break-word}
 .mgrid b{color:var(--dim);margin-right:6px}
 .mgrid small{display:block;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mgrid button.sel b,.mgrid button.sel small{color:#fff}
+.aft{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+.aft th,.aft td{padding:4px 8px;text-align:right;white-space:nowrap;border-bottom:1px solid var(--bd)}
+.aft th{color:var(--dim);font-weight:600}
+details{border:1px solid var(--bd);border-radius:6px;margin:8px 0;padding:0 10px}
+summary{min-height:44px;display:flex;align-items:center;cursor:pointer;font-weight:600}
+details .row>label{flex:1 1 9em}
+input[type=number]{width:6em;min-height:44px;font:inherit;color:var(--fg);background:#21262d;border:1px solid var(--bd);border-radius:6px;padding:0 6px}
+#tsv{color:var(--dim)}#tsv.dirty{color:var(--wa)}
 </style>
 </head>
 <body>
@@ -65,7 +73,7 @@ dt{color:var(--dim)}dd{margin:0;word-break:break-word}
 <section aria-labelledby="h-t">
 <h2 id="h-t">Tuner</h2>
 <div class="freq" id="freq">—</div>
-<div class="row"><span class="badge" id="st">ST</span><span class="badge warn" id="mb">MUTE</span></div>
+<div class="row"><span class="badge" id="st">ST</span><span class="badge warn" id="mb">MUTE</span><span class="badge warn" id="mob">MONO</span></div>
 <div class="row" role="group" aria-label="Band">
 <button id="bFM">FM</button><button id="bAM">AM</button>
 </div>
@@ -110,6 +118,10 @@ dt{color:var(--dim)}dd{margin:0;word-break:break-word}
 <dt>Offset</dt><dd id="off">—</dd>
 <dt>Bandwidth</dt><dd id="qbw">—</dd>
 <dt>Modulation</dt><dd><span id="mod">—</span><div class="bar"><i id="modb"></i></div></dd>
+<dt class="dsp">Soft mute</dt><dd class="dsp"><span id="dsm">—</span><div class="bar"><i id="dsmb"></i></div></dd>
+<dt class="dsp">High cut</dt><dd class="dsp"><span id="dhc">—</span><div class="bar"><i id="dhcb"></i></div></dd>
+<dt class="dsp">Stereo blend</dt><dd class="dsp"><span id="dsb">—</span><div class="bar"><i id="dsbb"></i></div></dd>
+<dt class="dsp">High blend</dt><dd class="dsp"><span id="dhb">—</span><div class="bar"><i id="dhbb"></i></div></dd>
 <dt>Valid</dt><dd><span class="badge" id="qv">—</span></dd>
 </dl>
 </section>
@@ -120,6 +132,22 @@ dt{color:var(--dim)}dd{margin:0;word-break:break-word}
 <div class="mono" id="ps">—</div>
 <div class="mono" id="rt">—</div>
 <div class="hs">Groups <span id="rg">—</span> / Errors <span id="re">—</span></div>
+</section>
+
+<section aria-labelledby="h-af">
+<h2 id="h-af">AF</h2>
+<div id="afb">
+<div class="row"><span class="badge" id="afa">AF</span><span class="badge warn" id="afc">CHECKING</span><span class="badge warn" id="afp">PI CHECK</span></div>
+<div class="hs" id="afl">—</div>
+<div id="aft" style="overflow-x:auto"></div>
+</div>
+<div class="hs" id="afm" hidden>FM only</div>
+</section>
+
+<section class="wide" aria-labelledby="h-u">
+<h2 id="h-u">Reception tuning</h2>
+<div class="row"><button id="tsave">Save</button><button id="trev">Revert</button><button id="tdef">Defaults</button><span id="tsv">—</span></div>
+<div id="tbody"></div>
 </section>
 
 <section class="wide" aria-labelledby="h-d">
@@ -234,7 +262,7 @@ function render(s){
   $('bFM').classList.toggle('sel',!am);$('bAM').classList.toggle('sel',am);
   $('flab').textContent=am?'kHz':'MHz';
   $('ks').classList.toggle('hl',!!s.seeking);
-  on('st',q.stereo);on('mb',s.mute);
+  on('st',q.stereo);on('mb',s.mute);on('mob',s.force_mono);
   $('mute').textContent=s.mute?'Unmute':'Mute';
   $('mute').classList.toggle('sel',!!s.mute);
   if(!volDrag&&typeof s.volume_db==='number'){$('vol').value=s.volume_db;txt('volv',s.volume_db.toFixed(1)+' dB')}
@@ -251,6 +279,12 @@ function render(s){
   txt('off',num(q.offset,1,' kHz'));txt('qbw',num(q.bw,1,' kHz'));
   txt('mod',num(q.mod,1,' %'));$('modb').style.width=pct(q.mod,120);
   const qv=$('qv');qv.textContent=q.valid?'valid':q.valid===false?'invalid':'—';qv.classList.toggle('on',!!q.valid);
+  const dd=q.dsp;
+  for(const e of document.querySelectorAll('.dsp'))e.style.display=am||!dd?'none':'';
+  if(dd)[['dsm','softmute'],['dhc','highcut'],['dsb','stereo'],['dhb','sthiblend']].forEach(([i,k])=>{
+    txt(i,num(dd[k],1,' %'));$(i+'b').style.width=pct(dd[k],100);
+  });
+  renderAf(s.af||{},am);
   on('rsync',rds.sync);txt('pi',rds.pi);
   txt('ps',rds.ps);txt('rt',rds.rt);txt('rg',rds.groups);txt('re',rds.errors);
   txt('tstate',(tef.ready?'ready':'not ready')+' / '+(tef.state||'—')+' / op '+(tef.op_status==null?'—':tef.op_status));
@@ -270,6 +304,30 @@ function render(s){
     const k=band+':'+f;
     if(k!==memKey){memKey=k;renderMem(false)}
   }
+}
+function renderAf(a,am){
+  $('afb').hidden=am;$('afm').hidden=!am;
+  if(am)return;
+  on('afa',a.active);on('afc',a.poor);on('afp',a.checking_pi);
+  $('afl').textContent='Score '+num(a.score,1,' dB')+' · switches '+(a.switches||0)+' · PI fails '+(a.pi_fails||0);
+  const t=$('aft'),l=a.list||[];
+  t.textContent='';
+  if(!l.length){
+    const p=document.createElement('div');p.className='hs';p.textContent='No AF list yet (needs RDS group 0A)';
+    t.appendChild(p);return;
+  }
+  const tb=document.createElement('table'),row=(tag,c)=>{
+    const r=document.createElement('tr');
+    c.forEach(v=>{const e=document.createElement(tag);e.textContent=v;r.appendChild(e)});
+    tb.appendChild(r);return r;
+  };
+  tb.className='aft';
+  row('th',['MHz','Score','Level','Age','']);
+  for(const e of l){
+    const r=row('td',[(e.khz/1000).toFixed(2),num(e.score,1),num(e.level,1),typeof e.age_s==='number'?e.age_s+' s':'—',e.banned?'banned':'']);
+    if(e.banned)r.lastChild.className='err';
+  }
+  t.appendChild(tb);
 }
 const fmtF=(b,k)=>b==='AM'?k+' kHz':(k/1000).toFixed(2)+' MHz';
 const slotOf=n=>mem&&mem.slots.find(e=>e.slot===n);
@@ -342,6 +400,95 @@ $('reinit').onclick=()=>{
   if(reTimer){clearTimeout(reTimer);reTimer=0;b.textContent='Re-init';b.classList.remove('danger');cmd('reinit');return}
   b.textContent='Confirm?';b.classList.add('danger');
   reTimer=setTimeout(()=>{reTimer=0;b.textContent='Re-init';b.classList.remove('danger')},3000);
+};
+
+// ---- Reception tuning (/api/tuning*) ----
+const HELP={
+'Reception':'Multipath suppression (iMS) and the channel equalizer fight reflections (WAM). The noise blanker removes ignition clicks. Auto bandwidth narrows the IF filter next to strong neighbours. Lower the RF AGC start if strong local stations overload the input.',
+'Soft mute':'Turns the volume down on weak, noisy or reflected signals. Each detector (level, USN noise, WAM multipath) has a start and a slope; the strongest wins, up to Maximum attenuation. Fast times act on short dropouts, slow times on trends.',
+'High cut':'Cuts treble on weak, noisy or reflected signals. The corner limits set how far it may cut.',
+'Stereo blend':'Blends stereo to mono as the signal degrades. Separation limit = forced mono switches stereo off.',
+'Stereo high blend':'Blends only the treble to mono and keeps stereo in the low range.',
+'AF':'Follows the programme to another transmitter from the RDS AF list. When the score (level − USN − WAM, in dB) falls below the trigger, one AF per interval is measured inaudibly (AF_Update). One that beats the score by the margin is tried muted until its PI answers (PI check timeout) and kept only if the PI matches. REG on: regional variants count as other programmes.',
+'Seek':'A seek stops on the first channel that meets all four limits.'};
+let tun=null,tdTimer=0;
+const dec=p=>Math.round(Math.log10(p.div)),fv=(p,v)=>(v/p.div).toFixed(dec(p));
+const clampV=(p,v)=>Math.max(p.min,Math.min(p.max,Math.round(v)));
+function tstat(){
+  const d=tun.params.some(p=>p.v!==p.sv),e=$('tsv');
+  e.textContent=d?'Unsaved changes':'All saved';e.classList.toggle('dirty',d);
+}
+function tupd(p){ // refresh the controls of p (not the focused one), its reset button and group
+  const a=document.activeElement,s=(e,v)=>{if(a!==e)e.value=v};
+  if(p.sel)s(p.sel,p.v);else{s(p.rs,p.v/p.div);s(p.nm,fv(p,p.v))}
+  p.rb.hidden=p.v===p.def;
+  const n=p.G.ps.filter(x=>x.v!==x.def).length;
+  p.G.sm.textContent=p.G.name+(n?' · '+n+' changed':'');
+  tstat();
+}
+async function tset(p,v){
+  p.v=clampV(p,v);tupd(p);
+  if(!await cmd('tuning',{k:p.k,v:p.v}))loadTun();
+}
+async function loadTun(){
+  try{
+    const r=await fetch('/api/tuning',{cache:'no-store'});
+    tun=await r.json();renderTun();
+  }catch(e){}
+}
+function renderTun(){
+  const body=$('tbody'),open=new Set([...body.querySelectorAll('details[open]')].map(d=>d.dataset.g));
+  body.textContent='';
+  const gs=new Map(),mk=(t,c,x)=>{const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e};
+  for(const p of tun.params){
+    let g=gs.get(p.g);
+    if(!g){
+      g={name:p.g,ps:[],d:mk('details'),sm:mk('summary')};
+      g.d.dataset.g=p.g;g.d.open=open.has(p.g);
+      g.d.append(g.sm,mk('p','hs',HELP[p.g]||''));
+      gs.set(p.g,g);body.appendChild(g.d);
+    }
+    g.ps.push(p);p.G=g;
+    const id='tp_'+p.k,r=mk('div','row'),lb=mk('label',null,p.l);
+    lb.htmlFor=id;r.appendChild(lb);
+    if(p.c){
+      const s=p.sel=mk('select');s.id=id;
+      p.c.split(',').forEach(c=>{const i=c.indexOf('='),o=mk('option',null,c.slice(i+1));o.value=c.slice(0,i);s.appendChild(o)});
+      s.onchange=()=>tset(p,+s.value);
+      r.appendChild(s);
+    }else{
+      const rs=p.rs=mk('input'),nm=p.nm=mk('input'),f=(e,t)=>{e.type=t;e.min=p.min/p.div;e.max=p.max/p.div;e.step=1/p.div};
+      let t=0;
+      f(rs,'range');f(nm,'number');nm.id=id;rs.setAttribute('aria-label',p.l);
+      rs.oninput=()=>{
+        p.v=clampV(p,rs.value*p.div);tupd(p);nm.value=fv(p,p.v);
+        clearTimeout(t);t=setTimeout(()=>tset(p,p.v),250);
+      };
+      rs.onchange=()=>{clearTimeout(t);tset(p,rs.value*p.div)};
+      nm.onchange=()=>{
+        const v=parseFloat(nm.value);
+        if(isNaN(v)){nm.value=fv(p,p.v);return}
+        tset(p,v*p.div);nm.value=fv(p,p.v);
+      };
+      r.append(rs,nm);
+    }
+    r.appendChild(mk('span','hs',p.u));
+    const b=p.rb=mk('button',null,'↺');b.setAttribute('aria-label','Reset to default');b.title='Reset to default';
+    b.onclick=()=>tset(p,p.def);
+    r.appendChild(b);g.d.appendChild(r);
+    tupd(p);
+  }
+}
+$('tsave').onclick=async()=>{
+  if(!tun||!await cmd('tuning/save'))return;
+  tun.params.forEach(p=>p.sv=p.v);tstat();
+};
+$('trev').onclick=async()=>{if(await cmd('tuning/revert'))setTimeout(loadTun,300)};
+$('tdef').onclick=()=>{
+  const b=$('tdef'),reset=()=>{tdTimer=0;b.textContent='Defaults';b.classList.remove('danger')};
+  if(tdTimer){clearTimeout(tdTimer);reset();cmd('tuning/defaults').then(j=>{if(j)setTimeout(loadTun,300)});return}
+  b.textContent='Confirm?';b.classList.add('danger');
+  tdTimer=setTimeout(reset,3000);
 };
 
 // ---- Memory channels (/api/preset/*) ----
@@ -464,6 +611,7 @@ function retry(){setTimeout(connect,DELAYS[Math.min(tries++,DELAYS.length-1)])}
 
 connect();
 poll();
+loadTun();
 setInterval(poll,500);
 })();
 </script>

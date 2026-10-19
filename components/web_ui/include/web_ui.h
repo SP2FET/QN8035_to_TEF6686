@@ -1,4 +1,5 @@
-/*
+/**
+ * @file
  * HTTP control page + JSON API + WebSocket log console.
  *
  *   GET  /               control page (www/index.html, embedded)
@@ -10,6 +11,23 @@
  *   POST /api/mute?on=0|1
  *   POST /api/bandwidth?khz=X      (0 = auto, FM only)
  *   POST /api/reinit
+ *
+ * Reception tuning table. Values are in chip units; the display value is v / div:
+ *   GET  /api/tuning     {"saved":bool,"params":[{"k","g","l","u","c","div","min","max","def",
+ *                        "v","sv"}, ...]}: key, group, label, unit, choices like "0=off,1=on",
+ *                        divisor, range, default, current and saved value
+ *   POST /api/tuning?k=KEY&v=N  sets one value live, not saved. 400: out of range, 404: unknown key
+ *   POST /api/tuning/save       writes the current set to NVS
+ *   POST /api/tuning/revert     goes back to the saved set
+ *   POST /api/tuning/defaults   goes to the defaults (not saved)
+ *
+ * /api/status additions:
+ *   "q.dsp"       {"softmute","highcut","stereo","sthiblend"} in % of each control's range
+ *                 (stereo 100 = mono); null on AM
+ *   "af"          {"active","poor","checking_pi","score","switches","pi_fails",
+ *                 "list":[{"khz","score","level","age_s","banned"}]}
+ *                 score in dB = level - USN - WAM; null when unknown
+ *   "force_mono"  true while mono is forced (head unit FORCE_MO)
  *
  * Memory channels (radio_mem; stand-alone build, else 503). N is the channel number 1..40:
  *   GET  /api/presets                  {"enabled","rev","max","slots":[{slot,band,khz,name}]}
@@ -39,7 +57,7 @@ extern "C" {
 #endif
 
 typedef struct {
-    const char *ota_password; /* NULL or "": firmware uploads need no password */
+    const char *ota_password; /**< NULL or "": firmware uploads need no password */
 } web_ui_config_t;
 
 esp_err_t web_ui_start(const web_ui_config_t *cfg);

@@ -22,6 +22,7 @@
 #include "radio_mem.h"
 #include "sdkconfig.h"
 #include "tef6686.h"
+#include "tuning_store.h"
 #include "web_ui.h"
 
 static const char *TAG = "main";
@@ -178,13 +179,12 @@ void app_main(void)
             .bw_auto = true,
         },
         .fm_deemphasis = FM_DEEMPHASIS,
-        .seek = {
-            .min_level = CONFIG_BRIDGE_SEEK_MIN_LEVEL_DBUV * 10,
-            .max_usn = CONFIG_BRIDGE_SEEK_MAX_USN_PCT * 10,
-            .max_wam = CONFIG_BRIDGE_SEEK_MAX_WAM_PCT * 10,
-            .max_offset = CONFIG_BRIDGE_SEEK_MAX_OFFSET_KHZ * 10,
-        },
     };
+    /* Reception tuning (DSP, AF, seek) is set in the web UI and saved there; not fatal: the
+     * defaults then apply and a save reports the problem. */
+    if (tuning_store_init(&radio_cfg.tuning) != ESP_OK) {
+        ESP_LOGE(TAG, "saved reception tuning not loaded, using the defaults");
+    }
 
 #if CONFIG_BRIDGE_QN_EMU_ENABLE
     ESP_ERROR_CHECK(qn_bridge_init());

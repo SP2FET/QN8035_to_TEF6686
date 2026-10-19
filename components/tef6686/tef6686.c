@@ -22,13 +22,13 @@ static const char *TAG = "tef6686";
 /* FM/AM commands (same numbers in both modules where both exist) */
 #define RADIO_TUNE_TO             0x01
 #define RADIO_SET_BANDWIDTH       0x0A
-#define FM_SET_MPH_SUPPRESSION    0x14
-#define FM_SET_CHANNEL_EQUALIZER  0x16
 #define FM_SET_DEEMPHASIS         0x1F
 #define FM_SET_RDS                0x51
 #define RADIO_GET_QUALITY_STATUS  0x80
+#define RADIO_GET_QUALITY_DATA    0x81
 #define FM_GET_RDS_DATA           0x83
 #define FM_GET_SIGNAL_STATUS      0x85
+#define FM_GET_PROCESSING_STATUS  0x86
 /* AUDIO commands */
 #define AUDIO_SET_VOLUME          0x0A
 #define AUDIO_SET_MUTE            0x0B
@@ -310,10 +310,11 @@ esp_err_t tef6686_tune(tef6686_handle_t dev, tef6686_band_t band, tef6686_tune_m
                            mode == TEF6686_TUNE_END ? 1 : 2);
 }
 
-esp_err_t tef6686_get_quality(tef6686_handle_t dev, tef6686_band_t band, tef6686_quality_t *q)
+static esp_err_t read_quality(tef6686_handle_t dev, tef6686_band_t band, uint8_t cmd,
+                               tef6686_quality_t *q)
 {
     uint16_t w[7];
-    esp_err_t err = tef6686_query(dev, band_module(band), RADIO_GET_QUALITY_STATUS, w, 7);
+    esp_err_t err = tef6686_query(dev, band_module(band), cmd, w, 7);
     if (err == ESP_OK) {
         q->status = w[0];
         q->level = (int16_t)w[1];
@@ -322,6 +323,30 @@ esp_err_t tef6686_get_quality(tef6686_handle_t dev, tef6686_band_t band, tef6686
         q->offset = (int16_t)w[4];
         q->bandwidth = w[5];
         q->modulation = w[6];
+    }
+    return err;
+}
+
+esp_err_t tef6686_get_quality(tef6686_handle_t dev, tef6686_band_t band, tef6686_quality_t *q)
+{
+    return read_quality(dev, band, RADIO_GET_QUALITY_STATUS, q);
+}
+
+esp_err_t tef6686_get_quality_data(tef6686_handle_t dev, tef6686_band_t band,
+                                   tef6686_quality_t *q)
+{
+    return read_quality(dev, band, RADIO_GET_QUALITY_DATA, q);
+}
+
+esp_err_t tef6686_fm_get_processing(tef6686_handle_t dev, tef6686_processing_t *p)
+{
+    uint16_t w[4];
+    esp_err_t err = tef6686_query(dev, TEF6686_MODULE_FM, FM_GET_PROCESSING_STATUS, w, 4);
+    if (err == ESP_OK) {
+        p->softmute = w[0];
+        p->highcut = w[1];
+        p->stereo = w[2];
+        p->sthiblend = w[3];
     }
     return err;
 }
@@ -349,14 +374,14 @@ esp_err_t tef6686_fm_get_rds(tef6686_handle_t dev, tef6686_rds_t *rds)
 }
 
 esp_err_t tef6686_set_bandwidth(tef6686_handle_t dev, tef6686_band_t band, bool automatic,
-                                uint16_t bw)
+                                uint16_t bw, uint16_t ctrl_sens, uint16_t low_sens)
 {
     if (band == TEF6686_BAND_AM) {
         const uint16_t p[2] = {0, bw};
         return tef6686_command(dev, TEF6686_MODULE_AM, RADIO_SET_BANDWIDTH, p, 2);
     }
-    /* mode, bandwidth, control sensitivity, low level sensitivity (defaults 100 %) */
-    const uint16_t p[4] = {automatic ? 1 : 0, bw, 1000, 1000};
+    /* mode, bandwidth, control sensitivity, low level sensitivity */
+    const uint16_t p[4] = {automatic ? 1 : 0, bw, ctrl_sens, low_sens};
     return tef6686_command(dev, TEF6686_MODULE_FM, RADIO_SET_BANDWIDTH, p, 4);
 }
 
@@ -370,14 +395,6 @@ esp_err_t tef6686_fm_set_rds(tef6686_handle_t dev, bool enable)
     /* mode decoder/off, restart automatically after tuning, no GPIO interface */
     const uint16_t p[3] = {enable ? 1 : 0, 2, 0};
     return tef6686_command(dev, TEF6686_MODULE_FM, FM_SET_RDS, p, 3);
-}
-
-esp_err_t tef6686_fm_set_multipath(tef6686_handle_t dev, bool enable)
-{
-    const uint16_t on = enable ? 1 : 0;
-    ESP_RETURN_ON_ERROR(tef6686_command(dev, TEF6686_MODULE_FM, FM_SET_MPH_SUPPRESSION, &on, 1),
-                        TAG, "mph suppression");
-    return tef6686_command(dev, TEF6686_MODULE_FM, FM_SET_CHANNEL_EQUALIZER, &on, 1);
 }
 
 esp_err_t tef6686_set_volume(tef6686_handle_t dev, int16_t volume)

@@ -44,6 +44,13 @@ static const char *TAG = "radio";
 #define AM_SEEK_MIN_LEVEL   350 /* 35 dBuV */
 #define AM_SEEK_MAX_OFFSET  20  /* 2 kHz */
 
+/* AF: an AF_Update cycle is <= 6 ms with the default 2 ms sample time (UM V102 §3.1); the
+ * sample time can be set up to 20 ms. */
+#define AF_POLL_MS            2
+#define AF_MEASURE_TIMEOUT_MS 40
+/* After a Jump back: its 1 ms mute slope delays the tuning (UM V102 §3.1). */
+#define AF_FLUSH_MS           5
+
 /* TEF tuning ranges (UM V102 §3.1). */
 #define FM_ABS_MIN_KHZ 65000
 #define FM_ABS_MAX_KHZ 108000
@@ -58,6 +65,9 @@ static const char *TAG = "radio";
 #define VOLUME_MIN -599 /* 0.1 dB */
 #define VOLUME_MAX 240
 
+/* Set_Stereo_Min mode 2 (UM V102 §3): forced mono. */
+#define STEREO_MIN_FORCED_MONO 2
+
 typedef enum {
     CMD_TUNE,
     CMD_STEP,
@@ -67,6 +77,9 @@ typedef enum {
     CMD_MUTE,
     CMD_BANDWIDTH,
     CMD_DEEMPHASIS,
+    CMD_FORCE_MONO,
+    CMD_TUNING,
+    CMD_TUNING_ALL,
     CMD_REINIT,
 } cmd_type_t;
 
@@ -88,6 +101,11 @@ typedef struct {
             uint16_t bw;
         } bw;
         uint16_t deemphasis;
+        bool mono;
+        struct {
+            uint16_t id;
+            int16_t value;
+        } tuning;
     };
 } radio_cmd_t;
 
@@ -105,6 +123,16 @@ typedef struct {
 } seek_t;
 
 typedef struct {
+    af_state_t st;
+    bool pi_known;     /* pi is the tuned station's */
+    uint16_t pi;
+    bool verifying;    /* Check-tuned (muted) to cand, waiting for its PI */
+    uint32_t cand, origin;
+    TickType_t t_start;
+    uint32_t switches, pi_fails;
+} af_run_t;
+
+typedef struct {
     uint32_t min, max, step;
 } band_range_t;
 
@@ -112,14 +140,18 @@ static struct {
     radio_config_t cfg;
     tef6686_handle_t tef;
     QueueHandle_t cmds;
-    SemaphoreHandle_t lock; /* guards status; the radio task is the only writer */
+    SemaphoreHandle_t lock; /* guards status, tuning and tuning_next; the radio task is the only
+                             * writer of status and tuning */
     radio_status_t status;
+    tuning_t tuning;
+    tuning_t tuning_next; /* CMD_TUNING_ALL payload */
     struct {
         radio_listener_t cb;
         void *ctx;
     } listeners[MAX_LISTENERS];
     size_t n_listeners;
     seek_t seek;
+    af_run_t af;
     unsigned io_errors;
     TickType_t next_boot;
 } s;
@@ -129,6 +161,12 @@ static struct {
 static inline bool reached(TickType_t now, TickType_t t)
 {
     return (int32_t)(now - t) >= 0;
+}
+
+/* Wraps consistently because the tick period is a whole number of ms. */
+static uint32_t now_ms(void)
+{
+    return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
 
 static void lock(void)
@@ -174,10 +212,12 @@ static band_range_t band_range(radio_band_t band, uint32_t khz)
 static void set_not_ready(const char *why)
 {
     s.seek.active = false;
+    s.af.verifying = false;
     lock();
     s.status.tef_ready = false;
     s.status.seeking = false;
     s.status.q.valid = false;
+    s.status.af.checking_pi = false;
     strlcpy(s.status.error, why, sizeof(s.status.error));
     unlock();
     s.next_boot = xTaskGetTickCount() + pdMS_TO_TICKS(REBOOT_RETRY_MS);
@@ -209,7 +249,245 @@ static esp_err_t tef_tune(radio_band_t band, uint32_t khz, tef6686_tune_mode_t m
 static esp_err_t apply_bandwidth(void)
 {
     const radio_status_t *st = &s.status;
-    return tef6686_set_bandwidth(s.tef, (tef6686_band_t)st->band, st->bw_auto, st->bw);
+    return tef6686_set_bandwidth(s.tef, (tef6686_band_t)st->band, st->bw_auto, st->bw,
+                                 (uint16_t)s.tuning.v[TUNING_BW_SENS],
+                                 (uint16_t)s.tuning.v[TUNING_BW_LOW_SENS]);
+}
+
+/* ---- reception tuning ---------------------------------------------------- */
+
+/* One FM command of the tuning table, with the current values. */
+static esp_err_t send_tuning_cmd(uint8_t cmd)
+{
+    uint16_t w[TUNING_MAX_WORDS];
+    const size_t n = tuning_build(&s.tuning, cmd, w, TUNING_MAX_WORDS);
+    if (n == 0) {
+        return ESP_OK;
+    }
+    const tuning_param_t *mono = &tuning_params[TUNING_ST_MIN_MODE];
+    if (cmd == mono->cmd && s.status.force_mono) {
+        w[mono->param] = STEREO_MIN_FORCED_MONO;
+    }
+    const esp_err_t err = tef6686_command(s.tef, TEF6686_MODULE_FM, cmd, w, n);
+    if (cmd == tuning_params[TUNING_AGC_START].cmd) {
+        /* UM V102 §3.4: >= 2 ms between FM Set_RFAGC and the next Tune_To. */
+        vTaskDelay(pdMS_TO_TICKS(2) + 1);
+    }
+    return err;
+}
+
+static esp_err_t apply_tuning(void)
+{
+    uint8_t cmds[TUNING_COUNT];
+    const size_t n = tuning_commands(cmds, sizeof(cmds));
+    for (size_t i = 0; i < n; i++) {
+        ESP_RETURN_ON_ERROR(send_tuning_cmd(cmds[i]), TAG, "tuning command %u", cmds[i]);
+    }
+    return ESP_OK;
+}
+
+static af_params_t af_params(void)
+{
+    const int16_t *v = s.tuning.v;
+    return (af_params_t){
+        .enable = v[TUNING_AF_ON] != 0,
+        .reg = v[TUNING_AF_REG] != 0,
+        .trigger = v[TUNING_AF_TRIGGER],
+        .margin = v[TUNING_AF_MARGIN],
+        .min_score = v[TUNING_AF_MIN],
+        .interval_ms = (uint16_t)v[TUNING_AF_INTERVAL],
+    };
+}
+
+/* ---- AF following -------------------------------------------------------- */
+
+/* Copies the AF state into the status snapshot. */
+static void publish_af(void)
+{
+    const af_params_t p = af_params();
+    lock();
+    radio_af_status_t *a = &s.status.af;
+    a->active = p.enable && s.status.band == RADIO_BAND_FM && s.af.pi_known;
+    a->poor = af_poor(&s.af.st, &p);
+    a->checking_pi = s.af.verifying;
+    a->score = af_current(&s.af.st);
+    a->switches = s.af.switches;
+    a->pi_fails = s.af.pi_fails;
+    a->now_ms = now_ms();
+    a->n = s.af.st.n;
+    memcpy(a->e, s.af.st.e, sizeof(a->e));
+    unlock();
+}
+
+/* New station: forget its AFs and PI. */
+static void af_restart(void)
+{
+    af_reset(&s.af.st, now_ms());
+    s.af.pi_known = false;
+    s.af.verifying = false;
+    publish_af();
+}
+
+/* After an RDS group: track the PI and pick up new AFs. */
+static void af_follow_rds(void)
+{
+    const rds_state_t *r = &s.status.rds; /* written only by this task */
+    if (!r->pi_valid) {
+        return;
+    }
+    if (s.af.pi_known && r->pi != s.af.pi) {
+        af_reset(&s.af.st, now_ms()); /* another station: its AFs are other ones */
+    }
+    s.af.pi = r->pi;
+    s.af.pi_known = true;
+    af_sync(&s.af.st, r->af, r->af_count, s.status.freq_khz);
+}
+
+/* AF_Update: the tuner visits khz for a few ms, inaudibly, and returns by itself. Its quality
+ * is frozen until Get_Quality_Data reads it (UM V102 §4.1), which also releases it. */
+static bool af_measure(uint32_t khz, tef6686_quality_t *q)
+{
+    if (!io_ok(tef_tune(RADIO_BAND_FM, khz, TEF6686_TUNE_AF_UPDATE), "af update")) {
+        return false;
+    }
+    const TickType_t t0 = xTaskGetTickCount();
+    do {
+        vTaskDelay(pdMS_TO_TICKS(AF_POLL_MS));
+        if (!io_ok(tef6686_get_quality_data(s.tef, TEF6686_BAND_FM, q), "af quality")) {
+            return false;
+        }
+        if (q->status & TEF6686_QUALITY_AF_UPDATE) {
+            return true;
+        }
+    } while (!reached(xTaskGetTickCount(), t0 + pdMS_TO_TICKS(AF_MEASURE_TIMEOUT_MS)));
+    ESP_LOGW(TAG, "AF %lu kHz: no AF_Update result within %d ms", (unsigned long)khz,
+             AF_MEASURE_TIMEOUT_MS);
+    return false;
+}
+
+static void poll_rds(void);
+
+/* Check tuning: like Jump, but the mute stays on until End (UM V102 §3.1), so a candidate is
+ * not heard before its PI is known. */
+static void af_verify_begin(uint32_t khz, int16_t score)
+{
+    poll_rds(); /* the TEF buffers one group: nothing of this station may pass for the AF's */
+    if (!s.status.tef_ready || !io_ok(tef_tune(RADIO_BAND_FM, khz, TEF6686_TUNE_CHECK), "af check")) {
+        return;
+    }
+    s.af.verifying = true;
+    s.af.cand = khz;
+    s.af.origin = s.status.freq_khz;
+    s.af.t_start = xTaskGetTickCount();
+    ESP_LOGI(TAG, "AF: trying %lu kHz (score %d vs %d), checking PI %04X", (unsigned long)khz,
+             score, af_current(&s.af.st), s.af.pi);
+    publish_af();
+}
+
+/* Back to the tuned station. ban: the candidate failed its PI check (else: aborted). */
+static void af_return(bool ban)
+{
+    s.af.verifying = false;
+    io_ok(tef_tune(RADIO_BAND_FM, s.af.origin, TEF6686_TUNE_JUMP), "af return");
+    /* A group the candidate completed during the Jump's mute slope can still be in the TEF's
+     * buffer. Read it out once the Jump has tuned, so it never reaches the decoder as this
+     * station's (its PI would count as a station change). */
+    vTaskDelay(pdMS_TO_TICKS(AF_FLUSH_MS));
+    tef6686_rds_t stale;
+    io_ok(tef6686_fm_get_rds(s.tef, &stale), "af rds flush");
+    if (ban) {
+        const uint32_t base_ms = (uint32_t)s.tuning.v[TUNING_AF_BAN] * 1000u;
+        const uint32_t ms = af_ban(&s.af.st, s.af.cand, now_ms(), base_ms);
+        s.af.pi_fails++;
+        ESP_LOGI(TAG, "AF: %lu kHz skipped for %lu s", (unsigned long)s.af.cand,
+                 (unsigned long)(ms / 1000));
+    }
+    publish_af();
+}
+
+static void af_accept(void)
+{
+    s.af.verifying = false;
+    /* The tuner is on cand whether or not End gets through; a failed End leaves it muted until
+     * the next tuning (the I2C recovery re-tunes with Preset). */
+    io_ok(tef_tune(RADIO_BAND_FM, 0, TEF6686_TUNE_END), "af end");
+    af_switched(&s.af.st, s.af.origin, s.af.cand, now_ms());
+    s.af.switches++;
+    lock();
+    s.status.freq_khz = s.af.cand;
+    s.status.q.valid = false;
+    unlock();
+    ESP_LOGI(TAG, "AF: switched %lu -> %lu kHz", (unsigned long)s.af.origin,
+             (unsigned long)s.af.cand);
+    publish_af();
+
+    radio_evt_t evt = {.type = RADIO_EVT_AF_SWITCHED,
+                       .af = {.from_khz = s.af.origin, .to_khz = s.af.cand}};
+    notify(&evt);
+}
+
+static void af_verify_poll(void)
+{
+    tef6686_rds_t r;
+    if (!io_ok(tef6686_fm_get_rds(s.tef, &r), "af rds")) {
+        return;
+    }
+    if (r.status & TEF6686_RDS_DATA_AVAILABLE) {
+        uint16_t pi = r.block[0];
+        uint8_t err = tef6686_rds_block_error(&r, 0);
+        if (err > RDS_ERR_SMALL && !(r.status & TEF6686_RDS_FIRST_PI) &&
+            (r.status & TEF6686_RDS_GROUP_B)) {
+            pi = r.block[2]; /* block C' repeats the PI */
+            err = tef6686_rds_block_error(&r, 2);
+        }
+        if (err <= RDS_ERR_SMALL) {
+            if (af_pi_match(s.af.pi, pi, s.tuning.v[TUNING_AF_REG] != 0)) {
+                af_accept();
+            } else {
+                ESP_LOGI(TAG, "AF: %lu kHz carries PI %04X, not %04X; back to %lu kHz",
+                         (unsigned long)s.af.cand, pi, s.af.pi, (unsigned long)s.af.origin);
+                af_return(true);
+            }
+            return;
+        }
+    }
+    const TickType_t limit = pdMS_TO_TICKS(s.tuning.v[TUNING_AF_PI_MS]);
+    if (reached(xTaskGetTickCount(), s.af.t_start + limit)) {
+        ESP_LOGI(TAG, "AF: no PI from %lu kHz within %d ms; back to %lu kHz",
+                 (unsigned long)s.af.cand, s.tuning.v[TUNING_AF_PI_MS], (unsigned long)s.af.origin);
+        af_return(true);
+    }
+}
+
+/* Measure the next AF if one is due, and try the best one if it is clearly better. */
+static void af_tick(void)
+{
+    if (!s.af.pi_known) {
+        return;
+    }
+    const af_params_t p = af_params();
+    const uint32_t khz = af_next_check(&s.af.st, &p, now_ms());
+    if (khz == 0) {
+        return;
+    }
+    tef6686_quality_t q;
+    if (af_measure(khz, &q)) {
+        const int16_t score = af_score(q.level, q.usn, q.wam, q.offset);
+        af_measured(&s.af.st, khz, score, q.level, now_ms());
+        ESP_LOGD(TAG, "AF %lu kHz: level %d usn %u wam %u offset %d -> score %d (tuned %d)",
+                 (unsigned long)khz, q.level, q.usn, q.wam, q.offset, score,
+                 af_current(&s.af.st));
+        const uint32_t pick = af_pick(&s.af.st, &p, now_ms());
+        if (pick) {
+            for (unsigned i = 0; i < s.af.st.n; i++) {
+                if (s.af.st.e[i].khz == pick) {
+                    af_verify_begin(pick, s.af.st.e[i].score);
+                    break;
+                }
+            }
+        }
+    }
+    publish_af();
 }
 
 /* ---- tuning -------------------------------------------------------------- */
@@ -232,6 +510,7 @@ static void tune_to(radio_band_t band, uint32_t khz, bool by_scan, bool found)
         s.status.bw = band == RADIO_BAND_FM ? FM_DEFAULT_BW : AM_DEFAULT_BW;
     }
     unlock();
+    af_restart();
     if (band_changed) {
         io_ok(apply_bandwidth(), "bandwidth");
     }
@@ -293,17 +572,17 @@ static void seek_finish(bool found)
 /* SEEK_FAIL_* limits missed; offset (0.1 kHz) comes separately because it is averaged. */
 static unsigned seek_failures(const tef6686_quality_t *q, int offset)
 {
-    const radio_seek_criteria_t *c = &s.cfg.seek;
+    const int16_t *v = s.tuning.v;
     unsigned fail = 0;
     if (s.status.band == RADIO_BAND_AM) {
         fail |= q->level < AM_SEEK_MIN_LEVEL ? SEEK_FAIL_LEVEL : 0;
         fail |= abs(offset) > AM_SEEK_MAX_OFFSET ? SEEK_FAIL_OFFSET : 0;
         return fail;
     }
-    fail |= q->level < c->min_level ? SEEK_FAIL_LEVEL : 0;
-    fail |= q->usn > c->max_usn ? SEEK_FAIL_USN : 0;
-    fail |= q->wam > c->max_wam ? SEEK_FAIL_WAM : 0;
-    fail |= abs(offset) > c->max_offset ? SEEK_FAIL_OFFSET : 0;
+    fail |= q->level < v[TUNING_SEEK_LEVEL] ? SEEK_FAIL_LEVEL : 0;
+    fail |= q->usn > v[TUNING_SEEK_USN] ? SEEK_FAIL_USN : 0;
+    fail |= q->wam > v[TUNING_SEEK_WAM] ? SEEK_FAIL_WAM : 0;
+    fail |= abs(offset) > v[TUNING_SEEK_OFFSET] ? SEEK_FAIL_OFFSET : 0;
     return fail;
 }
 
@@ -400,13 +679,21 @@ static void seek_poll(void)
 static void poll_quality(void)
 {
     tef6686_quality_t q;
+    tef6686_processing_t proc = {0};
     bool stereo = false;
     const radio_band_t band = s.status.band;
 
     if (!io_ok(tef6686_get_quality(s.tef, (tef6686_band_t)band, &q), "quality")) {
         return;
     }
-    if (band == RADIO_BAND_FM && !io_ok(tef6686_fm_get_stereo(s.tef, &stereo), "stereo")) {
+    if (q.status & TEF6686_QUALITY_AF_UPDATE) {
+        /* An AF_Update result that came after af_measure gave up: frozen until read with
+         * Get_Quality_Data, and never the tuned station's. Release it, use the next sample. */
+        io_ok(tef6686_get_quality_data(s.tef, (tef6686_band_t)band, &q), "release af sample");
+        return;
+    }
+    if (band == RADIO_BAND_FM && (!io_ok(tef6686_fm_get_stereo(s.tef, &stereo), "stereo") ||
+                                  !io_ok(tef6686_fm_get_processing(s.tef, &proc), "processing"))) {
         return;
     }
     radio_evt_t evt = {.type = RADIO_EVT_QUALITY,
@@ -417,10 +704,18 @@ static void poll_quality(void)
                                    .offset = q.offset,
                                    .bandwidth = q.bandwidth,
                                    .modulation = q.modulation,
-                                   .stereo = stereo}};
+                                   .stereo = stereo,
+                                   .softmute = proc.softmute,
+                                   .highcut = proc.highcut,
+                                   .stblend = proc.stereo,
+                                   .sthiblend = proc.sthiblend}};
     lock();
     s.status.q = evt.quality;
     unlock();
+    if (band == RADIO_BAND_FM && evt.quality.valid) {
+        af_quality(&s.af.st, af_score(q.level, q.usn, q.wam, 0));
+    }
+    publish_af();
     notify(&evt);
 }
 
@@ -460,6 +755,7 @@ static void poll_rds(void)
         rds_process_group(&s.status.rds, evt.rds.block, evt.rds.err);
     }
     unlock();
+    af_follow_rds();
     if (!first_pi) {
         notify(&evt);
     }
@@ -490,7 +786,7 @@ static esp_err_t apply_settings(void)
     ESP_RETURN_ON_ERROR(tef6686_audio_enable_dac(s.tef), TAG, "dac");
     ESP_RETURN_ON_ERROR(tef6686_set_volume(s.tef, st->volume), TAG, "volume");
     ESP_RETURN_ON_ERROR(tef6686_fm_set_deemphasis(s.tef, s.cfg.fm_deemphasis), TAG, "deemphasis");
-    ESP_RETURN_ON_ERROR(tef6686_fm_set_multipath(s.tef, true), TAG, "multipath");
+    ESP_RETURN_ON_ERROR(apply_tuning(), TAG, "tuning");
     ESP_RETURN_ON_ERROR(tef6686_fm_set_rds(s.tef, true), TAG, "rds");
     ESP_RETURN_ON_ERROR(tef_tune(st->band, st->freq_khz, TEF6686_TUNE_PRESET), TAG, "tune");
     ESP_RETURN_ON_ERROR(apply_bandwidth(), TAG, "bandwidth");
@@ -531,6 +827,7 @@ static void boot_tef(void)
     s.status.seeking = false;
     rds_reset(&s.status.rds);
     unlock();
+    af_restart();
     ESP_LOGI(TAG, "tuner ready: %s, patch %s, %s %lu kHz", tef6686_variant_name(id.device),
              s.status.patch, s.status.band == RADIO_BAND_FM ? "FM" : "AM",
              (unsigned long)s.status.freq_khz);
@@ -542,8 +839,30 @@ static void boot_tef(void)
 
 /* ---- command dispatch ---------------------------------------------------- */
 
+static void handle_tuning(uint16_t id, int16_t value)
+{
+    const tuning_param_t *p = &tuning_params[id];
+    lock();
+    s.tuning.v[id] = value;
+    unlock();
+    ESP_LOGI(TAG, "tuning %s = %d", p->key, value);
+    if (!s.status.tef_ready) {
+        return; /* applied by the next successful boot */
+    }
+    if (p->cmd != TUNING_HOST) {
+        io_ok(send_tuning_cmd(p->cmd), "tuning");
+    } else if ((id == TUNING_BW_SENS || id == TUNING_BW_LOW_SENS) &&
+               s.status.band == RADIO_BAND_FM) {
+        io_ok(apply_bandwidth(), "bandwidth");
+    }
+    publish_af();
+}
+
 static void handle_cmd(const radio_cmd_t *c)
 {
+    if (s.af.verifying) {
+        af_return(false); /* leave the muted candidate before anything else */
+    }
     const bool ready = s.status.tef_ready;
 
     switch (c->type) {
@@ -622,6 +941,27 @@ static void handle_cmd(const radio_cmd_t *c)
             io_ok(tef6686_fm_set_deemphasis(s.tef, c->deemphasis), "deemphasis");
         }
         break;
+    case CMD_FORCE_MONO:
+        lock();
+        s.status.force_mono = c->mono;
+        unlock();
+        if (ready) {
+            io_ok(send_tuning_cmd(tuning_params[TUNING_ST_MIN_MODE].cmd), "force mono");
+        }
+        break;
+    case CMD_TUNING:
+        handle_tuning(c->tuning.id, c->tuning.value);
+        break;
+    case CMD_TUNING_ALL:
+        lock();
+        s.tuning = s.tuning_next;
+        unlock();
+        ESP_LOGI(TAG, "tuning: all values replaced");
+        if (ready && io_ok(apply_tuning(), "tuning") && s.status.band == RADIO_BAND_FM) {
+            io_ok(apply_bandwidth(), "bandwidth");
+        }
+        publish_af();
+        break;
     }
 }
 
@@ -638,6 +978,8 @@ static void radio_task(void *arg)
             wait = reached(now, s.next_boot) ? 0 : s.next_boot - now;
         } else if (s.seek.active) {
             wait = pdMS_TO_TICKS(SEEK_POLL_MS);
+        } else if (s.af.verifying) {
+            wait = pdMS_TO_TICKS(RDS_PERIOD_MS);
         } else {
             const TickType_t due = (int32_t)(next_rds - next_quality) < 0 ? next_rds : next_quality;
             wait = reached(now, due) ? 0 : due - now;
@@ -665,6 +1007,10 @@ static void radio_task(void *arg)
             seek_poll();
             continue;
         }
+        if (s.af.verifying) {
+            af_verify_poll(); /* RDS goes to the PI check; quality would be the candidate's */
+            continue;
+        }
         if (reached(now, next_rds)) {
             if (s.status.band == RADIO_BAND_FM) {
                 poll_rds();
@@ -678,6 +1024,9 @@ static void radio_task(void *arg)
         if (reached(now, next_health)) {
             check_health();
             next_health = now + pdMS_TO_TICKS(HEALTH_PERIOD_MS);
+        }
+        if (s.status.tef_ready && s.status.band == RADIO_BAND_FM) {
+            af_tick();
         }
     }
 }
@@ -728,8 +1077,10 @@ esp_err_t radio_start(const radio_config_t *cfg)
                         ESP_ERR_INVALID_ARG, TAG, "bad band plan");
     ESP_RETURN_ON_FALSE(radio_settings_valid(&cfg->initial), ESP_ERR_INVALID_ARG, TAG,
                         "bad initial settings");
+    ESP_RETURN_ON_FALSE(tuning_valid(&cfg->tuning), ESP_ERR_INVALID_ARG, TAG, "bad tuning");
 
     s.cfg = *cfg;
+    s.tuning = cfg->tuning;
     s.lock = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(s.lock, ESP_ERR_NO_MEM, TAG, "mutex");
     ESP_RETURN_ON_ERROR(tef6686_new(&cfg->tef, &s.tef), TAG, "tef6686_new");
@@ -746,6 +1097,8 @@ esp_err_t radio_start(const radio_config_t *cfg)
         .bw = fm && in->bw_auto ? FM_DEFAULT_BW : in->bw,
     };
     rds_reset(&s.status.rds);
+    af_reset(&s.af.st, now_ms());
+    s.status.af.score = AF_SCORE_NONE;
 
     s.cmds = xQueueCreate(CMD_QUEUE_LEN, sizeof(radio_cmd_t));
     ESP_RETURN_ON_FALSE(s.cmds, ESP_ERR_NO_MEM, TAG, "queue");
@@ -831,9 +1184,45 @@ esp_err_t radio_set_deemphasis(uint16_t timeconstant)
     return post(&(radio_cmd_t){.type = CMD_DEEMPHASIS, .deemphasis = timeconstant});
 }
 
+esp_err_t radio_set_force_mono(bool on)
+{
+    return post(&(radio_cmd_t){.type = CMD_FORCE_MONO, .mono = on});
+}
+
 esp_err_t radio_reinit(void)
 {
     return post(&(radio_cmd_t){.type = CMD_REINIT});
+}
+
+esp_err_t radio_set_tuning(int id, long value)
+{
+    ESP_RETURN_ON_FALSE(tuning_value_ok(id, value) && !tuning_params[id].hidden,
+                        ESP_ERR_INVALID_ARG, TAG, "bad tuning %d = %ld", id, value);
+    return post(&(radio_cmd_t){.type = CMD_TUNING,
+                               .tuning = {.id = (uint16_t)id, .value = (int16_t)value}});
+}
+
+esp_err_t radio_set_tuning_all(const tuning_t *t)
+{
+    ESP_RETURN_ON_FALSE(t && tuning_valid(t), ESP_ERR_INVALID_ARG, TAG, "bad tuning set");
+    if (s.lock == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    lock();
+    s.tuning_next = *t;
+    unlock();
+    return post(&(radio_cmd_t){.type = CMD_TUNING_ALL});
+}
+
+void radio_get_tuning(tuning_t *out)
+{
+    if (s.lock == NULL) {
+        tuning_defaults(out);
+        return;
+    }
+    lock();
+    *out = s.tuning;
+    unlock();
 }
 
 void radio_get_status(radio_status_t *out)

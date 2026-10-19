@@ -65,8 +65,8 @@ static void on_qn_event(const qn8035_evt_t *e, void *ctx)
         report(radio_set_deemphasis(e->us == 75 ? 750 : 500), "deemphasis");
         break;
     case QN8035_EVT_FORCE_MONO:
-        /* TODO: map to a TEF stereo-blend/mono setting once one is wrapped. */
-        ESP_LOGI(TAG, "head unit forced %s (not applied yet)", e->on ? "mono" : "auto stereo");
+        ESP_LOGI(TAG, "head unit forced %s", e->on ? "mono" : "auto stereo");
+        report(radio_set_force_mono(e->on), "force mono");
         break;
     case QN8035_EVT_RDS_ENABLE:
         /* The TEF always decodes; the model only publishes groups when RDSEN is set. */
@@ -113,6 +113,10 @@ static void on_radio_event(const radio_evt_t *e, void *ctx)
         qn8035_slave_push_rds(e->rds.block, mask, e->rds.version_b, e->rds.sync);
         break;
     }
+    case RADIO_EVT_AF_SWITCHED:
+        /* Same programme on another transmitter. The head unit keeps seeing the channel it
+         * tuned (CH is not rewritten): its software must not notice the tuner working. */
+        break;
     }
 }
 

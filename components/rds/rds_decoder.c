@@ -3,6 +3,10 @@
 #include <string.h>
 
 #define RDS_CR 0x0D /* RadioText end marker */
+/* AF codes (IEC 62106): 1..204 FM frequencies, 205 filler, 224..249 list length, 250 an LF/MF
+ * frequency follows. */
+#define RDS_AF_FM_LAST 204
+#define RDS_AF_LFMF    250
 
 /* Basic RDS character set overlaps ASCII in 0x20..0x7E; everything else is
  * shown as '?' (control codes as space) until a full table is needed. */
@@ -22,6 +26,8 @@ static void clear_text(rds_state_t *s)
     s->rt[RDS_RT_LEN] = '\0';
     s->ps_segments = 0;
     s->rt_ab = 0xFF;
+    s->af_count = 0;
+    s->af_lfmf = false;
 }
 
 void rds_reset(rds_state_t *s)
@@ -35,16 +41,42 @@ static void update_pi(rds_state_t *s, uint16_t pi, uint8_t err)
     if (err > RDS_ERR_SMALL) {
         return;
     }
-    if (s->pi_valid && s->pi != pi) {
-        clear_text(s);
+    if (!s->pi_valid || s->pi == pi) {
+        s->pi = pi;
+        s->pi_valid = true;
+        s->pi_next_valid = false;
+        return;
     }
+    if (!s->pi_next_valid || s->pi_next != pi) {
+        s->pi_next = pi; /* once could be a miscorrected block */
+        s->pi_next_valid = true;
+        return;
+    }
+    clear_text(s);
     s->pi = pi;
-    s->pi_valid = true;
+    s->pi_next_valid = false;
 }
 
 void rds_process_pi(rds_state_t *s, uint16_t pi, uint8_t err)
 {
     update_pi(s, pi, err);
+}
+
+/* Block C of a 0A group: two AF codes. */
+static void process_af(rds_state_t *s, uint16_t c)
+{
+    const uint8_t codes[2] = {(uint8_t)(c >> 8), (uint8_t)(c & 0xFF)};
+    for (unsigned i = 0; i < 2; i++) {
+        const uint8_t code = codes[i];
+        if (s->af_lfmf) {
+            s->af_lfmf = false;
+        } else if (code == RDS_AF_LFMF) {
+            s->af_lfmf = true;
+        } else if (code >= 1 && code <= RDS_AF_FM_LAST && s->af_count < RDS_AF_MAX &&
+                   memchr(s->af, code, s->af_count) == NULL) {
+            s->af[s->af_count++] = code;
+        }
+    }
 }
 
 static void put_rt(rds_state_t *s, unsigned pos, uint8_t c)
@@ -70,6 +102,9 @@ bool rds_process_group(rds_state_t *s, const uint16_t blk[4], const uint8_t err[
         update_pi(s, blk[2], err[2]); /* block C' repeats PI */
     }
 
+    if (type == 0 && !version_b && err[2] <= RDS_ERR_SMALL) {
+        process_af(s, blk[2]);
+    }
     if (type == 0 && err[3] <= RDS_ERR_SMALL) {
         const unsigned seg = b & 0x3u;
         s->ps[2 * seg] = rds_char((uint8_t)(blk[3] >> 8));

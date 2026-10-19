@@ -21,6 +21,8 @@
 #include "qn8035_slave.h"
 #include "radio.h"
 #include "radio_mem.h"
+#include "tuning.h"
+#include "tuning_store.h"
 #include "web_ota.h"
 
 static const char *TAG = "web";
@@ -28,7 +30,11 @@ static const char *TAG = "web";
 extern const char index_html_start[] asm("_binary_index_html_start");
 extern const char index_html_end[] asm("_binary_index_html_end");
 
-#define STATUS_BUF_SIZE 2048
+/* ~1 kB plus up to AF_MAX entries of ~80 bytes. */
+#define STATUS_BUF_SIZE 4096
+/* /api/tuning goes out in chunks; one parameter is < 300 bytes. */
+#define TUNING_CHUNK      1024
+#define TUNING_CHUNK_FILL 640
 /* Per used channel: ~48 bytes of keys and numbers plus the name, escaped at worst 2x. */
 #define PRESETS_BUF_SIZE (96 + PRESETS_MAX * (48 + 2 * PRESET_NAME_SIZE))
 #define QUERY_MAX       128
@@ -116,6 +122,42 @@ static const char *state_name(tef6686_op_state_t st)
     }
 }
 
+/* 0.1-unit value, or null when unknown. */
+static void jb_tenths(jbuf_t *j, bool known, int v)
+{
+    if (known) {
+        jb_printf(j, "%.1f", v / 10.0);
+    } else {
+        jb_printf(j, "null");
+    }
+}
+
+static void jb_af(jbuf_t *j, const radio_af_status_t *a)
+{
+    jb_printf(j, "\"af\":{\"active\":%s,\"poor\":%s,\"checking_pi\":%s,\"score\":", b(a->active),
+              b(a->poor), b(a->checking_pi));
+    jb_tenths(j, a->score != AF_SCORE_NONE, a->score);
+    jb_printf(j, ",\"switches\":%" PRIu32 ",\"pi_fails\":%" PRIu32 ",\"list\":[", a->switches,
+              a->pi_fails);
+    for (unsigned i = 0; i < a->n && i < AF_MAX; i++) {
+        const af_entry_t *e = &a->e[i];
+        const bool scored = e->measured && e->score != AF_SCORE_NONE;
+        const bool banned = e->banned && (int32_t)(e->banned_until_ms - a->now_ms) > 0;
+        jb_printf(j, "%s{\"khz\":%" PRIu32 ",\"score\":", i ? "," : "", e->khz);
+        jb_tenths(j, scored, e->score);
+        jb_printf(j, ",\"level\":");
+        jb_tenths(j, e->measured, e->level);
+        jb_printf(j, ",\"age_s\":");
+        if (e->measured) {
+            jb_printf(j, "%" PRIu32, (a->now_ms - e->measured_ms) / 1000);
+        } else {
+            jb_printf(j, "null");
+        }
+        jb_printf(j, ",\"banned\":%s}", b(banned));
+    }
+    jb_printf(j, "]},");
+}
+
 static esp_err_t status_get(httpd_req_t *req)
 {
     /* httpd runs all handlers in its one task, so static buffers are safe
@@ -159,20 +201,25 @@ static esp_err_t status_get(httpd_req_t *req)
     const bool fm = st.band == RADIO_BAND_FM;
     jb_printf(&j,
               "\"band\":\"%s\",\"freq_khz\":%" PRIu32 ",\"seeking\":%s,\"mute\":%s,"
-              "\"volume_db\":%.1f,\"bw_auto\":%s,\"bw_khz\":%.1f,",
+              "\"volume_db\":%.1f,\"bw_auto\":%s,\"bw_khz\":%.1f,\"force_mono\":%s,",
               fm ? "FM" : "AM", st.freq_khz, b(st.seeking), b(st.mute), st.volume / 10.0,
-              b(st.bw_auto), st.bw / 10.0);
+              b(st.bw_auto), st.bw / 10.0, b(st.force_mono));
 
     const radio_quality_t *q = &st.q;
     jb_printf(&j, "\"q\":{\"valid\":%s,\"level\":%.1f,\"offset\":%.1f,\"bw\":%.1f,\"mod\":%.1f,",
               b(q->valid), q->level / 10.0, q->offset / 10.0, q->bandwidth / 10.0,
               q->modulation / 10.0);
     if (fm) {
-        jb_printf(&j, "\"usn\":%.1f,\"wam\":%.1f,\"stereo\":%s},", q->usn / 10.0, q->wam / 10.0,
-                  b(q->stereo));
+        jb_printf(&j,
+                  "\"usn\":%.1f,\"wam\":%.1f,\"stereo\":%s,\"dsp\":{\"softmute\":%.1f,"
+                  "\"highcut\":%.1f,\"stereo\":%.1f,\"sthiblend\":%.1f}},",
+                  q->usn / 10.0, q->wam / 10.0, b(q->stereo), q->softmute / 10.0,
+                  q->highcut / 10.0, q->stblend / 10.0, q->sthiblend / 10.0);
     } else {
-        jb_printf(&j, "\"usn\":null,\"wam\":null,\"stereo\":null,\"noise\":%.1f},", q->usn / 10.0);
+        jb_printf(&j, "\"usn\":null,\"wam\":null,\"stereo\":null,\"dsp\":null,\"noise\":%.1f},",
+                  q->usn / 10.0);
     }
+    jb_af(&j, &st.af);
 
     jb_printf(&j, "\"rds\":{\"sync\":%s,\"pi\":", b(st.rds_sync));
     if (st.rds.pi_valid) {
@@ -320,6 +367,91 @@ static esp_err_t reinit_post(httpd_req_t *req)
 {
     ESP_LOGI(TAG, "tuner re-init requested from web");
     return reply(req, radio_reinit());
+}
+
+/* ---- reception tuning ---------------------------------------------------- */
+
+static esp_err_t send_chunk(httpd_req_t *req, jbuf_t *j)
+{
+    const esp_err_t err = httpd_resp_send_chunk(req, j->buf, (ssize_t)j->len);
+    j->len = 0;
+    return err;
+}
+
+/* The whole table with current (v) and saved (sv) values, in chip units; display = v / div. */
+static esp_err_t tuning_get(httpd_req_t *req)
+{
+    static char buf[TUNING_CHUNK]; /* httpd task only */
+    static tuning_t cur, saved;
+    radio_get_tuning(&cur);
+    tuning_store_saved(&saved);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    jbuf_t j = {.buf = buf, .size = sizeof(buf)};
+    jb_printf(&j, "{\"saved\":%s,\"params\":[", b(memcmp(&cur, &saved, sizeof(cur)) == 0));
+    const char *sep = "";
+    for (int i = 0; i < TUNING_COUNT; i++) {
+        const tuning_param_t *p = &tuning_params[i];
+        if (p->hidden) {
+            continue;
+        }
+        jb_printf(&j, "%s{\"k\":", sep);
+        jb_str(&j, p->key);
+        jb_printf(&j, ",\"g\":");
+        jb_str(&j, p->group);
+        jb_printf(&j, ",\"l\":");
+        jb_str(&j, p->label);
+        jb_printf(&j, ",\"u\":");
+        jb_str(&j, p->unit ? p->unit : "");
+        jb_printf(&j, ",\"c\":");
+        jb_str(&j, p->choices ? p->choices : "");
+        jb_printf(&j, ",\"div\":%u,\"min\":%d,\"max\":%d,\"def\":%d,\"v\":%d,\"sv\":%d}", p->div,
+                  p->min, p->max, p->def, cur.v[i], saved.v[i]);
+        sep = ",";
+        if (j.len > TUNING_CHUNK_FILL) {
+            ESP_RETURN_ON_ERROR(send_chunk(req, &j), TAG, "tuning chunk");
+        }
+    }
+    jb_printf(&j, "]}");
+    ESP_RETURN_ON_ERROR(send_chunk(req, &j), TAG, "tuning chunk");
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
+/* ?k=key&v=value, value in chip units (the v of /api/tuning). Applied live, not saved. */
+static esp_err_t tuning_post(httpd_req_t *req)
+{
+    char key[TUNING_KEY_MAX + 1];
+    long v;
+    if (!get_param(req, "k", key, sizeof(key)) || !get_long(req, "v", &v)) {
+        return reply(req, ESP_ERR_INVALID_ARG);
+    }
+    const int id = tuning_find(key);
+    return reply(req, id < 0 ? ESP_ERR_NOT_FOUND : radio_set_tuning(id, v));
+}
+
+static esp_err_t tuning_save_post(httpd_req_t *req)
+{
+    static tuning_t t;
+    radio_get_tuning(&t);
+    ESP_LOGI(TAG, "saving reception tuning");
+    return reply(req, tuning_store_save(&t));
+}
+
+static esp_err_t tuning_defaults_post(httpd_req_t *req)
+{
+    static tuning_t t;
+    tuning_defaults(&t);
+    ESP_LOGI(TAG, "reception tuning: defaults (not saved)");
+    return reply(req, radio_set_tuning_all(&t));
+}
+
+static esp_err_t tuning_revert_post(httpd_req_t *req)
+{
+    static tuning_t t;
+    tuning_store_saved(&t);
+    ESP_LOGI(TAG, "reception tuning: back to the saved values");
+    return reply(req, radio_set_tuning_all(&t));
 }
 
 /* ---- memory channels ----------------------------------------------------- */
@@ -595,7 +727,7 @@ esp_err_t web_ui_start(const web_ui_config_t *ui_cfg)
     ESP_RETURN_ON_FALSE(s_server == NULL, ESP_ERR_INVALID_STATE, TAG, "already started");
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 24;
+    cfg.max_uri_handlers = 32;
     cfg.lru_purge_enable = true;
     cfg.stack_size = 6144;
     ESP_RETURN_ON_ERROR(httpd_start(&s_server, &cfg), TAG, "httpd_start");
@@ -611,6 +743,11 @@ esp_err_t web_ui_start(const web_ui_config_t *ui_cfg)
         {.uri = "/api/mute", .method = HTTP_POST, .handler = mute_post},
         {.uri = "/api/bandwidth", .method = HTTP_POST, .handler = bandwidth_post},
         {.uri = "/api/reinit", .method = HTTP_POST, .handler = reinit_post},
+        {.uri = "/api/tuning", .method = HTTP_GET, .handler = tuning_get},
+        {.uri = "/api/tuning", .method = HTTP_POST, .handler = tuning_post},
+        {.uri = "/api/tuning/save", .method = HTTP_POST, .handler = tuning_save_post},
+        {.uri = "/api/tuning/defaults", .method = HTTP_POST, .handler = tuning_defaults_post},
+        {.uri = "/api/tuning/revert", .method = HTTP_POST, .handler = tuning_revert_post},
         {.uri = "/api/presets", .method = HTTP_GET, .handler = presets_get},
         {.uri = "/api/preset/store", .method = HTTP_POST, .handler = preset_store_post},
         {.uri = "/api/preset/recall", .method = HTTP_POST, .handler = preset_recall_post},

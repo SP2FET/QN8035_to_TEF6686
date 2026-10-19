@@ -1,19 +1,25 @@
-/*
+/**
+ * @file
  * Radio service: the single owner of the TEF6686.
  *
  * One task owns the tuner handle. Everybody else (web UI, QN8035 bridge)
  * posts commands through this API and reads a status snapshot. The task
- * polls quality and RDS, runs seeks as a non-blocking state machine and
- * re-boots the tuner if it loses state.
+ * polls quality and RDS, runs seeks as a non-blocking state machine, follows
+ * RDS alternative frequencies (af.h) and re-boots the tuner if it loses state.
+ *
+ * Reception tuning (tuning.h: weak-signal DSP, AF and seek thresholds) is applied
+ * at every tuner boot and live on change. This service does not store it.
  */
 #pragma once
 
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "af.h"
 #include "esp_err.h"
 #include "rds_decoder.h"
 #include "tef6686.h"
+#include "tuning.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,42 +30,64 @@ typedef enum {
     RADIO_BAND_AM = 1,
 } radio_band_t;
 
-/* TEF units: 0.1 dBuV, 0.1 %, 0.1 kHz. */
+/** TEF units: 0.1 dBuV, 0.1 %, 0.1 kHz. */
 typedef struct {
     bool valid;
     int16_t level;
-    uint16_t usn;        /* FM ultrasonic noise; AM: noise */
-    uint16_t wam;        /* FM multipath; AM: co-channel flag */
+    uint16_t usn;        /**< FM ultrasonic noise; AM: noise */
+    uint16_t wam;        /**< FM multipath; AM: co-channel flag */
     int16_t offset;
     uint16_t bandwidth;
     uint16_t modulation;
     bool stereo;
+    /** FM weak-signal processing (Get_Processing_Status), 0.1 % of each control's range from
+     * its _Min to its _Max setting (stereo: 1000 = mono). 0 on AM. */
+    uint16_t softmute;
+    uint16_t highcut;
+    uint16_t stblend;
+    uint16_t sthiblend;
 } radio_quality_t;
+
+/** AF following, see af.h. */
+typedef struct {
+    bool active;        /**< enabled, FM and the PI is known: AFs are followed */
+    bool poor;          /**< smoothed score below the trigger: AFs are being measured */
+    bool checking_pi;   /**< sitting (muted) on a candidate until its PI answers */
+    int16_t score;      /**< smoothed score of the tuned station, 0.1 dB, AF_SCORE_NONE if none */
+    uint32_t switches;  /**< since boot */
+    uint32_t pi_fails;  /**< candidates rejected by the PI check since boot */
+    uint32_t now_ms;    /**< clock of the entries' times */
+    uint8_t n;
+    af_entry_t e[AF_MAX];
+} radio_af_status_t;
 
 typedef struct {
     bool tef_ready;
     tef6686_op_state_t op_state;
     tef6686_ident_t ident;
-    const char *patch;   /* static string */
-    char error[64];      /* last init/IO problem, "" when healthy */
+    const char *patch;   /**< static string */
+    char error[64];      /**< last init/IO problem, "" when healthy */
 
     radio_band_t band;
-    uint32_t freq_khz;
+    uint32_t freq_khz;   /**< what plays; an AF switch changes it */
     bool seeking;
     bool mute;
-    int16_t volume;      /* 0.1 dB */
+    int16_t volume;      /**< 0.1 dB */
     bool bw_auto;
-    uint16_t bw;         /* 0.1 kHz, used when !bw_auto */
+    uint16_t bw;         /**< 0.1 kHz, used when !bw_auto */
+    bool force_mono;     /**< radio_set_force_mono() */
 
     radio_quality_t q;
     bool rds_sync;
     rds_state_t rds;
+    radio_af_status_t af;
 } radio_status_t;
 
 typedef enum {
-    RADIO_EVT_TUNED,   /* tune, step or seek finished */
-    RADIO_EVT_QUALITY, /* periodic quality sample */
-    RADIO_EVT_RDS,     /* one RDS group as received */
+    RADIO_EVT_TUNED,       /**< tune, step or seek finished */
+    RADIO_EVT_QUALITY,     /**< periodic quality sample */
+    RADIO_EVT_RDS,         /**< one RDS group as received */
+    RADIO_EVT_AF_SWITCHED, /**< the same programme now plays on another frequency */
 } radio_evt_type_t;
 
 typedef struct {
@@ -68,39 +96,35 @@ typedef struct {
         struct {
             radio_band_t band;
             uint32_t khz;
-            bool found; /* false: seek/scan gave up */
+            bool found; /**< false: seek/scan gave up */
             bool by_scan;
         } tuned;
         radio_quality_t quality;
         struct {
             uint16_t block[4];
-            uint8_t err[4]; /* RDS_ERR_* per block */
+            uint8_t err[4]; /**< RDS_ERR_* per block */
             bool version_b;
             bool sync;
         } rds;
+        struct {
+            uint32_t from_khz;
+            uint32_t to_khz;
+        } af;
     };
 } radio_evt_t;
 
-/* Runs in the radio task: keep it short, never block. */
+/** Runs in the radio task: keep it short, never block. */
 typedef void (*radio_listener_t)(const radio_evt_t *evt, void *ctx);
 
-/* A seek stops on the first channel meeting all limits (TEF units). */
-typedef struct {
-    int16_t min_level;
-    uint16_t max_usn;
-    uint16_t max_wam;
-    uint16_t max_offset;
-} radio_seek_criteria_t;
-
-/* The user-facing state: what radio_start() begins with and what radio_mem keeps across power
+/** The user-facing state: what radio_start() begins with and what radio_mem keeps across power
  * cycles. */
 typedef struct {
     radio_band_t band;
-    uint32_t khz;    /* FM is rounded to the TEF's 10 kHz */
-    int16_t volume;  /* 0.1 dB, -599..240 */
+    uint32_t khz;    /**< FM is rounded to the TEF's 10 kHz */
+    int16_t volume;  /**< 0.1 dB, -599..240 */
     bool mute;
-    bool bw_auto;    /* FM only */
-    uint16_t bw;     /* 0.1 kHz, used when !bw_auto */
+    bool bw_auto;    /**< FM only */
+    uint16_t bw;     /**< 0.1 kHz, used when !bw_auto */
 } radio_settings_t;
 
 typedef struct {
@@ -108,34 +132,44 @@ typedef struct {
     uint32_t fm_min_khz;
     uint32_t fm_max_khz;
     uint32_t fm_step_khz;
-    uint32_t am_step_khz;  /* MW raster: 9 or 10 */
-    radio_settings_t initial; /* must pass radio_settings_valid() */
-    uint16_t fm_deemphasis; /* 500 or 750 */
-    radio_seek_criteria_t seek;
+    uint32_t am_step_khz;  /**< MW raster: 9 or 10 */
+    radio_settings_t initial; /**< must pass radio_settings_valid() */
+    uint16_t fm_deemphasis; /**< 500 or 750 */
+    tuning_t tuning;        /**< must pass tuning_valid() */
 } radio_config_t;
 
-/* Within what the API accepts (radio_tune, radio_set_volume, radio_set_bandwidth). Usable
+/** Within what the API accepts (radio_tune, radio_set_volume, radio_set_bandwidth). Usable
  * before radio_start(), e.g. on settings read back from flash. */
 bool radio_settings_valid(const radio_settings_t *s);
 
-/* Listeners must be registered before radio_start(). */
+/** Listeners must be registered before radio_start(). */
 esp_err_t radio_add_listener(radio_listener_t cb, void *ctx);
 esp_err_t radio_start(const radio_config_t *cfg);
 
-/* Commands are queued; ESP_OK means accepted, not completed. */
+/** Commands are queued; ESP_OK means accepted, not completed. */
 esp_err_t radio_tune(radio_band_t band, uint32_t khz);
-esp_err_t radio_step(int dir);                 /* +1 up, -1 down */
-esp_err_t radio_seek(int dir);                 /* +1/-1 with wrap-around, 0 stops */
-/* QN8035-style scan: first station from start to stop, no wrap. FM only. */
+esp_err_t radio_step(int dir);                 /**< +1 up, -1 down */
+esp_err_t radio_seek(int dir);                 /**< +1/-1 with wrap-around, 0 stops */
+/** QN8035-style scan: first station from start to stop, no wrap. FM only. */
 esp_err_t radio_scan(uint32_t start_khz, uint32_t stop_khz, uint32_t step_khz);
-esp_err_t radio_set_volume(int16_t volume);    /* 0.1 dB, -599..240 */
+esp_err_t radio_set_volume(int16_t volume);    /**< 0.1 dB, -599..240 */
 esp_err_t radio_set_mute(bool mute);
-esp_err_t radio_set_bandwidth(bool automatic, uint16_t bw); /* 0.1 kHz */
-esp_err_t radio_set_deemphasis(uint16_t timeconstant);      /* 500 or 750 */
+esp_err_t radio_set_bandwidth(bool automatic, uint16_t bw); /**< 0.1 kHz */
+esp_err_t radio_set_deemphasis(uint16_t timeconstant);      /**< 500 or 750 */
+/** Mono regardless of the stereo blend settings (overrides the Stereo_Min mode). */
+esp_err_t radio_set_force_mono(bool on);
 esp_err_t radio_reinit(void);
 
+/** One reception tuning value (tuning_id_t, units of the table). ESP_ERR_INVALID_ARG if out of
+ * range or hidden. */
+esp_err_t radio_set_tuning(int id, long value);
+/** All values at once (defaults, saved set). */
+esp_err_t radio_set_tuning_all(const tuning_t *t);
+/** The values in effect (a queued change shows once the radio task applied it). */
+void radio_get_tuning(tuning_t *out);
+
 void radio_get_status(radio_status_t *out);
-/* The settings part of the status. false while a seek runs (khz is moving) or before
+/** The settings part of the status. false while a seek runs (khz is moving) or before
  * radio_start(). */
 bool radio_get_settings(radio_settings_t *out);
 
