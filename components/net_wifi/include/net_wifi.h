@@ -1,4 +1,5 @@
-/*
+/**
+ * @file
  * Wi-Fi bring-up: a SoftAP is always started (the car has no network), and
  * an optional station connection when an SSID is configured.
  * Requires NVS to be initialised by the caller.
@@ -15,9 +16,9 @@ extern "C" {
 
 typedef struct {
     const char *ap_ssid;
-    const char *ap_password; /* < 8 characters: open network */
+    const char *ap_password; /**< < 8 characters: open network */
     uint8_t ap_channel;
-    const char *sta_ssid;    /* NULL or "" disables station mode */
+    const char *sta_ssid;    /**< NULL or "" disables station mode */
     const char *sta_password;
 } net_wifi_config_t;
 

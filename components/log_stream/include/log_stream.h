@@ -1,4 +1,5 @@
-/*
+/**
+ * @file
  * Tee of the ESP-IDF log output into a RAM ring buffer, so other modules
  * (the web console) can replay history and follow new lines. The console
  * output is unchanged.
@@ -17,17 +18,17 @@
 extern "C" {
 #endif
 
-/* Install the hook. ring_size is rounded up to a power of two. Call once,
+/** Install the hook. ring_size is rounded up to a power of two. Call once,
  * as early as possible in app_main. */
 esp_err_t log_stream_init(size_t ring_size);
 
-/* Offset one past the newest byte. */
+/** Offset one past the newest byte. */
 uint32_t log_stream_head(void);
 
-/* Offset of the oldest byte still retained. */
+/** Offset of the oldest byte still retained. */
 uint32_t log_stream_oldest(void);
 
-/*
+/**
  * Copy bytes from *pos up to (not including) limit, at most len bytes.
  * If *pos was already overwritten it first moves to the oldest retained
  * byte. Advances *pos; returns the number of bytes copied.

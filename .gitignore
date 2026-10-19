@@ -8,3 +8,5 @@ sdkconfig.lolin_s2_mini
 sdkconfig*.old
 # idf.py build output
 build/
+# doxygen output (see Doxyfile)
+docs/doxygen/

@@ -1,0 +1,42 @@
+# API documentation for the QN8035 -> TEF6686 bridge.
+#   doxygen            (from the repository root; needs Doxygen >= 1.9)
+# Output: docs/doxygen/html/index.html (git-ignored). Only settings that differ from the
+# Doxygen defaults are listed; `doxygen -x Doxyfile` shows them against the defaults.
+
+PROJECT_NAME           = "QN8035 to TEF6686 bridge"
+PROJECT_BRIEF          = "ESP32-S2 firmware that replaces a car head unit's QN8035 FM receiver with an NXP TEF6686"
+OUTPUT_DIRECTORY       = docs/doxygen
+STRIP_FROM_PATH        = .
+STRIP_FROM_INC_PATH    = .
+
+# C, documented in the public headers with /** */ and /**< */ comments.
+OPTIMIZE_OUTPUT_FOR_C  = YES
+JAVADOC_AUTOBRIEF      = YES
+TYPEDEF_HIDES_STRUCT   = YES
+MARKDOWN_SUPPORT       = YES
+# List the undocumented parts of the API too: the headers are the reference.
+EXTRACT_ALL            = YES
+EXTRACT_STATIC         = NO
+SORT_MEMBER_DOCS       = NO
+
+# CLAUDE.md: the working notes the README links to (rules, chip facts, open questions).
+INPUT                  = README.md CLAUDE.md components main
+FILE_PATTERNS          = *.h *.md
+RECURSIVE              = YES
+# Unity tests, build trees and the code index are not part of the API.
+EXCLUDE_PATTERNS       = */.pio/* */build/* */test/* */.tokensave/*
+USE_MDFILE_AS_MAINPAGE = README.md
+# The headers wrap their declarations in extern "C" for C++ users.
+ENABLE_PREPROCESSING   = YES
+PREDEFINED             = __attribute__(x)=
+
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = NO
+WARN_NO_PARAMDOC       = NO
+WARN_LOGFILE           = docs/doxygen/warnings.log
+
+GENERATE_HTML          = YES
+GENERATE_TREEVIEW      = YES
+GENERATE_LATEX         = NO
+HAVE_DOT               = NO
+SOURCE_BROWSER         = NO

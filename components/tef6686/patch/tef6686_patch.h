@@ -1,4 +1,5 @@
-/*
+/**
+ * @file
  * TEF668x firmware patch images. Each image is two raw streams loaded in
  * boot state: the patch (opened with 1C 00 74) and the LUT (1C 00 75).
  * The byte arrays are machine-converted; see regen_patch.py.
