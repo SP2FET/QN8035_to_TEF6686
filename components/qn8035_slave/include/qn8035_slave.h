@@ -3,10 +3,19 @@
  * QN8035 emulation on the bus to the head unit: an ESP32 I2C slave in front
  * of the qn8035_emu register model.
  *
- * Bus callbacks run in ISR context and only queue messages. A high-priority
- * task applies them to the model (the master waits on a stretched SCL during
- * a read) and hands decoded events to the caller. Bus tracing is done by a
- * separate low-priority task so logging never delays a bus response.
+ * No clock stretching: the head unit's MCU bit-bangs the bus and never reads
+ * SCL (docs/headunit-mcu-firmware.md). The model therefore runs in the I2C ISR
+ * under a spinlock: each register write is applied at its STOP and the TX FIFO
+ * is filled at once with the registers from the read pointer on, so a read
+ * that follows (write register, STOP, START, read) finds its data in place.
+ * Setters refresh the FIFO while the bus is idle. A repeated-start read
+ * (write register, Sr, read) would get the previous pointer's data: the v2
+ * driver reports the register only at the STOP once stretching is off.
+ *
+ * Decoded events go to a high-priority task that calls the event callback;
+ * bus tracing is done by a separate low-priority task, so logging never
+ * delays a bus response. Reads are traced when the next write or refresh
+ * notices them.
  */
 #pragma once
 
@@ -44,8 +53,9 @@ typedef struct {
 esp_err_t qn8035_slave_start(const qn8035_slave_config_t *cfg, qn8035_slave_event_cb_t cb,
                              void *ctx);
 
-/** Model updates from the tuner side. Thread-safe; no-ops when not running. */
-void qn8035_slave_complete_tune(uint32_t khz, bool found);
+/** Model updates from the tuner side. Thread-safe; no-ops when not running. See
+ * qn8035_emu_complete_tune(): set the new channel's signal first. */
+void qn8035_slave_complete_tune(uint32_t khz, bool found, bool by_scan);
 void qn8035_slave_set_signal(uint8_t rssi, uint8_t snr, bool stereo);
 void qn8035_slave_push_rds(const uint16_t blocks[4], uint8_t err_mask, bool version_b, bool sync);
 

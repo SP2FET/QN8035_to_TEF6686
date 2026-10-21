@@ -23,6 +23,7 @@ static const char *TAG = "radio";
 #define MAX_LISTENERS       4
 
 #define QUALITY_PERIOD_MS   100
+#define QUALITY_SETTLE_MS   5    /* after a tune, until settled: the QN8035 bridge waits on it */
 #define RDS_PERIOD_MS       20   /* a group lasts 87.6 ms; the TEF buffers one */
 #define HEALTH_PERIOD_MS    2000
 #define REBOOT_RETRY_MS     5000
@@ -160,6 +161,9 @@ static struct {
     int8_t ct_offset;   /* half hours, of the last clock set */
     unsigned io_errors;
     TickType_t next_boot;
+    TickType_t next_quality;
+    bool quality_settling; /* sampling fast after a tune until the quality has settled */
+    TickType_t t_tuned;    /* of that tune */
 } s;
 
 /* ---- helpers ------------------------------------------------------------- */
@@ -580,6 +584,15 @@ static void af_tick(void)
 
 /* ---- tuning -------------------------------------------------------------- */
 
+/* Sample the new channel soon and often until its quality has settled, instead of up to
+ * 100 ms later: the QN8035 bridge reports a head-unit tune done only then. */
+static void quality_soon(void)
+{
+    s.t_tuned = xTaskGetTickCount();
+    s.next_quality = s.t_tuned + pdMS_TO_TICKS(QUALITY_SETTLE_MS);
+    s.quality_settling = true;
+}
+
 static void tune_to(radio_band_t band, uint32_t khz, bool by_scan, bool found)
 {
     const bool band_changed = band != s.status.band;
@@ -599,6 +612,7 @@ static void tune_to(radio_band_t band, uint32_t khz, bool by_scan, bool found)
     }
     unlock();
     af_restart();
+    quality_soon();
     if (band_changed) {
         io_ok(apply_bandwidth(), "bandwidth");
     }
@@ -784,8 +798,16 @@ static void poll_quality(void)
                                   !io_ok(tef6686_fm_get_processing(s.tef, &proc), "processing"))) {
         return;
     }
+    const uint16_t age = tef6686_quality_age(&q);
+    const bool settled = age >= SEEK_SETTLED_QUALITY_AGE;
+    if (s.quality_settling &&
+        (settled || reached(xTaskGetTickCount(), s.t_tuned + pdMS_TO_TICKS(SEEK_MEASURE_TIMEOUT_MS)))) {
+        s.quality_settling = false;
+    }
     radio_evt_t evt = {.type = RADIO_EVT_QUALITY,
-                       .quality = {.valid = tef6686_quality_age(&q) != 0,
+                       .quality = {.valid = age != 0,
+                                   .age = age,
+                                   .station = band == RADIO_BAND_FM && settled && !seek_failures(&q, 0),
                                    .level = q.level,
                                    .usn = q.usn,
                                    .wam = q.wam,
@@ -800,7 +822,7 @@ static void poll_quality(void)
     lock();
     s.status.q = evt.quality;
     unlock();
-    if (band == RADIO_BAND_FM && evt.quality.valid) {
+    if (band == RADIO_BAND_FM && settled) { /* the fast samples after a tune are not */
         af_quality(&s.af.st, af_score(q.level, q.usn, q.wam, 0));
     }
     publish_af();
@@ -917,6 +939,7 @@ static void boot_tef(void)
     rds_reset(&s.status.rds);
     unlock();
     af_restart();
+    quality_soon();
     ESP_LOGI(TAG, "tuner ready: %s, patch %s, %s %lu kHz", tef6686_variant_name(id.device),
              s.status.patch, s.status.band == RADIO_BAND_FM ? "FM" : "AM",
              (unsigned long)s.status.freq_khz);
@@ -1057,7 +1080,7 @@ static void handle_cmd(const radio_cmd_t *c)
 static void radio_task(void *arg)
 {
     (void)arg;
-    TickType_t next_quality = 0, next_rds = 0, next_health = 0;
+    TickType_t next_rds = 0, next_health = 0;
 
     boot_tef();
     for (;;) {
@@ -1070,7 +1093,7 @@ static void radio_task(void *arg)
         } else if (s.af.verifying) {
             wait = pdMS_TO_TICKS(RDS_PERIOD_MS);
         } else {
-            const TickType_t due = (int32_t)(next_rds - next_quality) < 0 ? next_rds : next_quality;
+            const TickType_t due = (int32_t)(next_rds - s.next_quality) < 0 ? next_rds : s.next_quality;
             wait = reached(now, due) ? 0 : due - now;
         }
 
@@ -1106,9 +1129,10 @@ static void radio_task(void *arg)
             }
             next_rds = now + pdMS_TO_TICKS(RDS_PERIOD_MS);
         }
-        if (reached(now, next_quality)) {
+        if (reached(now, s.next_quality)) {
             poll_quality();
-            next_quality = now + pdMS_TO_TICKS(QUALITY_PERIOD_MS);
+            s.next_quality =
+                now + pdMS_TO_TICKS(s.quality_settling ? QUALITY_SETTLE_MS : QUALITY_PERIOD_MS);
         }
         if (reached(now, next_health)) {
             check_health();

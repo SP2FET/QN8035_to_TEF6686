@@ -5,6 +5,11 @@
  * Pure C, no ESP-IDF, no locking: the caller (qn8035_slave) serializes all
  * calls. Bus writes are turned into high-level events (tune, seek, mute...)
  * for the bridge; the bridge feeds tuner state back with the setters.
+ *
+ * A tune or scan is one operation: it starts with a TUNE/SEEK event, keeps
+ * SYSTEM1.CHSC set (the busy flag drivers poll) and ends with
+ * qn8035_emu_complete_tune() for that same operation. Completions of an
+ * operation that a newer request replaced are ignored.
  */
 #pragma once
 
@@ -18,10 +23,11 @@
 extern "C" {
 #endif
 
-/* CID1 of a real part is not documented anywhere we have. Capture it from the
- * head unit's chip (read register 0x05) and put it here. */
+/* CID1 of a real part is not documented anywhere we have; capture it from the head unit's chip
+ * (register 0x05). The QF30 MCU starts tunes with CHSC when CID1[1:0] is 1 or 2 and with a pulse
+ * on register 0x55 otherwise; both work, but only CHSC makes it wait for our tune. */
 #ifndef QN8035_EMU_CID1
-#define QN8035_EMU_CID1 0x00
+#define QN8035_EMU_CID1 0x02
 #endif
 #define QN8035_EMU_CID2 0x84 /**< product id 100001b, major rev 1 */
 
@@ -32,7 +38,7 @@ typedef enum {
     QN8035_EVT_POWER,      /**< .on: receive requested (RXREQ, not STNBY) */
     QN8035_EVT_TUNE,       /**< .khz */
     QN8035_EVT_SEEK,       /**< .seek: scan start..stop, first station wins */
-    QN8035_EVT_MUTE,       /**< .on */
+    QN8035_EVT_MUTE,       /**< .on: VOL_CTL.MUTE_EN or the undocumented 0x4A/0x4C mutes */
     QN8035_EVT_VOLUME,     /**< .db: 0 .. -47 */
     QN8035_EVT_DEEMPHASIS, /**< .us: 50 or 75 */
     QN8035_EVT_FORCE_MONO, /**< .on */
@@ -54,11 +60,27 @@ typedef struct {
     };
 } qn8035_evt_t;
 
+typedef enum {
+    QN8035_OP_NONE,
+    QN8035_OP_TUNE,
+    QN8035_OP_SCAN,
+} qn8035_op_t;
+
 typedef struct {
     uint8_t regs[QN8035_REG_COUNT];
     uint8_t ptr;       /**< register address for the next read */
     bool receiving;    /**< RXREQ set and not in standby */
-    uint16_t tuned_ch; /**< channel last reported by the tuner */
+    bool muted;        /**< last reported mute state */
+    bool rds_upd;      /**< STATUS2.RDS_RXUPD of the last group published */
+    uint16_t tuned_ch; /**< CH of the last completed tune (register value) */
+    uint8_t op;        /**< qn8035_op_t in progress */
+    uint16_t op_ch;    /**< CH register of the tune in progress */
+    uint32_t op_khz;   /**< frequency asked for (TUNE event) */
+    uint16_t pll_ref;  /**< PLL_DLT the CH raster is nominal at (set while not receiving) */
+    /** The driver starts tunes with CHSC or 0x55, so a SYSTEM1 rewrite without CHSC is not a
+     * tune: the QF30 MCU rewrites SYSTEM1 halfway through setting a channel. Survives SWRST
+     * (it describes the driver, not the chip). */
+    bool explicit_start;
 } qn8035_emu_t;
 
 /** Power-on state. */
@@ -75,14 +97,26 @@ size_t qn8035_emu_write(qn8035_emu_t *emu, const uint8_t *data, size_t len, qn80
 /** One bus read: len bytes from the read pointer, auto-incrementing. */
 void qn8035_emu_read(qn8035_emu_t *emu, uint8_t *out, size_t len);
 
+/** The next len bytes a read would return, without moving the pointer (to fill a TX FIFO). */
+void qn8035_emu_peek_block(const qn8035_emu_t *emu, uint8_t *out, size_t len);
+
+/** Move the read pointer as if len bytes had been read. */
+void qn8035_emu_skip(qn8035_emu_t *emu, size_t len);
+
 static inline uint8_t qn8035_emu_peek(const qn8035_emu_t *emu, uint8_t reg)
 {
     return emu->regs[reg % QN8035_REG_COUNT];
 }
 
-/** Tuner finished a tune or scan at khz. Clears CHSC, sets RXCCA_FAIL to
- * !found. Returns true if the INT pin should pulse (CCA_INT_EN). */
-bool qn8035_emu_complete_tune(qn8035_emu_t *emu, uint32_t khz, bool found);
+/**
+ * The tuner finished an operation at khz. by_scan says whether it was a scan.
+ * Ignored unless it matches the operation in progress (kind, and khz for a
+ * tune). Clears CHSC and sets STATUS1.RXCCA_FAIL: for a scan from found, for
+ * a tune from found and the CCA level rule (RSSISIG against CCA.RXCCAD), so
+ * call qn8035_emu_set_signal() with the new channel's values first. A scan
+ * also moves CH to khz. Returns true if the INT pin should pulse (CCA_INT_EN).
+ */
+bool qn8035_emu_complete_tune(qn8035_emu_t *emu, uint32_t khz, bool found, bool by_scan);
 
 /** Raw register values for RSSISIG / SNR and the stereo flag. */
 void qn8035_emu_set_signal(qn8035_emu_t *emu, uint8_t rssi, uint8_t snr, bool stereo);

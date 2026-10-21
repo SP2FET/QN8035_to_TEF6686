@@ -11,6 +11,7 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
+#include "esp_pm.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -26,6 +27,22 @@
 #include "web_ui.h"
 
 static const char *TAG = "main";
+
+static esp_err_t init_power(void)
+{
+#if CONFIG_BRIDGE_CPU_DFS
+    /* Keep APB at 80 MHz for I2C and native USB. The RTOS raises the CPU to
+     * the configured maximum while tasks run. No sleep: USB must stay live. */
+    const esp_pm_config_t cfg = {
+        .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+        .min_freq_mhz = 80,
+        .light_sleep_enable = false,
+    };
+    ESP_RETURN_ON_ERROR(esp_pm_configure(&cfg), TAG, "power config");
+    ESP_LOGI(TAG, "CPU idle 80 MHz, active %d MHz; light sleep disabled", cfg.max_freq_mhz);
+#endif
+    return ESP_OK;
+}
 
 #define TEF_I2C_PORT I2C_NUM_0 /* the head-unit side uses I2C_NUM_1 */
 #define QN_I2C_PORT  I2C_NUM_1
@@ -151,6 +168,7 @@ void app_main(void)
     ESP_LOGI(TAG, "%s %s (ESP-IDF %s), reset reason %d", app->project_name, app->version,
              app->idf_ver, (int)esp_reset_reason());
 
+    ESP_ERROR_CHECK(init_power());
     ESP_ERROR_CHECK(init_nvs());
 
     i2c_master_bus_handle_t tef_bus;
@@ -215,6 +233,7 @@ void app_main(void)
     ESP_LOGI(TAG, "QN8035 emulation disabled (menuconfig: QN8035 emulation)");
 #endif
 
+#if CONFIG_BRIDGE_WIFI_ENABLE
     const net_wifi_config_t wifi_cfg = {
         .ap_ssid = CONFIG_BRIDGE_WIFI_AP_SSID,
         .ap_password = CONFIG_BRIDGE_WIFI_AP_PASSWORD,
@@ -227,6 +246,9 @@ void app_main(void)
         .ota_password = CONFIG_BRIDGE_OTA_PASSWORD,
     };
     ESP_ERROR_CHECK(web_ui_start(&web_cfg));
+#else
+    ESP_LOGI(TAG, "Wi-Fi and web UI disabled; use USB to update firmware");
+#endif
 
     confirm_ota_image();
 }

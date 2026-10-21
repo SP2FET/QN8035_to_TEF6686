@@ -31,7 +31,14 @@
 #define QN8035_REG_XTAL_DIV2 0x17
 #define QN8035_REG_INT_CTRL  0x18 /**< table says 0x18; old prose wrongly says 0x17 */
 
-/** Shadow size: covers the undocumented registers (highest seen: 0x57). */
+/* Undocumented registers that known drivers rely on (docs/headunit-mcu-firmware.md: QF30 MCU
+ * 013021; Jieli and ukrtrip in the qn8035-development skill). */
+#define QN8035_REG_MUTE      0x4A /**< bit 5 = audio mute (Jieli: 0x30 mute / 0x10) */
+#define QN8035_REG_DAC       0x4C /**< "REG_DAC": bits 0x0B all set = mute (ukrtrip: 0x1B / 0x10) */
+#define QN8035_REG_TUNE_GO   0x55 /**< QF30 MCU pulses bit 7 to tune when CID1[1:0] is not 1 or 2 */
+#define QN8035_REG_CHIP_ID   0x58 /**< QF30 MCU reads [4:0]; 0x13 selects another spur list */
+
+/** Shadow size: covers the undocumented registers (highest seen: 0x58). */
 #define QN8035_REG_COUNT     0x80
 
 /** SYSTEM1 */
@@ -43,6 +50,14 @@
 #define QN8035_SYSTEM1_FORCE_MO   (1u << 2)
 #define QN8035_SYSTEM1_CHSC       (1u << 1) /**< start CCA/tune; chip clears when done */
 #define QN8035_SYSTEM1_CCA_CH_DIS (1u << 0) /**< 1 = tune to CH, 0 = scan CH_START..CH_STOP */
+
+/** CCA */
+#define QN8035_CCA_XTAL_INJ       (1u << 7) /**< 1 = digital clock input */
+#define QN8035_CCA_IMR            (1u << 6) /**< image side; drivers flip it on spur channels */
+#define QN8035_CCA_RXCCAD_MASK    0x3Fu     /**< a channel is valid if RSSI dBuV > RXCCAD - 10 */
+
+/** RSSISIG - 43 = dBuV (Rev 0.08). */
+#define QN8035_RSSI_DBUV_OFFSET   43
 
 /** STATUS1 */
 #define QN8035_STATUS1_FSM_SHIFT  4
@@ -76,6 +91,16 @@
 #define QN8035_VOL_GAIN_DIG_SHIFT 3        /**< 0..5 = 0..-5 dB */
 #define QN8035_VOL_GAIN_DIG_MASK (0x7u << QN8035_VOL_GAIN_DIG_SHIFT)
 #define QN8035_VOL_GAIN_ANA_MASK 0x7u      /**< 7 = 0 dB ... 0 = -42 dB, 6 dB steps */
+
+/** XTAL_DIV1 [7:3] = PLL_DLT[4:0], [2:0] = XTAL_DIV[10:8]; XTAL_DIV2 = PLL_DLT[12:5].
+ * pll_dlt = round(28.5 MHz / (f_xtal / xtal_div / 512)) - 442368, so the internal 28.5 MHz
+ * reference, which the CH raster is derived from, scales with (442368 + pll_dlt). */
+#define QN8035_PLL_DLT_BASE      442368u
+
+/** Undocumented mute bits */
+#define QN8035_MUTE_BIT          (1u << 5) /**< in QN8035_REG_MUTE */
+#define QN8035_DAC_MUTE_BITS     0x0Bu     /**< in QN8035_REG_DAC, all three set */
+#define QN8035_TUNE_GO_BIT       (1u << 7) /**< in QN8035_REG_TUNE_GO */
 
 /** INT_CTRL */
 #define QN8035_INT_RDS_INT_EN    (1u << 7) /**< 4.5 ms low pulse per RDS group */

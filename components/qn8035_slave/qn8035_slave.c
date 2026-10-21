@@ -12,32 +12,41 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "hal/i2c_ll.h"
 #include "sdkconfig.h"
+#include "soc/soc_caps.h"
 
 #if !CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2
 #error "qn8035_slave needs CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2=y (see sdkconfig.defaults)"
 #endif
+#if CONFIG_I2C_ISR_IRAM_SAFE
+#error "the QN8035 model runs in the I2C ISR from flash: keep CONFIG_I2C_ISR_IRAM_SAFE off"
+#endif
 
 static const char *TAG = "qn8035";
 
-#define RX_MAX          32   /* one hardware FIFO */
 #define MSG_QUEUE_LEN   16
 #define TRACE_QUEUE_LEN 32
 #define TRACE_BYTES     8
-#define TX_TIMEOUT_MS   10
 #define INT_PULSE_US    4500 /* datasheet: 4.5 ms low pulse */
 #define SLAVE_TASK_PRIO (configMAX_PRIORITIES - 2)
 #define TRACE_TASK_PRIO 2
+#define TX_PRELOAD      SOC_I2C_FIFO_LEN
 
 typedef enum {
     MSG_WRITE,
     MSG_READ,
 } msg_type_t;
 
+/* One bus write (with the reads the master did before it), or reads found by a refresh. */
 typedef struct {
-    uint8_t type;
-    uint8_t len;
-    uint8_t data[RX_MAX];
+    uint8_t wlen;                  /* bytes written, data[0] = register; 0 = reads only */
+    uint8_t wdata[TRACE_BYTES];
+    uint8_t rlen;                  /* bytes the master read from the TX FIFO */
+    uint8_t rreg;                  /* register of the first byte read */
+    uint8_t rdata[TRACE_BYTES];
+    uint8_t nevt;
+    qn8035_evt_t evts[QN8035_EMU_MAX_EVENTS];
 } bus_msg_t;
 
 typedef struct {
@@ -48,8 +57,14 @@ typedef struct {
 } trace_rec_t;
 
 static struct {
+    portMUX_TYPE mux;        /* guards emu, tx and the TX FIFO: the ISR and the setters use them */
     qn8035_emu_t emu;
-    SemaphoreHandle_t lock; /* guards emu and stats */
+    i2c_dev_t *hw;
+    uint8_t tx[TX_PRELOAD];  /* what the TX FIFO was filled with */
+    uint8_t tx_n;
+    uint8_t tx_reg;          /* register of tx[0] */
+
+    SemaphoreHandle_t lock;  /* guards stats */
     QueueHandle_t msgs;
     QueueHandle_t traces;
     i2c_slave_dev_handle_t dev;
@@ -58,36 +73,80 @@ static struct {
     qn8035_slave_event_cb_t cb;
     void *cb_ctx;
     bool trace;
-    volatile uint32_t isr_dropped;
+    volatile uint32_t dropped;
     qn8035_slave_stats_t stats;
-} s;
+} s = {.mux = portMUX_INITIALIZER_UNLOCKED};
+
+/* ---- TX FIFO (caller holds s.mux) ------------------------------------------ */
+
+/*
+ * The head unit's master (QF30 MCU, docs/headunit-mcu-firmware.md) never reads SCL back, so the
+ * slave must not stretch: the S2 would hold SCL low at the read address and the master would
+ * clock garbage. With stretching off the hardware sends whatever is in the TX FIFO, so the FIFO
+ * always holds the registers from the read pointer on. It is refilled when a write sets the
+ * pointer (the STOP of "write register" comes ~60 us before the master clocks the first byte of
+ * its read) and when the tuner side changes the model while the bus is idle.
+ */
+
+/* Bytes the master clocked out since the last fill: they were read, the pointer moves on. */
+static void take_reads_locked(bus_msg_t *m)
+{
+    uint32_t free_len = 0;
+    i2c_ll_get_txfifo_len(s.hw, &free_len);
+    const uint32_t left = SOC_I2C_FIFO_LEN - free_len;
+    if (left >= s.tx_n) {
+        return;
+    }
+    const uint8_t n = (uint8_t)(s.tx_n - left);
+    m->rlen = n;
+    m->rreg = s.tx_reg;
+    memcpy(m->rdata, s.tx, MIN((size_t)n, sizeof(m->rdata)));
+    qn8035_emu_skip(&s.emu, n);
+    s.tx_n = 0;
+}
+
+static void fill_tx_locked(void)
+{
+    i2c_ll_txfifo_rst(s.hw);
+    s.tx_reg = s.emu.ptr;
+    qn8035_emu_peek_block(&s.emu, s.tx, sizeof(s.tx));
+    i2c_ll_write_txfifo(s.hw, s.tx, sizeof(s.tx));
+    s.tx_n = sizeof(s.tx);
+}
+
+/* After a model change from the tuner side. Mid-transaction the FIFO is left alone: the
+ * next register write refills it anyway. */
+static void refresh_tx_locked(bus_msg_t *m)
+{
+    if (i2c_ll_is_bus_busy(s.hw)) {
+        return;
+    }
+    take_reads_locked(m);
+    fill_tx_locked();
+}
 
 /* ---- ISR side ------------------------------------------------------------- */
 
+/* Runs at the STOP of a write (the v2 driver calls it only when bytes arrived). */
 static bool on_receive(i2c_slave_dev_handle_t dev, const i2c_slave_rx_done_event_data_t *evt,
                        void *arg)
 {
     (void)dev;
     (void)arg;
-    bus_msg_t m = {.type = MSG_WRITE, .len = (uint8_t)MIN(evt->length, (uint32_t)RX_MAX)};
-    memcpy(m.data, evt->buffer, m.len);
-    BaseType_t woken = pdFALSE;
-    if (xQueueSendFromISR(s.msgs, &m, &woken) != pdTRUE) {
-        s.isr_dropped++;
-    }
-    return woken == pdTRUE;
-}
+    bus_msg_t m = {0};
+    const size_t len = evt->length;
 
-static bool on_request(i2c_slave_dev_handle_t dev, const i2c_slave_request_event_data_t *evt,
-                       void *arg)
-{
-    (void)dev;
-    (void)evt;
-    (void)arg;
-    bus_msg_t m = {.type = MSG_READ};
+    portENTER_CRITICAL_ISR(&s.mux);
+    take_reads_locked(&m);
+    m.nevt = (uint8_t)qn8035_emu_write(&s.emu, evt->buffer, len, m.evts, QN8035_EMU_MAX_EVENTS);
+    fill_tx_locked();
+    portEXIT_CRITICAL_ISR(&s.mux);
+
+    m.wlen = (uint8_t)MIN(len, (size_t)UINT8_MAX);
+    memcpy(m.wdata, evt->buffer, MIN(len, sizeof(m.wdata)));
     BaseType_t woken = pdFALSE;
     if (xQueueSendFromISR(s.msgs, &m, &woken) != pdTRUE) {
-        s.isr_dropped++;
+        s.dropped++;
     }
     return woken == pdTRUE;
 }
@@ -117,7 +176,14 @@ static void trace(uint8_t type, uint8_t reg, const uint8_t *data, size_t len)
     trace_rec_t rec = {.type = type, .reg = reg, .len = (uint8_t)len};
     memcpy(rec.data, data, MIN(len, sizeof(rec.data)));
     if (xQueueSend(s.traces, &rec, 0) != pdTRUE) {
-        s.isr_dropped++; /* counted together; both mean lost visibility */
+        s.dropped++; /* counted together; both mean lost visibility */
+    }
+}
+
+static void post_reads(const bus_msg_t *m)
+{
+    if (m->rlen && xQueueSend(s.msgs, m, 0) != pdTRUE) {
+        s.dropped++;
     }
 }
 
@@ -125,35 +191,22 @@ static void slave_task(void *arg)
 {
     (void)arg;
     bus_msg_t m;
-    qn8035_evt_t evts[QN8035_EMU_MAX_EVENTS];
 
     for (;;) {
         xQueueReceive(s.msgs, &m, portMAX_DELAY);
-        if (m.type == MSG_READ) {
-            uint8_t b;
-            xSemaphoreTake(s.lock, portMAX_DELAY);
-            const uint8_t reg = s.emu.ptr;
-            qn8035_emu_read(&s.emu, &b, 1);
-            s.stats.reads++;
-            xSemaphoreGive(s.lock);
-            /* One byte per request: the known drivers read single registers.
-             * TODO(bring-up): confirm on the logic analyser what a multi-byte
-             * read does with this driver (extra on_request or 0xFF). */
-            uint32_t written = 0;
-            i2c_slave_write(s.dev, &b, 1, &written, TX_TIMEOUT_MS);
-            trace(MSG_READ, reg, &b, 1);
-            continue;
-        }
-        if (m.len == 0) {
-            continue;
-        }
         xSemaphoreTake(s.lock, portMAX_DELAY);
-        const size_t n = qn8035_emu_write(&s.emu, m.data, m.len, evts, QN8035_EMU_MAX_EVENTS);
-        s.stats.writes++;
+        s.stats.reads += m.rlen;
+        s.stats.writes += m.wlen ? 1u : 0u;
         xSemaphoreGive(s.lock);
-        trace(MSG_WRITE, m.data[0], &m.data[1], m.len - 1u);
-        for (size_t i = 0; i < n; i++) {
-            s.cb(&evts[i], s.cb_ctx);
+        /* Reads show up late (at the next write or refresh) but in bus order. */
+        if (m.rlen) {
+            trace(MSG_READ, m.rreg, m.rdata, m.rlen);
+        }
+        if (m.wlen) {
+            trace(MSG_WRITE, m.wdata[0], &m.wdata[1], m.wlen - 1u);
+        }
+        for (size_t i = 0; i < m.nevt; i++) {
+            s.cb(&m.evts[i], s.cb_ctx);
         }
     }
 }
@@ -192,6 +245,8 @@ esp_err_t qn8035_slave_start(const qn8035_slave_config_t *cfg, qn8035_slave_even
 {
     ESP_RETURN_ON_FALSE(cfg && cb, ESP_ERR_INVALID_ARG, TAG, "invalid args");
     ESP_RETURN_ON_FALSE(!s.stats.running, ESP_ERR_INVALID_STATE, TAG, "already running");
+    ESP_RETURN_ON_FALSE(cfg->i2c_port >= 0 && cfg->i2c_port < SOC_I2C_NUM, ESP_ERR_INVALID_ARG, TAG,
+                        "i2c port");
 
     qn8035_emu_init(&s.emu);
     s.cb = cb;
@@ -228,27 +283,40 @@ esp_err_t qn8035_slave_start(const qn8035_slave_config_t *cfg, qn8035_slave_even
         .addr_bit_len = I2C_ADDR_BIT_LEN_7,
         /* The head unit's bus already has pull-ups. */
     };
+    s.hw = I2C_LL_GET_HW(cfg->i2c_port);
     ESP_RETURN_ON_ERROR(i2c_new_slave_device(&sc, &s.dev), TAG, "slave device");
-    const i2c_slave_event_callbacks_t cbs = {.on_request = on_request, .on_receive = on_receive};
+    /* No on_request: it only comes from the stretch interrupt, which is switched off below.
+     * i2c_slave_write() is never used either; the FIFO is ours. */
+    const i2c_slave_event_callbacks_t cbs = {.on_receive = on_receive};
     ESP_RETURN_ON_ERROR(i2c_slave_register_event_callbacks(s.dev, &cbs, NULL), TAG, "callbacks");
+
+    /* The v2 driver always enables stretching and has no option against it. */
+    portENTER_CRITICAL(&s.mux);
+    i2c_ll_slave_enable_scl_stretch(s.hw, false);
+    i2c_ll_update(s.hw);
+    fill_tx_locked();
+    portEXIT_CRITICAL(&s.mux);
 
     xSemaphoreTake(s.lock, portMAX_DELAY);
     s.stats.running = true;
     xSemaphoreGive(s.lock);
-    ESP_LOGI(TAG, "emulating QN8035 at 0x%02x on I2C%d (SDA %d, SCL %d, INT %d)%s", cfg->address,
-             cfg->i2c_port, cfg->sda_gpio, cfg->scl_gpio, cfg->int_gpio,
+    ESP_LOGI(TAG, "emulating QN8035 at 0x%02x on I2C%d (SDA %d, SCL %d, INT %d), no clock stretching%s",
+             cfg->address, cfg->i2c_port, cfg->sda_gpio, cfg->scl_gpio, cfg->int_gpio,
              cfg->trace ? ", tracing" : "");
     return ESP_OK;
 }
 
-void qn8035_slave_complete_tune(uint32_t khz, bool found)
+void qn8035_slave_complete_tune(uint32_t khz, bool found, bool by_scan)
 {
     if (!s.stats.running) {
         return;
     }
-    xSemaphoreTake(s.lock, portMAX_DELAY);
-    const bool irq = qn8035_emu_complete_tune(&s.emu, khz, found);
-    xSemaphoreGive(s.lock);
+    bus_msg_t m = {0};
+    portENTER_CRITICAL(&s.mux);
+    const bool irq = qn8035_emu_complete_tune(&s.emu, khz, found, by_scan);
+    refresh_tx_locked(&m);
+    portEXIT_CRITICAL(&s.mux);
+    post_reads(&m);
     if (irq) {
         pulse_int();
     }
@@ -259,9 +327,12 @@ void qn8035_slave_set_signal(uint8_t rssi, uint8_t snr, bool stereo)
     if (!s.stats.running) {
         return;
     }
-    xSemaphoreTake(s.lock, portMAX_DELAY);
+    bus_msg_t m = {0};
+    portENTER_CRITICAL(&s.mux);
     qn8035_emu_set_signal(&s.emu, rssi, snr, stereo);
-    xSemaphoreGive(s.lock);
+    refresh_tx_locked(&m);
+    portEXIT_CRITICAL(&s.mux);
+    post_reads(&m);
 }
 
 void qn8035_slave_push_rds(const uint16_t blocks[4], uint8_t err_mask, bool version_b, bool sync)
@@ -269,9 +340,12 @@ void qn8035_slave_push_rds(const uint16_t blocks[4], uint8_t err_mask, bool vers
     if (!s.stats.running) {
         return;
     }
-    xSemaphoreTake(s.lock, portMAX_DELAY);
+    bus_msg_t m = {0};
+    portENTER_CRITICAL(&s.mux);
     const bool irq = qn8035_emu_push_rds(&s.emu, blocks, err_mask, version_b, sync);
-    xSemaphoreGive(s.lock);
+    refresh_tx_locked(&m);
+    portEXIT_CRITICAL(&s.mux);
+    post_reads(&m);
     if (irq) {
         pulse_int();
     }
@@ -285,6 +359,6 @@ void qn8035_slave_get_stats(qn8035_slave_stats_t *out)
     }
     xSemaphoreTake(s.lock, portMAX_DELAY);
     *out = s.stats;
-    out->dropped = s.isr_dropped;
+    out->dropped = s.dropped;
     xSemaphoreGive(s.lock);
 }

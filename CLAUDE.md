@@ -23,9 +23,9 @@ The head unit's software must not notice the swap.
 | Station memory (stand-alone build): last settings + 40 memory channels in NVS, web UI card | Builds; channel logic host-tested (11 tests). **Not yet tried on the device** |
 | Reception tuning: weak-signal DSP (iMS, EQ, noise blanker, soft mute, high cut, stereo blend, high blend, auto-bandwidth sensitivity, RF AGC), AF and seek thresholds, live in the web UI, saved to NVS on request | Builds; table host-tested. **Not yet tried on the device** |
 | AF following: RDS AF list, AF_Update checks, PI-checked switch, REG | Builds; decision logic and AF decoding host-tested. **Not yet tried on air** |
-| QN8035 register model | Implemented, host-tested (13 tests) |
-| QN8035 I2C slave port + bridge | Skeleton, compiles, **disabled by default**, untested |
-| Head-unit protocol capture | Not started; see Roadmap |
+| QN8035 register model | Implemented to the head-unit MCU's driver (CHSC and 0x55 starts, stale completions, 0x4A/0x4C mutes, 85.5 MHz PLL shift, CCA level rule), host-tested (23 tests) |
+| QN8035 I2C slave port + bridge | No clock stretching (TX FIFO filled from the ISR), tune done on settled quality, builds, **disabled by default**, untested on hardware |
+| Head-unit protocol | Taken from the MCU firmware ([docs/headunit-mcu-firmware.md](docs/headunit-mcu-firmware.md)); bus capture not done yet |
 
 ## Hardware
 
@@ -34,7 +34,7 @@ The head unit's software must not notice the swap.
 | TEF6686 SDA | GPIO16 | I2C0 master, 400 kHz. SDA/SCL order is assumed; `BRIDGE_TEF_I2C_AUTOSWAP` probes both orders at boot and logs which one answered |
 | TEF6686 SCL | GPIO17 | Internal pull-ups are enabled but weak (~45 kΩ); fit 2.2–4.7 kΩ to 3V3 if the module has none |
 | Head unit SDA | GPIO33 (default) | I2C1 slave. Not wired yet. **Check the bus voltage first** (it may be 1.8 V) |
-| Head unit SCL | GPIO35 (default) | Our reads rely on clock stretching; the head unit's I2C master must tolerate it |
+| Head unit SCL | GPIO35 (default) | No clock stretching: the head unit's MCU bit-bangs the bus (~120–150 kHz) and never reads SCL, so the slave fills its TX FIFO from the ISR |
 | QN8035 INT | none (default) | Optional: 4.5 ms low pulse per RDS group/CCA end, if the head unit uses it |
 | USB | native USB | Console is USB CDC (`CONFIG_ESP_CONSOLE_USB_CDC`). For the first flash, hold BOOT (GPIO0) and tap RST |
 
@@ -56,6 +56,12 @@ neither the stereo pilot nor RDS locks, even at 47 dBµV. Those two flags are
 the quick test for the right setting.
 
 ## Build, flash, test
+
+**Versioning.** The canonical SemVer is `PROJECT_VER` in the root `CMakeLists.txt`.
+It reaches the ESP-IDF app descriptor and existing boot/status/web/OTA version displays.
+Update it and `CHANGELOG.md` together, then tag the commit `vMAJOR.MINOR.PATCH`.
+During 0.x, minor versions may change interfaces; patch versions are compatible fixes.
+Do not override it with `APP_PROJECT_VER_FROM_CONFIG` or infer it from Git tags.
 
 PlatformIO, ESP-IDF **v5.4.0** (`platform = espressif32@6.10.0`, pinned).
 The layout is a plain ESP-IDF project (`main/` + `components/`), so
@@ -90,6 +96,14 @@ component, touch `main/CMakeLists.txt` to force a re-configure.
 Web UI: join Wi-Fi **`TEF-Bridge`** (password `tef6686bridge`) and open
 **http://192.168.4.1/**. You can also set a station SSID in menuconfig to
 join an existing network (the IP address is logged).
+
+**Power.** `BRIDGE_CPU_DFS` defaults on in stand-alone builds: idle CPU 80 MHz,
+active CPU at `ESP_DEFAULT_CPU_FREQ_MHZ` (normally 160 MHz), APB 80 MHz, no
+light sleep. It is unavailable with QN8035 emulation to preserve slave interrupt
+timing. In the emulation build, `BRIDGE_WIFI_ENABLE` can disable Wi-Fi, HTTP and
+the log pump entirely (also disables web OTA; USB remains available). Wi-Fi stays
+on by default. `BRIDGE_QN_TRACE` now defaults off; enable it for bus bring-up.
+See [docs/power-usage.md](docs/power-usage.md) for analysis and measurement steps.
 
 **Web OTA.** `-t ota` (`scripts/pio_ota.py`) runs `scripts/ota_upload.py`,
 which POSTs `firmware.bin` to `/api/ota`, waits for the restart and then for
@@ -148,13 +162,15 @@ httpd task serves nothing else (about 10–20 s).
 | Task | Prio | Owns / does |
 |---|---|---|
 | `radio` | 5 | The TEF6686 handle. Nothing else talks to the tuner. Commands arrive via queue; `radio_get_status()` copies a mutex-protected snapshot |
-| `qn_slave` | max-2 | The QN8035 model (mutex shared with setters). Serves read requests while the master waits on a stretched SCL. **No logging in this path** |
+| `qn_slave` | max-2 | Hands the events decoded in the I2C ISR to the bridge. The QN8035 model itself runs in the ISR (spinlock shared with the setters), which refills the TX FIFO for the next read. **No logging in the ISR** |
 | `qn_trace` | 2 | Formats and logs bus transactions queued by `qn_slave` (drops when full) |
 | `log_pump` | 3 | Moves new log bytes to WebSocket clients via `httpd_queue_work` |
 | `radio_mem` | 2 | Samples `radio_get_settings()` every 500 ms and writes them once stable for 2 s (not while seeking). Memory channel writes happen in the caller (httpd) |
 | httpd | default | All HTTP/WS handlers run in this one task, so static buffers inside handlers are safe |
 
-The I2C slave callbacks run in ISR context. They only copy into a queue.
+The I2C slave receive callback runs in ISR context: it applies the write to
+the model, refills the TX FIFO and queues the events (pure C and register
+writes, no logging).
 
 ### Web API
 
@@ -205,6 +221,9 @@ Memory channels (stand-alone build): `GET /api/presets` lists the used channels,
 - **ISR and callback code only signals.** Copy, `xQueueSendFromISR`, return.
   No logging, no blocking, no driver calls. Keep logging out of
   time-critical paths: queue a record and log it from a low-priority task.
+  The one exception is `qn8035_slave`: the head unit cannot wait for a task
+  (no clock stretching), so its receive callback runs the register model and
+  writes the TX FIFO under a spinlock.
 - **Errors.** Use `ESP_RETURN_ON_ERROR`/`ESP_RETURN_ON_FALSE` in init paths.
   `ESP_ERROR_CHECK` is only for unrecoverable start-up in `app_main`. Runtime
   I/O errors are counted and recovered: `radio` re-boots the tuner after 5
@@ -292,18 +311,25 @@ before changing protocol code.
 
 1. ~~TEF module crystal and SDA/SCL order~~ Resolved: 9.216 MHz crystal, and
    the tuner ACKs with SDA=GPIO16, SCL=GPIO17.
-2. **How the head unit's driver talks to the QN8035.** Capture this from the
-   original chip with a logic analyser before enabling emulation: speed,
-   single vs burst reads, CHSC polling vs INT, init recipe, undocumented
-   mute registers 0x4A/0x4C. Write the findings to
-   `docs/headunit-protocol.md`.
-3. Head-unit bus voltage, and whether its master tolerates clock stretching.
-4. I2C slave v2 on the S2: does `on_receive` (register address) always
-   arrive before `on_request` for a write + repeated-start read? What does a
-   multi-byte read return?
-5. Real CID1 value (`QN8035_EMU_CID1`, currently 0x00).
-6. RSSISIG/SNR scaling (`bridge`: RSSI = dBµV + 43, SNR is a heuristic).
-   Calibrate against the real chip on a known station.
+2. **How the head unit's driver talks to the QN8035.** Mostly answered from
+   the MCU firmware ([docs/headunit-mcu-firmware.md](docs/headunit-mcu-firmware.md)):
+   bit-banged ~120–150 kHz, single-register reads with a STOP after the
+   register byte, CHSC polling, no INT, the init recipe, mutes 0x4A/0x4C.
+   The analysed build is V03.03 and the unit runs V03.12: still capture the
+   bus from the original chip with a logic analyser to confirm.
+3. Head-unit bus voltage (the MCU is a 3.3 V STM32F030 or MM32 clone). Clock
+   stretching: not tolerated, handled by filling the TX FIFO.
+4. I2C slave v2 on the S2 with stretching off: check on the logic analyser
+   that the hardware sends exactly the FIFO bytes after the address, and
+   whether a NACKed read leaves a byte prefetched (the read count and the
+   pointer would be one too high). Repeated-start reads are not supported;
+   this head unit does not use them.
+5. Real CID1 value (`QN8035_EMU_CID1`, currently 0x02: the MCU then starts
+   tunes with CHSC and waits for it; the 0x55 path works too).
+6. RSSISIG/SNR scaling (`bridge`: RSSI = dBµV + 43, SNR is a heuristic that
+   follows the web UI seek limits around the MCU's seek threshold, SNR > 25;
+   the MCU shows RSSISIG − 40). Calibrate against the real chip on a known
+   station.
 7. QN8035 behaviour after a failed scan (we leave CH at CH_STOP).
 8. Seek thresholds (level/USN/WAM/offset) for a car antenna (now in the web
    UI's Seek group).

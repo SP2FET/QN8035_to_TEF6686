@@ -37,7 +37,7 @@ firmware is a stand-alone TEF6686 receiver controlled from the web UI.
 | Function | ESP32-S2 pin | Notes |
 |---|---|---|
 | TEF6686 SDA / SCL | GPIO16 / GPIO17 | I2C0 master, 400 kHz. Fit 2.2–4.7 kΩ pull-ups to 3V3 if the module has none |
-| Head unit SDA / SCL | GPIO33 / GPIO35 (default) | I2C1 slave. **Check the bus voltage first** (it may be 1.8 V). Reads use clock stretching |
+| Head unit SDA / SCL | GPIO33 / GPIO35 (default) | I2C1 slave, no clock stretching; TX FIFO filled in the ISR. **Check the bus voltage first** (it may be 1.8 V) |
 | QN8035 INT | not connected (default) | Optional RDS/seek interrupt pulse towards the head unit |
 | USB | native USB | Console over USB CDC. First flash: hold BOOT (GPIO0) and tap RST |
 
@@ -47,6 +47,26 @@ the module. Set the module's reference crystal in menuconfig: the fitted module 
 100 kHz grid and without stereo or RDS.
 
 ## Build and flash
+
+### Versioning
+
+The canonical firmware version is `PROJECT_VER` in the top-level `CMakeLists.txt`.
+It follows Semantic Versioning (`MAJOR.MINOR.PATCH`) and is embedded in the ESP-IDF
+application descriptor, boot log, `/api/status` (`fw.version`), web UI and OTA image
+information. The initial development version is **0.1.0**; interfaces can still
+change before 1.0.0.
+
+Bump PATCH for compatible fixes, MINOR for new functionality (or interface changes
+during 0.x development), and MAJOR for incompatible public-interface changes after
+1.0.0. Commit the version change with its changelog entry, then create an annotated
+`vMAJOR.MINOR.PATCH` tag on that commit. Tags are immutable snapshots. Build options
+are not part of the version: OTA still identifies exact images by their ELF hash.
+
+Keep the version in CMake rather than deriving it from Git: tagged and source-archive
+builds then use the same version, and changing it triggers PlatformIO reconfiguration.
+See [CHANGELOG.md](CHANGELOG.md) for the changes in each version.
+
+### Commands
 
 PlatformIO with ESP-IDF **5.4.0** (`espressif32@6.10.0`, pinned). The project is a plain ESP-IDF
 layout (`main/` + `components/`), so `idf.py build` from an ESP-IDF 5.4 shell works too.
@@ -65,6 +85,12 @@ On Windows the CLI is `~/.platformio/penv/Scripts/pio.exe` if `pio` is not on PA
 `sdkconfig.defaults` is the source of truth for the configuration. After changing it, delete
 both `sdkconfig.lolin_s2_mini` and `.pio/build/lolin_s2_mini/`, or the old CMake cache keeps the
 old values.
+
+Power options: stand-alone builds scale the idle CPU to 80 MHz by default,
+keeping the normal active speed and USB console. Car builds can turn off
+**Start Wi-Fi and web UI** in menuconfig to save radio power; web OTA then
+requires re-enabling Wi-Fi over USB. Bus transaction logging defaults off.
+See [power analysis and measurement steps](docs/power-usage.md).
 
 Web OTA needs one USB flash first (the rollback lives in the bootloader). A new image runs on
 probation and is confirmed after 30 s; a reset before that boots the previous one again. Set
@@ -155,6 +181,12 @@ doxygen        # from the repository root; output in docs/doxygen/html/index.htm
 ```
 
 The public headers in `components/*/include/` are the reference for every module.
+
+## Security
+
+The web UI has no login. The Wi-Fi password is the only barrier, and the default one is published
+here. [SECURITY.md](SECURITY.md) lists the known weaknesses, a checklist to go through before a
+car install, and how to report a vulnerability.
 
 ## References
 

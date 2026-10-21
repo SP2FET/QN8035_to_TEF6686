@@ -36,6 +36,12 @@ typedef enum {
 /** TEF units: 0.1 dBuV, 0.1 %, 0.1 kHz. */
 typedef struct {
     bool valid;
+    /** Time since the tuning, 0.1 ms (UM V102 §4.1): 1..320, then 1000 beyond 32 ms. After a
+     * tune the radio samples quickly until it passes 32 ms, then every 100 ms. */
+    uint16_t age;
+    /** FM, settled sample within the seek level, USN and WAM limits (tuning table; the offset
+     * limit is not judged on one sample). */
+    bool station;
     int16_t level;
     uint16_t usn;        /**< FM ultrasonic noise; AM: noise */
     uint16_t wam;        /**< FM multipath; AM: co-channel flag */

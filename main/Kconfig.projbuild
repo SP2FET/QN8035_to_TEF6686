@@ -1,5 +1,16 @@
 menu "QN8035 -> TEF6686 bridge"
 
+    config BRIDGE_CPU_DFS
+        bool "Scale the idle CPU to 80 MHz (stand-alone only)"
+        depends on !BRIDGE_QN_EMU_ENABLE
+        select PM_ENABLE
+        default y
+        help
+            Run at the configured default CPU frequency while tasks are active,
+            and at 80 MHz while idle. APB stays at 80 MHz; light sleep is disabled
+            so native USB stays available. Disabled for QN8035 emulation because
+            frequency switching adds interrupt latency to the no-stretch slave.
+
     menu "TEF6686 tuner (I2C master)"
         config BRIDGE_TEF_I2C_SDA_GPIO
             int "SDA GPIO"
@@ -143,13 +154,23 @@ menu "QN8035 -> TEF6686 bridge"
         config BRIDGE_QN_TRACE
             bool "Log every head-unit bus transaction"
             depends on BRIDGE_QN_EMU_ENABLE
-            default y
+            default n
             help
                 Sniffer mode for bring-up: each register read/write from the
                 head unit appears in the log (serial and web console).
+                Leave off for normal use to avoid continuous console and WebSocket output.
     endmenu
 
     menu "Wi-Fi and web UI"
+        config BRIDGE_WIFI_ENABLE
+            bool "Start Wi-Fi and web UI" if BRIDGE_QN_EMU_ENABLE
+            default y
+            help
+                Disable in the car build to avoid powering the Wi-Fi radio and
+                running the HTTP server and log pump. The head unit still controls
+                the tuner. Web controls and OTA are unavailable; use USB to flash.
+                Always enabled in the stand-alone build, which needs web controls.
+
         config BRIDGE_WIFI_AP_SSID
             string "Access point SSID"
             default "TEF-Bridge"
