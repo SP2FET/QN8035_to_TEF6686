@@ -52,7 +52,7 @@ def read_image(path):
         "project": text(48, 32),
         "built": f"{text(96, 16)} {text(80, 16)}",
         "idf": text(112, 32),
-        # the device reports the first 8 bytes (esp_app_get_elf_sha256 with 17 chars)
+        # Status reports the first 8 descriptor bytes, independent of SDK log settings.
         "elf_sha256": data[DESC_OFFSET + 144:DESC_OFFSET + 152].hex(),
     }
     return data, info
@@ -75,6 +75,16 @@ def describe(fw):
     return (f"{fw.get('version', '?')} built {fw.get('built', '?')}, "
             f"elf {fw.get('elf_sha256', '?')}, {fw.get('partition', '?')}, "
             f"state {fw.get('ota_state', '?')}")
+
+
+def same_build(fw, want_sha):
+    reported = fw.get("elf_sha256")
+    # 0.1.0 used the SDK log-hash helper, whose default cap is 9 hex characters.
+    # Accept that exact legacy length as well as the corrected 16-character API.
+    return (isinstance(reported, str) and len(reported) in (9, 16)
+            and len(want_sha) == 16
+            and all(c in "0123456789abcdef" for c in reported)
+            and want_sha.startswith(reported))
 
 
 def upload(host, data, password):
@@ -131,7 +141,7 @@ def wait_for_new_build(host, want_sha, old_uptime):
             time.sleep(1)
             continue
         fw = st.get("fw", {})
-        if fw.get("elf_sha256") == want_sha:
+        if same_build(fw, want_sha):
             print(f"  running: {describe(fw)}")
             return
         if st.get("uptime_s", 1 << 30) < old_uptime:
@@ -152,7 +162,7 @@ def wait_for_confirmation(host, want_sha):
             time.sleep(2)
             continue
         fw = st.get("fw", {})
-        if fw.get("elf_sha256") != want_sha:
+        if not same_build(fw, want_sha):
             raise OtaError(f"device rolled back to the previous build: {describe(fw)}")
         state = fw.get("ota_state", "?")
         if state == "valid":
@@ -198,7 +208,7 @@ def main():
         print(f"Device: {describe(fw)}")
         if args.info:
             return 0
-        if fw.get("elf_sha256") == img["elf_sha256"] and not args.force:
+        if same_build(fw, img["elf_sha256"]) and not args.force:
             print("The device already runs this build; use --force to upload anyway.")
             return 0
         if fw.get("ota_password") and not args.password:

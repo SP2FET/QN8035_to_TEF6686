@@ -193,7 +193,11 @@ static esp_err_t status_get(httpd_req_t *req)
     const esp_app_desc_t *app = esp_app_get_description();
     const esp_partition_t *running = esp_ota_get_running_partition();
     char elf_sha[17];
-    esp_app_get_elf_sha256(elf_sha, sizeof(elf_sha));
+    /* The SDK string helper is capped by APP_RETRIEVE_LEN_ELF_SHA (default 9),
+     * even with a larger destination. Read the descriptor to keep this API stable. */
+    for (size_t i = 0; i < 8; i++) {
+        snprintf(&elf_sha[2 * i], 3, "%02x", app->app_elf_sha256[i]);
+    }
     jb_printf(&j, "\"fw\":{\"version\":");
     jb_str(&j, app->version);
     jb_printf(&j, ",\"built\":\"%s %s\",\"idf\":", app->date, app->time);

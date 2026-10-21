@@ -4,6 +4,14 @@ The firmware uses Semantic Versioning. Development releases use 0.x versions and
 change interfaces between minor versions. Versions and Git tags are recorded here;
 target builds and host tests do not establish hardware compatibility.
 
+## 0.1.1 - 2026-10-21
+
+- Fix false OTA build-mismatch/rollback errors: status now formats 16 ELF hash
+  characters directly from the descriptor, independent of the SDK log-hash limit.
+- Accept the exact legacy 9-character hash format from 0.1.0 in upload checks.
+- Add OTA regression tests for delayed Wi-Fi reconnection, an old server answering
+  before reboot, probation confirmation and genuine build mismatches/rollbacks.
+
 ## 0.1.0 - 2026-10-21
 
 First versioned development snapshot, including the existing TEF6686 driver, RDS and

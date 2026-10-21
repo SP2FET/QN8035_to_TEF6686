@@ -74,6 +74,7 @@ pio run -e lolin_s2_mini -t ota          # build + flash over Wi-Fi (web OTA)
 pio device monitor                       # USB CDC console
 pio run -e lolin_s2_mini -t menuconfig   # "QN8035 -> TEF6686 bridge" menu
 pio test -e native                       # host unit tests (needs gcc on PATH)
+python -B -m unittest discover -s test/scripts -v  # OTA uploader regressions
 ```
 
 The CLI is `~/.platformio/penv/Scripts/pio.exe` if `pio` is not on PATH.
@@ -118,6 +119,12 @@ on probation (`BOOTLOADER_APP_ROLLBACK_ENABLE`). `main.c` confirms it after
 it only exists after a USB flash. A USB upload also blanks `otadata`, so USB
 always boots slot `ota_0` and stays the recovery path. During an upload the
 httpd task serves nothing else (about 10–20 s).
+
+`fw.elf_sha256` is the first 8 descriptor bytes as 16 hex characters, independent
+of `APP_RETRIEVE_LEN_ELF_SHA`. Version 0.1.0 accidentally used the SDK log-hash
+helper and reported only 9 characters with the default config; the uploader
+accepts that exact legacy format as well. It retries through Wi-Fi reconnection
+and ignores old-server responses until the device restarts into the requested build.
 
 ## Architecture
 
