@@ -22,10 +22,10 @@ The head unit's software must not notice the swap.
 | Web OTA (`/api/ota`, `scripts/ota_upload.py`, bootloader rollback) | Builds; script tested against a mock server. **Not yet tried on the device** (needs one USB flash first) |
 | Station memory (stand-alone build): last settings + 40 memory channels in NVS, web UI card | Builds; channel logic host-tested (11 tests). **Not yet tried on the device** |
 | Reception tuning: weak-signal DSP (iMS, EQ, noise blanker, soft mute, high cut, stereo blend, high blend, auto-bandwidth sensitivity, RF AGC), AF and seek thresholds, live in the web UI, saved to NVS on request | Builds; table host-tested. **Not yet tried on the device** |
-| AF following: RDS AF list, AF_Update checks, PI-checked switch, REG | Builds; decision logic and AF decoding host-tested. **Not yet tried on air** |
-| QN8035 register model | Implemented to the head-unit MCU's driver (CHSC and 0x55 starts, stale completions, 0x4A/0x4C mutes, 85.5 MHz PLL shift, CCA level rule), host-tested (23 tests) |
+| AF following: RDS AF list, AF_Update checks, PI-checked switch, REG; head-unit tunes to the programme's frequencies keep the AF | Builds; decision logic and AF decoding host-tested. **Not yet tried on air** |
+| QN8035 register model | Implemented to the head-unit MCU's driver (CHSC and 0x55 starts, stale completions, 0x4A/0x4C mutes, 85.5 MHz PLL shift, CCA level rule) and matched to the bus capture of the original chip (IDs, reset values, 0x4F, RDS after a tune). Host-tested (27 tests, one replays the captured cold start and preset tunes byte for byte) |
 | QN8035 I2C slave port + bridge | No clock stretching (TX FIFO filled from the ISR), tune done on settled quality, builds, **disabled by default**, untested on hardware |
-| Head-unit protocol | Taken from the MCU firmware ([docs/headunit-mcu-firmware.md](docs/headunit-mcu-firmware.md)); bus capture not done yet |
+| Head-unit protocol | Taken from the MCU firmware ([docs/headunit-mcu-firmware.md](docs/headunit-mcu-firmware.md)); confirmed by a bus capture of the original chip ([docs/headunit-bus-capture.md](docs/headunit-bus-capture.md)) |
 
 ## Hardware
 
@@ -34,7 +34,7 @@ The head unit's software must not notice the swap.
 | TEF6686 SDA | GPIO16 | I2C0 master, 400 kHz. SDA/SCL order is assumed; `BRIDGE_TEF_I2C_AUTOSWAP` probes both orders at boot and logs which one answered |
 | TEF6686 SCL | GPIO17 | Internal pull-ups are enabled but weak (~45 kΩ); fit 2.2–4.7 kΩ to 3V3 if the module has none |
 | Head unit SDA | GPIO33 (default) | I2C1 slave. Not wired yet. **Check the bus voltage first** (it may be 1.8 V) |
-| Head unit SCL | GPIO35 (default) | No clock stretching: the head unit's MCU bit-bangs the bus (~120–150 kHz) and never reads SCL, so the slave fills its TX FIFO from the ISR |
+| Head unit SCL | GPIO35 (default) | No clock stretching: the head unit's MCU bit-bangs the bus (~90–140 kHz measured) and never reads SCL, so the slave fills its TX FIFO from the ISR |
 | QN8035 INT | none (default) | Optional: 4.5 ms low pulse per RDS group/CCA end, if the head unit uses it |
 | USB | native USB | Console is USB CDC (`CONFIG_ESP_CONSOLE_USB_CDC`). For the first flash, hold BOOT (GPIO0) and tap RST |
 
@@ -43,7 +43,9 @@ outputs on the head unit side (check levels), and the head unit's FM antenna
 feed goes to the module's antenna input. The QN8035's 32.768 kHz clock input
 from the head unit is not needed. The head unit may power-gate the radio rail
 and probe the chip only once at its boot. The ESP must already answer at
-0x10 by then: it starts the slave before Wi-Fi, and boot time matters.
+0x10 by then: it starts the slave before Wi-Fi, and boot time matters. In the
+capture of a cold start with radio as the last source, the first access came 31 s
+after power-up.
 
 TEF reference clock: set `BRIDGE_TEF_REFCLK` to the crystal on the module.
 The fitted module has a **9.216 MHz** crystal (`sdkconfig.defaults`; the
@@ -75,6 +77,7 @@ pio device monitor                       # USB CDC console
 pio run -e lolin_s2_mini -t menuconfig   # "QN8035 -> TEF6686 bridge" menu
 pio test -e native                       # host unit tests (needs gcc on PATH)
 python -B -m unittest discover -s test/scripts -v  # OTA uploader regressions
+python scripts/qn_capture.py captures/seek.csv --view timeline  # decode a bus capture
 ```
 
 The CLI is `~/.platformio/penv/Scripts/pio.exe` if `pio` is not on PATH.
@@ -318,28 +321,36 @@ before changing protocol code.
 
 1. ~~TEF module crystal and SDA/SCL order~~ Resolved: 9.216 MHz crystal, and
    the tuner ACKs with SDA=GPIO16, SCL=GPIO17.
-2. **How the head unit's driver talks to the QN8035.** Mostly answered from
-   the MCU firmware ([docs/headunit-mcu-firmware.md](docs/headunit-mcu-firmware.md)):
-   bit-banged ~120–150 kHz, single-register reads with a STOP after the
-   register byte, CHSC polling, no INT, the init recipe, mutes 0x4A/0x4C.
-   The analysed build is V03.03 and the unit runs V03.12: still capture the
-   bus from the original chip with a logic analyser to confirm.
+2. ~~How the head unit's driver talks to the QN8035~~ Resolved: a bus capture of
+   V03.12 with the original chip ([docs/headunit-bus-capture.md](docs/headunit-bus-capture.md))
+   matches the V03.03 firmware analysis write for write (corrections listed there).
+   Bit-banged ~90–140 kHz, single-register reads with a STOP after the register
+   byte, CHSC polled only during seek, INT unused, mute in 0x4A and the BD37534.
+   One seek press runs a full-band scan. Volume is BD37534 only. Four tunes in standby come before the init.
 3. Head-unit bus voltage (the MCU is a 3.3 V STM32F030 or MM32 clone). Clock
    stretching: not tolerated, handled by filling the TX FIFO.
 4. I2C slave v2 on the S2 with stretching off: check on the logic analyser
    that the hardware sends exactly the FIFO bytes after the address, and
    whether a NACKed read leaves a byte prefetched (the read count and the
    pointer would be one too high). Repeated-start reads are not supported;
-   this head unit does not use them.
-5. Real CID1 value (`QN8035_EMU_CID1`, currently 0x02: the MCU then starts
-   tunes with CHSC and waits for it; the 0x55 path works too).
+   this head unit does not use them. The capture gives the deadline: the first
+   data bit of a read is clocked 115 µs after the STOP of the register write
+   (STOP to START 2 µs), so the FIFO must be filled within about 100 µs.
+5. ~~Real CID1 value~~ Resolved: CID1 reads 0x42 (ver 2: CHSC start, 0x4A mute)
+   and register 0x58 reads 0x33 (id 0x13 spur list). The emulator returns the same
+   since 0.2.0; see the comparison in
+   [docs/headunit-bus-capture.md](docs/headunit-bus-capture.md).
 6. RSSISIG/SNR scaling (`bridge`: RSSI = dBµV + 43, SNR is a heuristic that
    follows the web UI seek limits around the MCU's seek threshold, SNR > 25;
    the MCU shows RSSISIG − 40). Calibrate against the real chip on a known
-   station.
-7. QN8035 behaviour after a failed scan (we leave CH at CH_STOP).
+   station. Reference values from the original chip are in
+   [docs/headunit-bus-capture.md](docs/headunit-bus-capture.md): RSSISIG 0x46 on
+   93.3 MHz, and the SNR of each of the 26 channels its scan accepted.
+7. QN8035 behaviour after a failed scan (we leave CH at CH_STOP). This head
+   unit never uses the chip's own scan: CH_START = CH_STOP on every captured tune.
 8. Seek thresholds (level/USN/WAM/offset) for a car antenna (now in the web
-   UI's Seek group).
+   UI's Seek group). The captured scan of the original chip (26 channels passed
+   at RXCCAD = 20) is a reference list for the bench location.
 9. Audio level match between the TEF DAC and the QN8035 outputs.
 10. AF on air: does an AF_Update check disturb RDS sync or audio on the tuned
     station? How fast does the PI answer after a Check tuning (the PI check
@@ -358,8 +369,8 @@ before changing protocol code.
 
 1. **TEF bench bring-up**: flash, confirm the patch loads and the
    identification reads, tune, check RDS and audio. Use the web UI and log.
-2. **Head-unit capture**: record the original QN8035 traffic and document it
-   (open question 2).
+2. ~~**Head-unit capture**~~ Done: [docs/headunit-bus-capture.md](docs/headunit-bus-capture.md),
+   decoded with `scripts/qn_capture.py`.
 3. **Emulation on the bench**: enable `BRIDGE_QN_EMU_ENABLE`. Replay the
    captured sequences from a second MCU acting as master; compare responses.
 4. **In the car.**

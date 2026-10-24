@@ -37,13 +37,24 @@ static bool mute_state(const uint8_t *r)
 
 static void load_defaults(qn8035_emu_t *emu)
 {
+    /* Undocumented registers the QF30 MCU read-modify-writes, as the captured chip reads them at
+     * power-on and after SWRST (docs/headunit-bus-capture.md). */
+    static const uint8_t k_undocumented[][2] = {
+        {0x1B, 0x70}, {0x1D, 0xE9}, {0x27, 0x65}, {0x2C, 0x6D}, {0x34, 0x30}, {0x35, 0x54},
+        {0x36, 0x35}, {0x38, 0x02}, {0x39, 0x20}, {0x3A, 0x45}, {0x3E, 0xB5}, {0x40, 0x0A},
+        {0x41, 0xE8}, {0x47, 0x35}, {0x49, 0x75}, {QN8035_REG_MUTE, 0x10}, {QN8035_REG_DAC, 0x10},
+        {QN8035_REG_TUNE_GO, 0x33}, {QN8035_REG_CHIP_ID, 0x33},
+    };
     const bool explicit_start = emu->explicit_start;
     memset(emu, 0, sizeof(*emu));
     emu->explicit_start = explicit_start;
     uint8_t *r = emu->regs;
     /* Reset values from the Rev 0.08 register tables. CH/CH_START/CH_STOP
-     * decode to 88.0 / 87.0 / 108.0 MHz, 100 kHz scan step. */
-    r[QN8035_REG_SYSTEM1] = QN8035_SYSTEM1_CCA_CH_DIS;
+     * decode to 88.0 / 87.0 / 108.0 MHz, 100 kHz scan step. The captured chip comes up in
+     * standby (Rev 0.08 says SYSTEM1 = 0x01) with CCA.XTAL_INJ set. */
+    r[QN8035_REG_SYSTEM1] = QN8035_SYSTEM1_STNBY | QN8035_SYSTEM1_CCA_CH_DIS;
+    r[QN8035_REG_CCA] = QN8035_CCA_XTAL_INJ;
+    r[QN8035_REG_STATUS1] = QN8035_STATUS1_CAP_SH;
     r[QN8035_REG_CID1] = QN8035_EMU_CID1;
     r[QN8035_REG_CID2] = QN8035_EMU_CID2;
     r[QN8035_REG_CH] = 0x30;
@@ -55,7 +66,10 @@ static void load_defaults(qn8035_emu_t *emu)
     r[QN8035_REG_XTAL_DIV1] = 0x08;
     r[QN8035_REG_XTAL_DIV2] = 0x5C;
     r[QN8035_REG_INT_CTRL] = 0x20;
-    set_fsm(emu, QN8035_FSM_IDLE);
+    for (size_t i = 0; i < sizeof(k_undocumented) / sizeof(k_undocumented[0]); i++) {
+        r[k_undocumented[i][0]] = k_undocumented[i][1];
+    }
+    set_fsm(emu, QN8035_FSM_STBY);
     emu->tuned_ch = 0xFFFF; /* nothing tuned yet */
     emu->pll_ref = pll_dlt(r);
     emu->muted = mute_state(r);
@@ -102,6 +116,28 @@ static uint32_t effective_khz(const qn8035_emu_t *emu, uint16_t ch)
     return (uint32_t)((khz * now + ref * 5u) / (ref * 10u)) * 10u;
 }
 
+/* The captured chip's QN8035_REG_CAL read-back falls by one at each of these frequencies, from
+ * 156 at 87.5 MHz to 134 at 107.5 MHz (412 channels, docs/headunit-bus-capture.md). */
+static const uint32_t k_cal_step_khz[] = {
+    87800, 88500, 89200, 89950, 90700, 91500, 92300, 93100, 93950, 94800, 95700,
+    96600, 97550, 98500, 99500, 100550, 101600, 102700, 103850, 105000, 106250, 107500,
+};
+
+static uint8_t cal_readback(uint32_t khz)
+{
+    if (khz < 87500) {
+        /* One point below the band: 191 at 65.0 MHz. */
+        const uint32_t v = 156u + ((87500u - khz) * 35u + 11250u) / 22500u;
+        return (uint8_t)(v > 255u ? 255u : v);
+    }
+    uint8_t v = 156;
+    for (size_t i = 0; i < sizeof(k_cal_step_khz) / sizeof(k_cal_step_khz[0]) &&
+                       khz >= k_cal_step_khz[i]; i++) {
+        v--;
+    }
+    return v;
+}
+
 static uint32_t scan_step_khz(uint8_t ch_step)
 {
     switch ((ch_step >> QN8035_CH_STEP_FSTEP_SHIFT) & 0x3u) {
@@ -122,8 +158,11 @@ static void start_op(qn8035_emu_t *emu, qn8035_op_t op, uint16_t ch, uint32_t kh
     r[QN8035_REG_SNR] = 0;
     r[QN8035_REG_STATUS1] |= QN8035_STATUS1_ST_MO_RX;
     memset(&r[QN8035_REG_RDSD0], 0, RDS_BYTES);
-    /* RDS_RXUPD keeps its state: a toggle would make drivers read the cleared bytes as a group. */
-    r[QN8035_REG_STATUS2] = emu->rds_upd ? QN8035_STATUS2_RDS_RXUPD : 0;
+    /* Like the captured chip, STATUS2 reads 0 until RDS syncs on the new channel. A QF30 MCU that
+     * saw RDS_RXUPD set before then reads the cleared bytes as a group. */
+    r[QN8035_REG_STATUS2] = 0;
+    emu->rds_upd = false;
+    emu->rds_resync = true;
 }
 
 /* busy: set CHSC for a driver that started the tune another way but polls CHSC. */
@@ -259,7 +298,7 @@ size_t qn8035_emu_write(qn8035_emu_t *emu, const uint8_t *data, size_t len, qn80
     const uint8_t old_vol = r[QN8035_REG_VOL_CTL];
     const uint8_t old_go = r[QN8035_REG_TUNE_GO];
     bool system1_written = false, vol_written = false, mute_written = false;
-    bool go_written = false, xtal_written = false;
+    bool go_written = false, xtal_written = false, cal_written = false;
 
     uint8_t reg = data[0] & REG_MASK;
     for (size_t i = 1; i < len; i++) {
@@ -271,6 +310,7 @@ size_t qn8035_emu_write(qn8035_emu_t *emu, const uint8_t *data, size_t len, qn80
         mute_written |= reg == QN8035_REG_VOL_CTL || reg == QN8035_REG_MUTE || reg == QN8035_REG_DAC;
         go_written |= reg == QN8035_REG_TUNE_GO;
         xtal_written |= reg >= QN8035_REG_XTAL_DIV0 && reg <= QN8035_REG_XTAL_DIV2;
+        cal_written |= reg == QN8035_REG_CAL;
         reg = (reg + 1u) & REG_MASK;
     }
     emu->ptr = reg;
@@ -279,6 +319,10 @@ size_t qn8035_emu_write(qn8035_emu_t *emu, const uint8_t *data, size_t len, qn80
      * while receiving are spur workarounds that move the raster (effective_khz). */
     if (xtal_written && !emu->receiving) {
         emu->pll_ref = pll_dlt(r);
+    }
+    /* A calibration start: the QF30 MCU reads the result 0.3 ms later. */
+    if (cal_written && (r[QN8035_REG_CAL] & QN8035_CAL_START)) {
+        r[QN8035_REG_CAL] = cal_readback(effective_khz(emu, current_ch(emu)));
     }
     /* Side effects after the whole transaction, so a burst that writes
      * SYSTEM1 together with the channel registers sees the new channel. */
@@ -367,6 +411,11 @@ bool qn8035_emu_push_rds(qn8035_emu_t *emu, const uint16_t blocks[4], uint8_t er
 {
     uint8_t *r = emu->regs;
     if (!(r[QN8035_REG_SYSTEM1] & QN8035_SYSTEM1_RDSEN)) {
+        return false;
+    }
+    if (emu->rds_resync) {
+        emu->rds_resync = false;
+        r[QN8035_REG_STATUS2] = QN8035_STATUS2_RDSSYNC;
         return false;
     }
     for (unsigned i = 0; i < 4; i++) {

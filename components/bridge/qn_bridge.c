@@ -95,7 +95,10 @@ static void tune_timer_cb(void *arg)
     const uint32_t khz = b.next_khz;
     portEXIT_CRITICAL(&b.mux);
     begin_op(OP_TUNE, khz);
-    const esp_err_t err = radio_tune(RADIO_BAND_FM, khz);
+    /* The head unit does not see the radio's AF switches: asking for the frequency it tuned (a
+     * re-tune after a source switch, the way back from its own AF check) must not drop the AF
+     * the programme moved to. */
+    const esp_err_t err = radio_tune_keep_programme(khz);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "tune %lu kHz: %s", (unsigned long)khz, esp_err_to_name(err));
         fail_op(khz, false);

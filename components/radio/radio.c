@@ -93,6 +93,7 @@ typedef struct {
         struct {
             radio_band_t band;
             uint32_t khz;
+            bool keep; /* radio_tune_keep_programme */
         } tune;
         int dir;
         struct {
@@ -135,6 +136,10 @@ typedef struct {
     int16_t cand_score, cur_score; /* 0.1 dB, at the try (event log) */
     TickType_t t_start;
     uint32_t switches, pi_fails;
+    /* Frequencies known to carry the programme that plays: the tuned one and each AF switched
+     * to (PI checked). A kept tune to one of them leaves the programme where it plays. */
+    uint32_t prog[AF_MAX + 1];
+    uint8_t prog_n;
 } af_run_t;
 
 typedef struct {
@@ -329,6 +334,28 @@ static void publish_af(void)
     unlock();
 }
 
+static bool prog_has(uint32_t khz)
+{
+    for (unsigned i = 0; i < s.af.prog_n; i++) {
+        if (s.af.prog[i] == khz) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void prog_add(uint32_t khz)
+{
+    if (prog_has(khz)) {
+        return;
+    }
+    if (s.af.prog_n == sizeof(s.af.prog) / sizeof(s.af.prog[0])) {
+        memmove(&s.af.prog[0], &s.af.prog[1], (s.af.prog_n - 1u) * sizeof(s.af.prog[0]));
+        s.af.prog_n--;
+    }
+    s.af.prog[s.af.prog_n++] = khz;
+}
+
 /* Another station: its AFs, bans, counters and tries are not this one's. An AF switch keeps
  * them (same programme). */
 static void af_new_station(void)
@@ -336,6 +363,8 @@ static void af_new_station(void)
     af_reset(&s.af.st, now_ms());
     s.af.switches = 0;
     s.af.pi_fails = 0;
+    s.af.prog[0] = s.status.freq_khz;
+    s.af.prog_n = 1;
     lock();
     s.status.af.ev_n = 0;
     unlock();
@@ -503,6 +532,7 @@ static void af_accept(void)
      * the next tuning (the I2C recovery re-tunes with Preset). */
     io_ok(tef_tune(RADIO_BAND_FM, 0, TEF6686_TUNE_END), "af end");
     af_switched(&s.af.st, s.af.origin, s.af.cand, now_ms());
+    prog_add(s.af.cand);
     s.af.switches++;
     af_log_event(RADIO_AF_EV_SWITCHED, s.af.pi, 0);
     lock();
@@ -591,6 +621,18 @@ static void quality_soon(void)
     s.t_tuned = xTaskGetTickCount();
     s.next_quality = s.t_tuned + pdMS_TO_TICKS(QUALITY_SETTLE_MS);
     s.quality_settling = true;
+}
+
+/* A kept tune to a frequency of the programme that plays: the tuner stays (on an AF the asker
+ * may not know about) and it counts as tuned. */
+static void keep_programme(uint32_t khz)
+{
+    quality_soon();
+    ESP_LOGI(TAG, "tune %lu kHz: the programme plays on %lu kHz, staying", (unsigned long)khz,
+             (unsigned long)s.status.freq_khz);
+    radio_evt_t evt = {.type = RADIO_EVT_TUNED,
+                       .tuned = {.band = RADIO_BAND_FM, .khz = khz, .found = true, .by_scan = false}};
+    notify(&evt);
 }
 
 static void tune_to(radio_band_t band, uint32_t khz, bool by_scan, bool found)
@@ -981,9 +1023,13 @@ static void handle_cmd(const radio_cmd_t *c)
     case CMD_REINIT:
         boot_tef();
         break;
-    case CMD_TUNE:
+    case CMD_TUNE: {
+        const bool seeking = s.seek.active; /* away from the programme */
         s.seek.active = false;
-        if (ready) {
+        if (ready && c->tune.keep && !seeking && s.status.band == RADIO_BAND_FM &&
+            prog_has(c->tune.khz)) {
+            keep_programme(c->tune.khz);
+        } else if (ready) {
             tune_to(c->tune.band, c->tune.khz, false, true);
         } else {
             lock(); /* applied by the next successful boot */
@@ -992,6 +1038,7 @@ static void handle_cmd(const radio_cmd_t *c)
             unlock();
         }
         break;
+    }
     case CMD_STEP:
         s.seek.active = false;
         if (ready) {
@@ -1220,7 +1267,7 @@ esp_err_t radio_start(const radio_config_t *cfg)
     return ESP_OK;
 }
 
-esp_err_t radio_tune(radio_band_t band, uint32_t khz)
+static esp_err_t post_tune(radio_band_t band, uint32_t khz, bool keep)
 {
     band_range_t r;
     if (band == RADIO_BAND_FM) {
@@ -1231,7 +1278,17 @@ esp_err_t radio_tune(radio_band_t band, uint32_t khz)
         ESP_RETURN_ON_FALSE(band == RADIO_BAND_AM && am_range(khz, &r), ESP_ERR_INVALID_ARG, TAG,
                             "AM %lu kHz out of range", (unsigned long)khz);
     }
-    return post(&(radio_cmd_t){.type = CMD_TUNE, .tune = {.band = band, .khz = khz}});
+    return post(&(radio_cmd_t){.type = CMD_TUNE, .tune = {.band = band, .khz = khz, .keep = keep}});
+}
+
+esp_err_t radio_tune(radio_band_t band, uint32_t khz)
+{
+    return post_tune(band, khz, false);
+}
+
+esp_err_t radio_tune_keep_programme(uint32_t khz)
+{
+    return post_tune(RADIO_BAND_FM, khz, true);
 }
 
 esp_err_t radio_step(int dir)

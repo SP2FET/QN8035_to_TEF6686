@@ -28,7 +28,8 @@ accessory 2. No copy of that exact release is public. The closest is
 says "首次支持QN8035收音机" ("first support for the QN8035 radio"). Later 011021
 release notes do not mention the QN8035 driver except "radio level raised for
 37534+4745 (or 8035)" (V03.06.20240719), so the driver below is probably still what
-V03.12 runs. Confirm that with a bus capture.
+V03.12 runs. A bus capture of V03.12 confirms it
+([headunit-bus-capture.md](headunit-bus-capture.md)).
 
 `QF30.V03.12.20250315.011021.30 mcu/` (BD37534 + TSC4745) was analysed first and is
 described at the end for comparison.
@@ -72,7 +73,7 @@ peripheral is used.
 
 - The master **never reads SCL, so it cannot tolerate clock stretching.**
 - Estimated SCL timing: high about 2 µs, low about 4–5 µs, roughly 7 µs per bit
-  (120–150 kHz).
+  (120–150 kHz). Measured on the bus: high 1.4–1.6 µs, low 5.4–9.4 µs (90–140 kHz).
 - **There is no repeated START anywhere.**
 
 QN8035 transactions in 013021 (functions at `0x080067BC` and `0x08006820`):
@@ -138,6 +139,8 @@ Tune (`0x0800C754`, frequency in 10 kHz units), in order:
    - id 0x13: 76.3, 85.8, 93.4, 93.9, 95.3, 99.8 and 104.8 MHz.
    - ver 1/2: 69.1, 72.9 and 84.3 MHz.
    - ver 2 only, in addition: 78.6 and 107.1 MHz.
+   - The capture of an id-0x13, ver-2 chip shows only the id-0x13 list in use
+     (107.1 MHz is not flagged), so the lists are alternatives.
 5. `CH_START = CH_STOP = (f − 60 MHz) / 50 kHz`: writes to 08, 09, then 0A
    (bits [7:6] = step, [5:4] = STOP[9:8], [3:2] = START[9:8]).
 6. **85.5 MHz trick**: at 85.50 MHz the driver writes `0x16=0x88`, `0x17=0x3B`,
@@ -149,7 +152,9 @@ Tune (`0x0800C754`, frequency in 10 kHz units), in order:
 8. Start: `rmw(00,0x02,0x02)` (CHSC) for ver 1/2. Otherwise it pulses
    `rmw(0x55,0x80,0x80)`, waits 20 ms, then `rmw(0x55,0x80,0)`.
 9. `wr(0x4F,0x80)`, `v = rd(0x4F)`, `wr(0x4F, v>>1)`. In the reference drivers this
-   step runs only with an antenna matching inductor (`USING_INDUCTOR`). Then
+   step runs only with an antenna matching inductor (`USING_INDUCTOR`). On the real
+   chip 0x4F then reads back a calibration value that falls with frequency (0xBF at
+   65 MHz, 0x86 at 107.5 MHz). Then
    `rmw(0x49,0x0F,0)` (0x49 is REG_REF, the PLL charge-pump current).
 10. **Unmute**: clear the same bit as in step 3.
 
@@ -258,20 +263,23 @@ Not yet checked on hardware.
 - **Address 0x10 is right**, and the access pattern is simple: single-register writes,
   and single-register reads split as write-register + STOP, then START + read.
   - After the STOP the slave knows the register. It must have that register's value
-    in the TX FIFO before the master clocks the first data bit after `0x21`, which is
-    roughly 60 µs later.
+    in the TX FIFO before the master clocks the first data bit after `0x21`. The
+    capture puts that 115 µs after the STOP, so the FIFO must be full within about
+    100 µs.
   - **Clock stretching is not allowed**: the master never samples SCL. Refill the TX
     FIFO from the shadow on every register-address write, in the ISR.
 - Registers to model:
   - The documented set: 00, 01, 02, 03, 04, 05, 07–0A, 0B–0x13, 0x15–0x17.
   - The undocumented ones written by the driver: 0x19, 0x1B, 0x1D, 0x27, 0x2C, 0x2D,
     0x2F, 0x33–0x3A, 0x3E, 0x40–0x47, 0x49, 0x4A, 0x4C, 0x4F, 0x54, 0x55, 0x58.
-  - `rmw` reads back before every write, so those need read-back, and 0x4F must return
-    what was written (the driver halves it).
+  - `rmw` reads back before every write, so those need read-back. 0x4F may return any
+    value: the driver halves it and writes it back (the real chip returns a
+    calibration value).
 - Values the MCU reads and acts on:
-  - `05 & 3` and `0x58 & 0x1F` select the code path. 0x58 = 0x13 enables the
-    "id 0x13" spur list and the 0x55 pulse; ver 1/2 select CHSC start and the 0x4C
-    mute.
+  - `05 & 3` and `0x58 & 0x1F` select the code path. 0x58 = 0x13 selects the
+    "id 0x13" spur list. ver 1 or 2 starts tunes with CHSC, any other ver with the
+    0x55 pulse; ver 1 mutes with 0x4C, others with 0x4A. The real chip reads
+    CID1 = 0x42 (ver 2) and 0x58 = 0x33 (id 0x13).
   - SYSTEM1 bit 1 must clear after a tune, within 40 × 5 ms.
   - STATUS1 bit 3 (RXCCA_FAIL): set it when RSSI ≤ RXCCAD − 10 dBµV, with RXCCAD
     from CCA[5:0] (0x14 DX, 0x2D local).

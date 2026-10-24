@@ -23,11 +23,11 @@
 extern "C" {
 #endif
 
-/* CID1 of a real part is not documented anywhere we have; capture it from the head unit's chip
- * (register 0x05). The QF30 MCU starts tunes with CHSC when CID1[1:0] is 1 or 2 and with a pulse
- * on register 0x55 otherwise; both work, but only CHSC makes it wait for our tune. */
+/* CID1 as the head unit's chip reads it (docs/headunit-bus-capture.md): minor revision 3. The QF30
+ * MCU starts tunes with CHSC when CID1[1:0] is 1 or 2 and with a pulse on register 0x55
+ * otherwise, and mutes with 0x4A unless it is 1. */
 #ifndef QN8035_EMU_CID1
-#define QN8035_EMU_CID1 0x02
+#define QN8035_EMU_CID1 0x42
 #endif
 #define QN8035_EMU_CID2 0x84 /**< product id 100001b, major rev 1 */
 
@@ -72,6 +72,7 @@ typedef struct {
     bool receiving;    /**< RXREQ set and not in standby */
     bool muted;        /**< last reported mute state */
     bool rds_upd;      /**< STATUS2.RDS_RXUPD of the last group published */
+    bool rds_resync;   /**< tuned since the last group: the next one only sets RDSSYNC */
     uint16_t tuned_ch; /**< CH of the last completed tune (register value) */
     uint8_t op;        /**< qn8035_op_t in progress */
     uint16_t op_ch;    /**< CH register of the tune in progress */
@@ -122,7 +123,9 @@ bool qn8035_emu_complete_tune(qn8035_emu_t *emu, uint32_t khz, bool found, bool 
 void qn8035_emu_set_signal(qn8035_emu_t *emu, uint8_t rssi, uint8_t snr, bool stereo);
 
 /** New RDS group. err_mask bit 3 = block A ... bit 0 = block D (STATUS2
- * layout). Ignored unless RDSEN is set. Returns true if INT should pulse. */
+ * layout). Ignored unless RDSEN is set. The first group after a tune only sets
+ * STATUS2.RDSSYNC: the real chip shows sync about one group before its first
+ * group. Returns true if INT should pulse. */
 bool qn8035_emu_push_rds(qn8035_emu_t *emu, const uint16_t blocks[4], uint8_t err_mask,
                          bool version_b, bool sync);
 

@@ -35,8 +35,9 @@
  * 013021; Jieli and ukrtrip in the qn8035-development skill). */
 #define QN8035_REG_MUTE      0x4A /**< bit 5 = audio mute (Jieli: 0x30 mute / 0x10) */
 #define QN8035_REG_DAC       0x4C /**< "REG_DAC": bits 0x0B all set = mute (ukrtrip: 0x1B / 0x10) */
+#define QN8035_REG_CAL       0x4F /**< writing bit 7 starts a calibration; reads back a value that falls with frequency */
 #define QN8035_REG_TUNE_GO   0x55 /**< QF30 MCU pulses bit 7 to tune when CID1[1:0] is not 1 or 2 */
-#define QN8035_REG_CHIP_ID   0x58 /**< QF30 MCU reads [4:0]; 0x13 selects another spur list */
+#define QN8035_REG_CHIP_ID   0x58 /**< reads 0x33; QF30 MCU reads [4:0], 0x13 selects a spur list */
 
 /** Shadow size: covers the undocumented registers (highest seen: 0x58). */
 #define QN8035_REG_COUNT     0x80
@@ -66,6 +67,7 @@
 #define QN8035_FSM_IDLE           3
 #define QN8035_FSM_RECEIVING      5
 #define QN8035_FSM_RXCCA          7
+#define QN8035_STATUS1_CAP_SH     (1u << 7) /**< "reserved" in Rev 0.08; the captured chip reads 1 */
 #define QN8035_STATUS1_RXCCA_FAIL (1u << 3) /**< 1 = scan found no station */
 #define QN8035_STATUS1_RXAGCSET   (1u << 2)
 #define QN8035_STATUS1_RXAGCERR   (1u << 1)
@@ -101,6 +103,7 @@
 #define QN8035_MUTE_BIT          (1u << 5) /**< in QN8035_REG_MUTE */
 #define QN8035_DAC_MUTE_BITS     0x0Bu     /**< in QN8035_REG_DAC, all three set */
 #define QN8035_TUNE_GO_BIT       (1u << 7) /**< in QN8035_REG_TUNE_GO */
+#define QN8035_CAL_START         (1u << 7) /**< in QN8035_REG_CAL */
 
 /** INT_CTRL */
 #define QN8035_INT_RDS_INT_EN    (1u << 7) /**< 4.5 ms low pulse per RDS group */

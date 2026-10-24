@@ -4,6 +4,24 @@ The firmware uses Semantic Versioning. Development releases use 0.x versions and
 change interfaces between minor versions. Versions and Git tags are recorded here;
 target builds and host tests do not establish hardware compatibility.
 
+## 0.2.0 - 2026-10-24
+
+- Match the QN8035 emulation to a bus capture of the head unit's original chip:
+  - CID1 0x42 and register 0x58 = 0x33.
+  - The power-on and SWRST values of SYSTEM1, CCA and the undocumented registers.
+  - STATUS1 bit 7 and the 0x4F calibration read-back.
+  - RDS after a tune: STATUS2 reads 0, then sync over the cleared bytes, then the first
+    group.
+- Replay the captured cold start and preset tunes against the model in a host test.
+- Add `scripts/qn_capture.py`, which decodes Saleae CSV exports.
+- Keep the programme on a head-unit tune to its frequency, or to an AF the radio switched
+  to (`radio_tune_keep_programme`). A source switch no longer drops the AF the radio found.
+- Document the captures, the corrections to the firmware analysis and the AF interplay in
+  `docs/headunit-bus-capture.md`.
+
+QN8035 emulation remains disabled by default; this build is the first one for a field test
+with the head unit.
+
 ## 0.1.1 - 2026-10-21
 
 - Fix false OTA build-mismatch/rollback errors: status now formats 16 ELF hash

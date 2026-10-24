@@ -130,7 +130,7 @@ typedef struct {
     union {
         struct {
             radio_band_t band;
-            uint32_t khz;
+            uint32_t khz; /**< as asked for: a kept tune may leave the programme elsewhere */
             bool found; /**< false: seek/scan gave up */
             bool by_scan;
         } tuned;
@@ -183,6 +183,10 @@ esp_err_t radio_start(const radio_config_t *cfg);
 
 /** Commands are queued; ESP_OK means accepted, not completed. */
 esp_err_t radio_tune(radio_band_t band, uint32_t khz);
+/** FM tune for a listener that does not see AF switches (the QN8035 head unit): if khz is the
+ * tuned frequency or one the AF following has switched to since (PI checked, no seek between),
+ * the tuner stays where the programme plays and RADIO_EVT_TUNED reports khz at once. */
+esp_err_t radio_tune_keep_programme(uint32_t khz);
 esp_err_t radio_step(int dir);                 /**< +1 up, -1 down */
 esp_err_t radio_seek(int dir);                 /**< +1/-1 with wrap-around, 0 stops */
 /** QN8035-style scan: first station from start to stop, no wrap. FM only. */

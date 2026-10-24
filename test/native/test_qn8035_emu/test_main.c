@@ -1,6 +1,8 @@
 /* Host tests for the QN8035 register model: pio test -e native */
+#include <stdio.h>
 #include <unity.h>
 
+#include "capture_replay.h"
 #include "qn8035_emu.h"
 
 #define SEQ_MAX 64
@@ -477,24 +479,122 @@ static void test_cca_level_rule(void)
     TEST_ASSERT_BITS_HIGH(QN8035_STATUS1_RXCCA_FAIL, status1());
 }
 
-/* A tune request invalidates what was measured on the old channel without faking an RDS group. */
-static void test_tune_request_clears_old_channel_data(void)
+/* A tune invalidates what was measured on the old channel. RDS as on the captured chip: STATUS2
+ * reads 0x00, then 0x10 (sync) over the cleared bytes, then 0x90 with the first group. */
+static void test_tune_clears_old_channel_like_the_chip(void)
 {
     const uint16_t blocks[4] = {0x3201, 0x0408, 0xE0CD, 0x5241};
     qf30_power_on();
     qn8035_emu_set_signal(&emu, QN8035_RSSI_DBUV_OFFSET + 50, 40, true);
+    qn8035_emu_push_rds(&emu, blocks, 0, false, true); /* radio on started reception: sync */
     qn8035_emu_push_rds(&emu, blocks, 0, false, true);
-    const uint8_t upd = rd1(QN8035_REG_STATUS2) & QN8035_STATUS2_RDS_RXUPD;
+    TEST_ASSERT_BITS_HIGH(QN8035_STATUS2_RDS_RXUPD, rd1(QN8035_REG_STATUS2));
 
     qf30_tune(102000, true, 0x08, 0x5C);
     TEST_ASSERT_EQUAL_HEX8(0, rd1(QN8035_REG_RSSISIG));
     TEST_ASSERT_EQUAL_HEX8(0, rd1(QN8035_REG_SNR));
     TEST_ASSERT_BITS_HIGH(QN8035_STATUS1_ST_MO_RX, status1());
     TEST_ASSERT_EQUAL_HEX8(0, rd1(QN8035_REG_RDSD0));
-    TEST_ASSERT_EQUAL_HEX8(upd, rd1(QN8035_REG_STATUS2)); /* no toggle, nothing else */
+    TEST_ASSERT_EQUAL_HEX8(0x00, rd1(QN8035_REG_STATUS2));
+
+    qn8035_emu_push_rds(&emu, blocks, 0, false, true); /* first group: sync only */
+    TEST_ASSERT_EQUAL_HEX8(QN8035_STATUS2_RDSSYNC, rd1(QN8035_REG_STATUS2));
+    TEST_ASSERT_EQUAL_HEX8(0, rd1(QN8035_REG_RDSD0));
 
     qn8035_emu_push_rds(&emu, blocks, 0, false, true);
-    TEST_ASSERT_NOT_EQUAL(upd, rd1(QN8035_REG_STATUS2) & QN8035_STATUS2_RDS_RXUPD);
+    TEST_ASSERT_EQUAL_HEX8(QN8035_STATUS2_RDS_RXUPD | QN8035_STATUS2_RDSSYNC, rd1(QN8035_REG_STATUS2));
+    TEST_ASSERT_EQUAL_HEX8(0x32, rd1(QN8035_REG_RDSD0));
+}
+
+/* What the captured chip reads before the head unit has written anything (and CID1). */
+static void check_captured_reset_values(void)
+{
+    static const uint8_t k_reset[][2] = {
+        {QN8035_REG_SYSTEM1, 0x21}, {QN8035_REG_CCA, 0x80}, {QN8035_REG_CID1, 0x42},
+        {0x1B, 0x70}, {0x1D, 0xE9}, {0x27, 0x65}, {0x2C, 0x6D}, {0x34, 0x30}, {0x35, 0x54},
+        {0x36, 0x35}, {0x38, 0x02}, {0x39, 0x20}, {0x3A, 0x45}, {0x3E, 0xB5}, {0x40, 0x0A},
+        {0x41, 0xE8}, {0x46, 0x00}, {0x47, 0x35}, {0x49, 0x75}, {0x4A, 0x10}, {0x4C, 0x10},
+        {0x55, 0x33}, {0x58, 0x33},
+    };
+    char msg[16];
+    for (size_t i = 0; i < sizeof(k_reset) / sizeof(k_reset[0]); i++) {
+        snprintf(msg, sizeof(msg), "reg 0x%02X", k_reset[i][0]);
+        TEST_ASSERT_EQUAL_HEX8_MESSAGE(k_reset[i][1], rd1(k_reset[i][0]), msg);
+    }
+    TEST_ASSERT_BITS_HIGH(QN8035_STATUS1_CAP_SH, status1());
+}
+
+static void test_reset_values_match_captured_chip(void)
+{
+    check_captured_reset_values();
+    TEST_ASSERT_FALSE(emu.muted);
+
+    wr1(0x49, 0x7A);
+    wr1(QN8035_REG_SYSTEM1, QN8035_SYSTEM1_SWRST | QN8035_SYSTEM1_CCA_CH_DIS);
+    check_captured_reset_values();
+}
+
+/* 0x4F after the 0x80 write: the captured chip's read-back, 412 channels to one table. */
+static void test_cal_readback(void)
+{
+    static const struct {
+        uint32_t khz;
+        uint8_t v;
+    } k[] = {
+        {65000, 0xBF}, {87500, 0x9C}, {87750, 0x9C}, {87800, 0x9B}, {93300, 0x94},
+        {100300, 0x8D}, {107450, 0x87}, {107500, 0x86}, {108000, 0x86},
+    };
+    for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+        set_channel(k[i].khz);
+        wr1(QN8035_REG_CAL, QN8035_CAL_START);
+        TEST_ASSERT_EQUAL_HEX8(k[i].v, rd1(QN8035_REG_CAL));
+    }
+    wr1(QN8035_REG_CAL, 0x4A); /* the MCU writes half of it back */
+    TEST_ASSERT_EQUAL_HEX8(0x4A, rd1(QN8035_REG_CAL));
+}
+
+/* Values the tuner supplies through the bridge, not the model. */
+static bool is_measured(uint8_t reg)
+{
+    return reg == QN8035_REG_SNR || reg == QN8035_REG_RSSISIG || reg == QN8035_REG_STATUS1 ||
+           reg == QN8035_REG_STATUS2 || (reg >= QN8035_REG_RDSD0 && reg <= QN8035_REG_RDSD7);
+}
+
+/* Every read the model answers itself gives the captured chip's byte. Where the capture shows
+ * CHSC clear, the tune is completed first, as the bridge would. */
+static void replay(const capture_op_t *ops, size_t n)
+{
+    char msg[24];
+    for (size_t i = 0; i < n; i++) {
+        const capture_op_t *o = &ops[i];
+        if (o->op == 'W') {
+            wr1(o->reg, o->val);
+            continue;
+        }
+        if (o->reg == QN8035_REG_SYSTEM1 && !(o->val & QN8035_SYSTEM1_CHSC) &&
+            emu.op != QN8035_OP_NONE) {
+            qn8035_emu_set_signal(&emu, QN8035_RSSI_DBUV_OFFSET + 40, 40, true);
+            qn8035_emu_complete_tune(&emu, emu.op_khz, true, false);
+        }
+        const uint8_t v = rd1(o->reg);
+        if (!is_measured(o->reg)) {
+            snprintf(msg, sizeof(msg), "op %u reg 0x%02X", (unsigned)i, o->reg);
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(o->val, v, msg);
+        }
+    }
+}
+
+static void test_replay_captured_chip(void)
+{
+    replay(k_capture_boot, sizeof(k_capture_boot) / sizeof(k_capture_boot[0]));
+    TEST_ASSERT_EQUAL_UINT32(93300, seq_last(QN8035_EVT_TUNE)->khz);
+    TEST_ASSERT_BITS_HIGH(QN8035_SYSTEM1_CHSC, rd1(QN8035_REG_SYSTEM1));
+
+    seq_clear();
+    replay(k_capture_presets, sizeof(k_capture_presets) / sizeof(k_capture_presets[0]));
+    TEST_ASSERT_EQUAL_size_t(6, seq_count(QN8035_EVT_TUNE));
+    TEST_ASSERT_EQUAL_UINT32(93300, seq_last(QN8035_EVT_TUNE)->khz);
+    TEST_ASSERT_FALSE(seq_last(QN8035_EVT_MUTE)->on);
 }
 
 int main(void)
@@ -522,6 +622,9 @@ int main(void)
     RUN_TEST(test_pll_shift_moves_the_raster);
     RUN_TEST(test_pll_reference_follows_clock_setup);
     RUN_TEST(test_cca_level_rule);
-    RUN_TEST(test_tune_request_clears_old_channel_data);
+    RUN_TEST(test_tune_clears_old_channel_like_the_chip);
+    RUN_TEST(test_reset_values_match_captured_chip);
+    RUN_TEST(test_cal_readback);
+    RUN_TEST(test_replay_captured_chip);
     return UNITY_END();
 }
