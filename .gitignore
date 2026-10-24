@@ -10,3 +10,6 @@ sdkconfig*.old
 build/
 # doxygen output (see Doxyfile)
 docs/doxygen/
+
+# Logic-analyser CSV exports are large; the .sal captures are the source
+captures/*.csv
