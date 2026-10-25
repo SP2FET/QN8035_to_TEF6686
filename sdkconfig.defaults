@@ -27,6 +27,10 @@ CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
 CONFIG_ESP_INT_WDT=y
 CONFIG_ESP_INT_WDT_TIMEOUT_MS=300
 CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT=y
+# Brown-out reset at 2.84 V instead of 2.44 V: the in-package flash needs more than the core, so
+# a supply dip between the two can stop the chip without a reset (no watchdog, no core dump).
+CONFIG_ESP_BROWNOUT_DET=y
+CONFIG_ESP_BROWNOUT_DET_LVL_SEL_4=y
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096

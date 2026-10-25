@@ -25,8 +25,17 @@ target builds and host tests do not establish hardware compatibility.
   with the tuning, so it survives a power cycle in the car build too. The extended words go to
   the chip only once one of them is changed; until then it keeps the patch's own defaults.
 
+- Reset history: unexpected resets (watchdog, panic, brown-out) are kept in NVS with how long
+  the run before lasted and its RDS clock time, and listed on the Device card, so they survive
+  the power cycle that ends a hang. Written at boot before the QN8035 slave starts, at most 16
+  per power-on.
+- Weak signal card: a "Mono below" slider (46..60 dBµV; 46 is the default, 56 is Mono sooner)
+  that moves the stereo blend's level, noise and multipath starts together.
+
 ### Changed
 
+- Brown-out reset at 2.84 V instead of 2.44 V: a supply dip resets the chip (and the warm
+  restart resumes) instead of leaving it running with the in-package flash under-powered.
 - QN8035 emulation is on by default (`sdkconfig.defaults`): the default build is the car build.
   Memory channels and CPU DFS, which Kconfig excludes with it, are therefore off by default.
 - AF following no longer hops between weak transmitters on single-sample peaks:

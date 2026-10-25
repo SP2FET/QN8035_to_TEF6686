@@ -23,7 +23,7 @@ The head unit's software must not notice the swap.
 | Station memory (stand-alone build): last settings + 40 memory channels in NVS, web UI card | Builds; channel logic host-tested (11 tests). **Not yet tried on the device** |
 | Reception tuning: weak-signal DSP (iMS, EQ, noise blanker, soft mute, high cut, stereo blend, high blend, FM IF bandwidth fixed or automatic with the extended API, RF AGC), AF and seek thresholds, live in the web UI (a Weak signal card of presets on top of the full table), saved to NVS on request | Builds; table host-tested. **Not yet tried on the device** |
 | AF following: RDS AF list, AF_Update checks, a candidate must beat the tuned station's score by the margin in 3 measurements in a row, dwell after a switch, muted PI check or a silent jump to a frequency verified within 10 min (PI watched after), escalating bans from 5 min, REG; head-unit tunes to the programme's frequencies keep the AF | The first version hopped between weak transmitters on air (2026-10-25). The rework builds and is host-tested. **Rework not yet tried on air** |
-| Watchdog and warm restart: task watchdog panics on a hang (idle, radio, qn_slave), core dump in flash (`/api/coredump`), reset reason and crash count in the web UI, station and QN8035 registers resumed from RTC memory | Builds. **Not yet tried on the device** |
+| Watchdog and warm restart: task watchdog panics on a hang (idle, radio, qn_slave), brown-out reset at 2.84 V, core dump in flash (`/api/coredump`), reset reason, crash count and a reset history kept in NVS in the web UI, station and QN8035 registers resumed from RTC memory | Watchdog and dump download run in the car. Brown-out level and reset history: builds, **not yet tried** |
 | QN8035 register model | Implemented to the head-unit MCU's driver (CHSC and 0x55 starts, stale completions, 0x4A/0x4C mutes, 85.5 MHz PLL shift, CCA level rule) and matched to the bus capture of the original chip (IDs, reset values, 0x4F, RDS after a tune). Host-tested (27 tests, one replays the captured cold start and preset tunes byte for byte) |
 | QN8035 I2C slave port + bridge | No clock stretching (TX FIFO filled from the ISR), tune done on settled quality. **On by default** (`sdkconfig.defaults`: the car build); first test ride with the head unit 2026-10-25 |
 | Head-unit protocol | Taken from the MCU firmware ([docs/headunit-mcu-firmware.md](docs/headunit-mcu-firmware.md)); confirmed by a bus capture of the original chip ([docs/headunit-bus-capture.md](docs/headunit-bus-capture.md)) |
@@ -122,6 +122,10 @@ crash count since power-on and the dump's task, PC and backtrace; `GET
 coredump.bin .pio/build/lolin_s2_mini/firmware.elf` (ESP-IDF shell, needs the
 toolchain's GDB). Known hang: ESP-IDF 5.4.0's I2C master spins without a
 deadline while the bus stays busy after a NACK (`s_i2c_send_commands`).
+The brown-out detector resets at 2.84 V (default 2.44 V), above what the
+in-package flash needs. Unexpected resets are also kept in NVS (reason, how long
+the run before lasted, its RDS clock time), so the Device card shows them after
+the power cycle that ends a hang.
 
 **Web OTA.** `-t ota` (`scripts/pio_ota.py`) runs `scripts/ota_upload.py`,
 which POSTs `firmware.bin` to `/api/ota`, waits for the restart and then for
@@ -180,7 +184,7 @@ and ignores old-server responses until the device restarts into the requested bu
 | `bridge` | Maps QN8035 events ↔ radio commands/events, RSSI/SNR mapping | radio, qn8035_slave | no |
 | `log_stream` | Tees ESP_LOG output into a ring buffer (history + follow) | log | no |
 | `net_wifi` | SoftAP (always), optional STA with back-off | esp_wifi | no |
-| `sysmon` | Reset reason and crash count, core dump summary and download, warm-restart snapshot (radio settings, QN8035 model) in RTC memory | radio, qn8035_slave, espcoredump | no |
+| `sysmon` | Reset reason and crash count, reset history (NVS), core dump summary and download, warm-restart snapshot (radio settings, QN8035 model) in RTC memory | radio, qn8035_slave, espcoredump, nvs_flash | no |
 | `web_ui` | Embedded `www/index.html`, JSON API, WebSocket log pump, firmware upload (`web_ota.c`) | radio, radio_mem, tuning_store, log_stream, qn8035_slave, sysmon, app_update | no |
 
 ### Tasks and ownership
@@ -228,7 +232,7 @@ these polls (opt-in, nothing extra on the device).
 (`CONFIG_LOG_TIMESTAMP_SOURCE_SYSTEM`): `HH:MM:SS.mmm` of uptime until a
 station sends CT, the station's local time after.
 
-Restarts: `/api/status` has `sys` (reset reason, `warm`, `crashes` since power-on, `dump` with task, PC and backtrace) and `GET /api/coredump` downloads the stored core dump. The AF object also carries `need`, `dwell_s` and `probation`, and every list entry `last`, `n`, `streak`, `ban_s` and `trusted`.
+Restarts: `/api/status` has `sys` (reset reason, `warm`, `crashes` since power-on, `resets` and `history` from flash, `dump` with task, PC and backtrace) and `GET /api/coredump` downloads the stored core dump. The AF object also carries `need`, `dwell_s` and `probation`, and every list entry `last`, `n`, `streak`, `ban_s` and `trusted`.
 
 Memory channels (stand-alone build): `GET /api/presets` lists the used channels, and `POST /api/preset/store[?slot=N][&name=S]`, `/api/preset/recall?slot=N`, `/api/preset/rename?slot=N&name=S`, `/api/preset/clear?slot=N` and `/api/preset/step?dir=up|down` change them. N is the channel number as shown, 1..40. `/api/status` has a `mem` object whose `rev` changes with every channel change.
 
@@ -267,7 +271,7 @@ Memory channels (stand-alone build): `GET /api/presets` lists the used channels,
   50 kHz steps from 60 MHz. `radio` uses kHz for frequencies.
 - **No heap allocation in steady state**, except for the web log chunks
   (bounded per period).
-- **Flash writes stall the CPU** (single-core S2, cache off) for up to tens of ms. Keep them out of the QN8035 emulation build (`BRIDGE_MEMORY` depends on `!BRIDGE_QN_EMU_ENABLE`) and rate-limit them elsewhere. The one exception is the reception tuning Save button (`tuning_store`): a rare, deliberate write that has to work in the car build too.
+- **Flash writes stall the CPU** (single-core S2, cache off) for up to tens of ms. Keep them out of the QN8035 emulation build (`BRIDGE_MEMORY` depends on `!BRIDGE_QN_EMU_ENABLE`) and rate-limit them elsewhere. Two exceptions: the reception tuning Save button (`tuning_store`), a rare, deliberate write that has to work in the car build too, and `sysmon`'s reset history: one NVS write at boot after an unexpected reset, before the QN8035 slave starts, at most 16 per power-on.
 - **Reception tuning lives in the `tuning` table, not in Kconfig.** Add a DSP parameter as a table row with the UM V102 range and default (one row per command word, all words of a command covered). The radio applies every row at each tuner boot, so the defaults must be the chip's documented ones unless there is a reason, given in a comment.
 - **Patch blobs are generated, never hand-edited.** Run
   `components/tef6686/patch/regen_patch.py`. Provenance and SHA-256 hashes
@@ -396,8 +400,13 @@ before changing protocol code.
 12. A trusted AF jump uses Jump mode: check on air that it is not heard. The
     extended Set_Bandwidth words (Weak signal: Auto narrow) are sent only once
     changed: check that they narrow the filter (live bar BW) without side effects.
-13. The hang of 2026-10-25 (station stuck, head unit ignored, Wi-Fi gone until a
-    power cycle): confirm the cause from the core dump of the first watchdog reset.
+13. The hang of 2026-10-25 (station stuck, head unit ignored, Wi-Fi network gone
+    until a power cycle). With the watchdog armed it left no core dump, so no task
+    stalled: the chip itself stopped or kept resetting. Suspect the supply (a dip
+    between the flash's minimum and the old 2.44 V brown-out level). Check the
+    reset history after the next one. The only dump in flash then was older, from a
+    stand-alone build: a NULL read in the ROM USB driver under the USB console
+    interrupt (`esp_usb_console_cdc_acm_cb`), with a USB host attached.
 
 ## Roadmap
 

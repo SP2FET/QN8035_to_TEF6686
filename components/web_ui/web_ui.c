@@ -32,7 +32,7 @@ extern const char index_html_start[] asm("_binary_index_html_start");
 extern const char index_html_end[] asm("_binary_index_html_end");
 
 /* ~1.8 kB plus up to AF_MAX entries of ~150 bytes and RADIO_AF_EVENTS of ~130. */
-#define STATUS_BUF_SIZE 8192
+#define STATUS_BUF_SIZE 10240 /* and the reset history, SYSMON_HIST_MAX entries of ~70 */
 #define COREDUMP_CHUNK  1024
 /* /api/tuning goes out in chunks; one parameter is < 300 bytes. */
 #define TUNING_CHUNK      1024
@@ -226,8 +226,21 @@ static esp_err_t status_get(httpd_req_t *req)
     sysmon_get_info(&sys);
     jb_printf(&j, "\"sys\":{\"reset\":");
     jb_str(&j, sys.reset);
-    jb_printf(&j, ",\"unexpected\":%s,\"warm\":%s,\"crashes\":%" PRIu32 ",\"dump\":",
-              b(sys.unexpected), b(sys.warm), sys.crashes);
+    jb_printf(&j, ",\"unexpected\":%s,\"warm\":%s,\"crashes\":%" PRIu32 ",\"resets\":%" PRIu32
+                  ",\"history\":[",
+              b(sys.unexpected), b(sys.warm), sys.crashes, sys.resets);
+    for (unsigned i = 0; i < sys.hist_n && i < SYSMON_HIST_MAX; i++) {
+        const sysmon_reset_t *h = &sys.hist[i];
+        jb_printf(&j, "%s{\"reason\":", i ? "," : "");
+        jb_str(&j, sysmon_reset_name(h->reason));
+        jb_printf(&j, ",\"n\":%u,\"up_s\":%" PRIu32 ",\"wall\":", h->count, h->up_s);
+        if (h->wall_s) {
+            jb_printf(&j, "%" PRId64 "}", h->wall_s);
+        } else {
+            jb_printf(&j, "null}");
+        }
+    }
+    jb_printf(&j, "],\"dump\":");
     if (sys.dump) {
         jb_printf(&j, "{\"task\":");
         jb_str(&j, sys.task);

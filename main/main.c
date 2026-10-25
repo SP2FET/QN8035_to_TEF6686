@@ -167,12 +167,12 @@ void app_main(void)
 
     const esp_app_desc_t *app = esp_app_get_description();
     ESP_LOGI(TAG, "%s %s (ESP-IDF %s)", app->project_name, app->version, app->idf_ver);
-    /* Before anything starts: after a watchdog or panic reset, resume the state from before. */
-    ESP_ERROR_CHECK(sysmon_init());
-    const sysmon_state_t *warm = sysmon_warm_state();
-
     ESP_ERROR_CHECK(init_power());
     ESP_ERROR_CHECK(init_nvs());
+    /* Before the radio and the QN8035 slave: after a watchdog, panic or brown-out reset, resume
+     * the state from before, and note the reset in flash while the head-unit bus is not served. */
+    ESP_ERROR_CHECK(sysmon_init());
+    const sysmon_state_t *warm = sysmon_warm_state();
 
     i2c_master_bus_handle_t tef_bus;
     ESP_ERROR_CHECK(init_tef_bus(&tef_bus));

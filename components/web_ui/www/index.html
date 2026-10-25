@@ -138,6 +138,9 @@ nav button{flex:1 1 0;display:flex;align-items:center;justify-content:center;gap
 .qopt small{display:block;font-size:.75rem;color:var(--dim)}
 .qopt button.sel small{color:inherit}
 .qcust{margin-top:6px;font-size:.8rem;color:var(--wa)}
+.qsl{display:flex;align-items:center;gap:10px;margin-top:10px}
+.qsl input{flex:1 1 auto;min-width:0}
+.qsl .mono{min-width:5.5em;text-align:right}
 @media(min-width:900px){#tbody{columns:2;column-gap:10px}#tbody details{break-inside:avoid}}
 </style>
 </head>
@@ -247,6 +250,7 @@ nav button{flex:1 1 0;display:flex;align-items:center;justify-content:center;gap
 <dt>Clock</dt><dd id="clk">—</dd>
 <dt>Last reset</dt><dd id="sreset">—</dd>
 <dt>Crash dump</dt><dd id="sdump">—</dd>
+<dt>Reset history</dt><dd id="shist">—</dd>
 </dl>
 <div class="actions">
 <div class="row"><button id="reinit">Re-init</button></div>
@@ -451,6 +455,11 @@ function renderSys(y){
   const r=$('sreset'),d=$('sdump');
   txt('sreset',y?y.reset+(y.warm?', resumed':'')+(y.crashes?' · '+y.crashes+' since power-on':''):null);
   r.classList.toggle('err',!!(y&&y.unexpected));
+  // unexpected resets kept in flash: they survive the power cycle that ends a hang
+  const hs=(y&&y.history)||[],dur=n=>n<90?n+' s':n<5400?Math.round(n/60)+' min':(n/3600).toFixed(1)+' h';
+  const when=w=>new Date(w*1000).toLocaleString([],{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
+  txt('shist',!y?null:!hs.length?'none':y.resets+' in all · '+hs.slice(0,4).map(h=>h.reason
+    +(h.wall?' '+when(h.wall):'')+(h.up_s?' after '+dur(h.up_s):'')+(h.n>1?' (#'+h.n+' since power-on)':'')).join(' · '));
   d.textContent=!y?'—':y.dump?'':'none';
   if(!y||!y.dump)return;
   const c=y.dump,a=document.createElement('a');
@@ -608,8 +617,10 @@ const QS=[
  d:'Narrower lets in less noise, so weak stations hiss less, but loud music and strong neighbours may distort. Auto adapts by itself.',
  o:[['Auto','236 kHz',[1,null,2360]],['Auto narrow','151 kHz',[1,null,1510]],['Narrow','114 kHz',[0,1140,null]],['Narrowest','84 kHz',[0,840,null]]]},
 {t:'Stereo',k:['st_min_on','st_lv_st','st_usn_st','st_wam_st'],
- d:'Stereo needs a much stronger signal than mono. Mono sooner blends to mono earlier as the signal fades; Mono gives the least hiss.',
- o:[['Stereo','normal',[0,460,240,240]],['Mono sooner','',[0,560,160,160]],['Mono','always',[2,null,null,null]]]},
+ d:'Stereo needs a much stronger signal than mono. Mono sooner blends to mono earlier as the signal fades; Mono gives the least hiss. The slider sets how early: 46 dBµV is normal, 56 is Mono sooner, further right goes mono sooner still.',
+ o:[['Stereo','normal',[0,460,240,240]],['Mono sooner','',[0,560,160,160]],['Mono','always',[2,null,null,null]]],
+ // one knob: the level start in chip units (0.1 dBuV) and the noise and multipath starts with it
+ s:{i:1,min:460,max:600,step:10,l:'Mono below',f:v=>[0,v,240-(v-460)*0.8,240-(v-460)*0.8]}},
 {t:'Treble cut',k:['hc_lv_st','hc_usn_st','hc_wam_st','hc_max'],
  d:'Cuts the treble, where the hiss is, while the signal is weak or noisy. Stronger sounds duller but calmer.',
  o:[['Normal','',[360,360,360,4000]],['Earlier','',[460,240,240,4000]],['Strong','',[560,160,160,2700]]]},
@@ -631,8 +642,18 @@ function renderQs(){
       b.onclick=()=>qset(ps,vs);
       bs.push([b,vs]);row.appendChild(b);
     }
-    w.append(mk('h3',null,g.t),mk('p',null,g.d),row,cu);body.appendChild(w);
-    qgs.push({ps,bs,cu});
+    w.append(mk('h3',null,g.t),mk('p',null,g.d),row);
+    let sl=null;
+    if(g.s){
+      const c=g.s,box=mk('div','qsl'),r=mk('input'),val=mk('span','mono');
+      let t=0;
+      r.type='range';r.min=c.min;r.max=c.max;r.step=c.step;r.setAttribute('aria-label',c.l);
+      r.oninput=()=>{val.textContent=(r.value/10).toFixed(0)+' dBµV';clearTimeout(t);t=setTimeout(()=>qset(ps,c.f(+r.value)),300)};
+      box.append(mk('span','hs',c.l),r,val);w.appendChild(box);
+      sl={c,r,val};
+    }
+    w.appendChild(cu);body.appendChild(w);
+    qgs.push({ps,bs,cu,sl});
   }
   qmark();
 }
@@ -643,7 +664,13 @@ function qmark(){ // highlight the option each group's current values match
       const hit=vs.every((v,i)=>v===null||g.ps[i].v===v);
       any=any||hit;b.classList.toggle('sel',hit);b.setAttribute('aria-pressed',hit);
     }
-    g.cu.hidden=any;
+    let on=false;
+    if(g.sl){ // a value the slider sets is not custom
+      const v=g.ps[g.sl.c.i].v;
+      on=g.sl.c.f(v).every((x,i)=>g.ps[i].v===x);
+      if(document.activeElement!==g.sl.r){g.sl.r.value=v;g.sl.val.textContent=(v/10).toFixed(0)+' dBµV'}
+    }
+    g.cu.hidden=any||on;
   }
 }
 async function qset(ps,vs){

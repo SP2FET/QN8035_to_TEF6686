@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/param.h>
+#include <time.h>
 
 #include "esp_app_desc.h"
 #include "esp_attr.h"
@@ -11,9 +12,11 @@
 #include "esp_log.h"
 #include "esp_rom_crc.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "nvs.h"
 #include "qn8035_slave.h"
 #include "sdkconfig.h"
 #if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
@@ -27,6 +30,9 @@ static const char *TAG = "sysmon";
 #define SNAPSHOT_PERIOD_MS 500
 #define SLOT_MAGIC         0x51544546u /* "QTEF" */
 #define CRASH_MAGIC        0x43524153u /* "CRAS" */
+#define NVS_NAMESPACE      "sysmon"
+#define NVS_KEY_HIST       "resets"
+#define CLOCK_SET_AFTER    1600000000  /* UTC seconds: below this the clock was not set */
 
 typedef struct {
     uint32_t magic;
@@ -35,6 +41,14 @@ typedef struct {
     sysmon_state_t st;
     uint32_t crc;   /* of everything before */
 } slot_t;
+
+/* The NVS blob: all-time count and the last resets, newest first. */
+typedef struct {
+    uint32_t total;
+    uint8_t n;
+    uint8_t reserved[3];
+    sysmon_reset_t e[SYSMON_HIST_MAX];
+} hist_t;
 
 /* RTC slow memory keeps these over every reset but a power cycle. Two slots, written in turn: a
  * reset in the middle of a write leaves the other one intact. */
@@ -51,9 +65,9 @@ static struct {
     sysmon_state_t last;    /* sysmon task only */
 } s;
 
-static const char *reset_name(esp_reset_reason_t r)
+const char *sysmon_reset_name(int reason)
 {
-    switch (r) {
+    switch ((esp_reset_reason_t)reason) {
     case ESP_RST_POWERON:    return "power-on";
     case ESP_RST_EXT:        return "reset pin";
     case ESP_RST_SW:         return "software restart";
@@ -96,6 +110,43 @@ static bool slot_ok(const slot_t *sl)
            sl->crc == slot_crc(sl);
 }
 
+/* The reset history from NVS; an empty one if there is none or it does not fit. */
+static void hist_load(hist_t *h)
+{
+    memset(h, 0, sizeof(*h));
+    nvs_handle_t nh;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nh) != ESP_OK) {
+        return;
+    }
+    size_t len = sizeof(*h);
+    if (nvs_get_blob(nh, NVS_KEY_HIST, h, &len) != ESP_OK || len != sizeof(*h) ||
+        h->n > SYSMON_HIST_MAX) {
+        memset(h, 0, sizeof(*h));
+    }
+    nvs_close(nh);
+}
+
+/* Called before the QN8035 slave starts: the flash write cannot delay a head-unit read. */
+static void hist_add(hist_t *h, const sysmon_reset_t *r)
+{
+    memmove(&h->e[1], &h->e[0], (SYSMON_HIST_MAX - 1) * sizeof(h->e[0]));
+    h->e[0] = *r;
+    h->n = (uint8_t)MIN(h->n + 1u, (unsigned)SYSMON_HIST_MAX);
+    h->total++;
+    nvs_handle_t nh;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nh);
+    if (err == ESP_OK) {
+        err = nvs_set_blob(nh, NVS_KEY_HIST, h, sizeof(*h));
+        if (err == ESP_OK) {
+            err = nvs_commit(nh);
+        }
+        nvs_close(nh);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "reset history not saved: %s", esp_err_to_name(err));
+    }
+}
+
 esp_err_t sysmon_init(void)
 {
     ESP_RETURN_ON_FALSE(s.lock == NULL, ESP_ERR_INVALID_STATE, TAG, "already initialised");
@@ -110,7 +161,7 @@ esp_err_t sysmon_init(void)
     if (unexpected(r)) {
         s_crashes++;
     }
-    s.info.reset = reset_name(r);
+    s.info.reset = sysmon_reset_name(r);
     s.info.unexpected = unexpected(r);
     s.info.crashes = s_crashes;
 
@@ -127,13 +178,39 @@ esp_err_t sysmon_init(void)
         s.last = s.warm;
     }
     s.info.warm = s.have_warm;
+
+    hist_t h;
+    hist_load(&h);
+    if (s.info.unexpected && s_crashes <= SYSMON_HIST_WRITES) {
+        /* A snapshot of another build still tells how long the previous run lasted. */
+        const slot_t *prev = NULL;
+        for (unsigned i = 0; i < 2; i++) {
+            const slot_t *sl = &s_slots[i];
+            if (sl->magic == SLOT_MAGIC && sl->crc == slot_crc(sl) &&
+                (prev == NULL || (int32_t)(sl->seq - prev->seq) > 0)) {
+                prev = sl;
+            }
+        }
+        const sysmon_reset_t rec = {
+            .reason = (uint8_t)r,
+            .count = (uint8_t)MIN(s_crashes, (uint32_t)UINT8_MAX),
+            .up_s = prev ? prev->st.up_s : 0,
+            .wall_s = prev ? prev->st.wall_s : 0,
+        };
+        hist_add(&h, &rec);
+    }
+    s.info.resets = h.total;
+    s.info.hist_n = h.n;
+    memcpy(s.info.hist, h.e, sizeof(s.info.hist));
+
 #if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
     size_t addr, size;
     s.info.dump = esp_core_dump_image_get(&addr, &size) == ESP_OK;
 #endif
 
     if (s.info.unexpected) {
-        ESP_LOGW(TAG, "reset by %s, %lu since power-on", s.info.reset, (unsigned long)s_crashes);
+        ESP_LOGW(TAG, "reset by %s, %lu since power-on, %lu remembered", s.info.reset,
+                 (unsigned long)s_crashes, (unsigned long)h.total);
     } else {
         ESP_LOGI(TAG, "reset: %s", s.info.reset);
     }
@@ -195,6 +272,9 @@ static void snapshot(void)
         st->radio = rs;
     }
     st->qn_valid = qn8035_slave_snapshot(&st->qn);
+    st->up_s = (uint32_t)(esp_timer_get_time() / 1000000);
+    const time_t now = time(NULL);
+    st->wall_s = now > CLOCK_SET_AFTER ? (int64_t)now : 0;
 
     slot_t n;
     memset(&n, 0, sizeof(n));

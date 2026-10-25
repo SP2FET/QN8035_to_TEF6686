@@ -42,9 +42,12 @@
  *                 clock-time group; null until one arrives
  *   "clock_set"   true once the system clock was set from RDS clock time
  *   "force_mono"  true while mono is forced (head unit FORCE_MO)
- *   "sys"         {"reset","unexpected","warm","crashes","dump"} (sysmon.h): this boot's reset
- *                 reason, whether it resumed the state from before, panic/watchdog/supply resets
- *                 since power-on; dump null or {"task","elf","pc","bt":[hex],"corrupted"}
+ *   "sys"         {"reset","unexpected","warm","crashes","resets","history","dump"} (sysmon.h):
+ *                 this boot's reset reason, whether it resumed the state from before,
+ *                 panic/watchdog/supply resets since power-on and all time (kept in flash);
+ *                 history [{"reason","n","up_s","wall"}] newest first: n = resets since that
+ *                 power-on, up_s = how long the run before lasted, wall = its UTC end (RDS
+ *                 clock) or null; dump null or {"task","elf","pc","bt":[hex],"corrupted"}
  *   GET  /api/coredump   the stored core dump, raw (espcoredump.py info_corefile -t raw); 404 if
  *                        none. A new crash overwrites it
  *
