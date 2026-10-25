@@ -87,13 +87,8 @@ static void fail_op(uint32_t khz, bool scan)
     qn8035_slave_complete_tune(khz, false, scan);
 }
 
-/* esp_timer task */
-static void tune_timer_cb(void *arg)
+static void start_tune(uint32_t khz)
 {
-    (void)arg;
-    portENTER_CRITICAL(&b.mux);
-    const uint32_t khz = b.next_khz;
-    portEXIT_CRITICAL(&b.mux);
     begin_op(OP_TUNE, khz);
     /* The head unit does not see the radio's AF switches: asking for the frequency it tuned (a
      * re-tune after a source switch, the way back from its own AF check) must not drop the AF
@@ -103,6 +98,16 @@ static void tune_timer_cb(void *arg)
         ESP_LOGW(TAG, "tune %lu kHz: %s", (unsigned long)khz, esp_err_to_name(err));
         fail_op(khz, false);
     }
+}
+
+/* esp_timer task */
+static void tune_timer_cb(void *arg)
+{
+    (void)arg;
+    portENTER_CRITICAL(&b.mux);
+    const uint32_t khz = b.next_khz;
+    portEXIT_CRITICAL(&b.mux);
+    start_tune(khz);
 }
 
 /* Head unit -> tuner. Runs in the QN8035 slave task. */
@@ -206,8 +211,13 @@ static void on_quality(const radio_quality_t *q)
     const bool publish = op == OP_NONE || b.tuned;
     if (op != OP_NONE) {
         if (b.tuned) {
-            complete = (q->valid && q->age >= SETTLED_AGE) ||
-                       reached(now, b.t + pdMS_TO_TICKS(SETTLE_TIMEOUT_MS));
+            const bool settled = q->valid && q->age >= SETTLED_AGE;
+            complete = settled || reached(now, b.t + pdMS_TO_TICKS(SETTLE_TIMEOUT_MS));
+            if (complete && op == OP_TUNE) {
+                /* The head unit's scan steps through tunes and drops a channel on RXCCA_FAIL:
+                 * report what our seek would decide on this sample; unsettled data finds nothing. */
+                b.found = settled && q->station;
+            }
         } else if (reached(now, b.t + pdMS_TO_TICKS(TUNE_TIMEOUT_MS))) {
             complete = true; /* the radio never tuned it */
             b.found = false;
@@ -276,5 +286,23 @@ esp_err_t qn_bridge_init(void)
 
 esp_err_t qn_bridge_start(const qn8035_slave_config_t *cfg)
 {
-    return qn8035_slave_start(cfg, on_qn_event, NULL);
+    const qn8035_emu_t *e = cfg->restore;
+    if (e) { /* before the slave task can see events */
+        b.powered = e->receiving;
+        b.hu_mute = e->muted;
+    }
+    ESP_RETURN_ON_ERROR(qn8035_slave_start(cfg, on_qn_event, NULL), TAG, "slave");
+    if (e == NULL) {
+        return ESP_OK;
+    }
+    /* A warm restart: the model is as the head unit left it, the radio plays what it played. */
+    apply_mute();
+    if (e->op == QN8035_OP_TUNE) {
+        start_tune(e->op_khz); /* the head unit still polls CHSC for it */
+    } else if (e->op == QN8035_OP_SCAN) {
+        qn8035_slave_complete_tune(qn8035_ch_to_khz(e->tuned_ch), false, true);
+    }
+    ESP_LOGI(TAG, "resumed: receiver %s%s%s", e->receiving ? "on" : "off",
+             e->muted ? ", muted" : "", e->op != QN8035_OP_NONE ? ", finishing a tune" : "");
+    return ESP_OK;
 }

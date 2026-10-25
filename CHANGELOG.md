@@ -4,6 +4,61 @@ The firmware uses Semantic Versioning. Development releases use 0.x versions and
 change interfaces between minor versions. Versions and Git tags are recorded here;
 target builds and host tests do not establish hardware compatibility.
 
+## [Unreleased]
+
+### Added
+
+- Watchdog: the task watchdog now resets the chip (it only printed before) when the idle, radio or
+  QN8035 slave task stops for 5 s. The radio and slave tasks are watched and wait at most 1 s.
+- Warm restart (`sysmon`): the radio settings and the QN8035 register model are kept in RTC memory
+  every 500 ms. After a watchdog, panic, brown-out or software reset of the same build the radio
+  resumes the station and mute state and the head unit finds its chip as it left it, including a
+  tune it was waiting for.
+- Crash reports: the Device card shows the reset reason, the crashes since power-on and the core
+  dump's task, PC and backtrace; `GET /api/coredump` downloads the dump.
+
+- Weak signal card at the top of the Tuning tab: four plain-language choices (filter width,
+  stereo, treble cut, volume dip), each a preset over the reception tuning rows, with Save. The
+  live bar shows the IF bandwidth in use.
+- All words of FM Set_Bandwidth are tuning rows now, the extended API included (narrowest and
+  undisturbed bandwidth, attack; UM V102 §3.3). The FM bandwidth, fixed or automatic, is saved
+  with the tuning, so it survives a power cycle in the car build too. The extended words go to
+  the chip only once one of them is changed; until then it keeps the patch's own defaults.
+
+### Changed
+
+- QN8035 emulation is on by default (`sdkconfig.defaults`): the default build is the car build.
+  Memory channels and CPU DFS, which Kconfig excludes with it, are therefore off by default.
+- AF following no longer hops between weak transmitters on single-sample peaks:
+  - A candidate must beat the tuned station's score by the margin in 3 measurements in a row;
+    one that starts such a streak is measured again first. Averages rank the candidates and
+    show in the web UI. AF_Update scores read lower than the tuned score, so it errs towards
+    staying. (Measuring the tuned frequency with AF_Update as a reference, tried in between,
+    went with louder, noisier reception and was removed.)
+  - After a switch the radio stays for a dwell time (`af_dwell`, 15 s), doubled up to 8 times
+    while switches follow each other quickly.
+  - A frequency that carried the programme in the last 10 min is switched to with a Jump instead
+    of the muted PI check, so the switch is not heard. Another PI there within 10 s sends the
+    tuner back and bans it.
+  - Bans start at 5 min (`af_ban`, was 60 s) and double per failure; another PI starts at 4 times
+    that.
+
+### Fixed
+
+- The 2026-10-25 hang (station stuck, head unit ignored, Wi-Fi gone until a power cycle) now ends
+  in a reset after 5 s. A likely cause is ESP-IDF 5.4.0's I2C master, which spins without a
+  deadline while the bus stays busy after a NACK; the core dump will tell.
+
+- QN8035 slave: enable the I2C input glitch filter (187.5 ns, the S2 maximum). The v2 slave driver
+  left it unset. In the car, chatter on the head unit's slow SCL edges gave the slave extra clocks
+  and corrupted register writes.
+- QN8035 slave: enable the internal pull-ups (~45 kΩ) on the head-unit pins, in parallel with the
+  head unit's own, to speed up the slow bus edges a little.
+- Head-unit scan stored channels without a station and took about 175 ms per step. RXCCA_FAIL now
+  follows our seek decision on the settled sample (level, USN, WAM and frequency offset, then the
+  head unit's DX/local level), so empty channels fail the first test, and the radio's station flag
+  includes the offset check, so neighbours 50-100 kHz off a strong station no longer pass.
+
 ## 0.2.0 - 2026-10-24
 
 - Match the QN8035 emulation to a bus capture of the head unit's original chip:

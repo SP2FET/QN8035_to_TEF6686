@@ -21,6 +21,7 @@
 #include "qn8035_slave.h"
 #include "radio.h"
 #include "radio_mem.h"
+#include "sysmon.h"
 #include "tuning.h"
 #include "tuning_store.h"
 #include "web_ota.h"
@@ -30,8 +31,9 @@ static const char *TAG = "web";
 extern const char index_html_start[] asm("_binary_index_html_start");
 extern const char index_html_end[] asm("_binary_index_html_end");
 
-/* ~1.3 kB plus up to AF_MAX entries of ~80 bytes and RADIO_AF_EVENTS of ~120. */
-#define STATUS_BUF_SIZE 6144
+/* ~1.8 kB plus up to AF_MAX entries of ~150 bytes and RADIO_AF_EVENTS of ~130. */
+#define STATUS_BUF_SIZE 8192
+#define COREDUMP_CHUNK  1024
 /* /api/tuning goes out in chunks; one parameter is < 300 bytes. */
 #define TUNING_CHUNK      1024
 #define TUNING_CHUNK_FILL 640
@@ -132,37 +134,50 @@ static void jb_tenths(jbuf_t *j, bool known, int v)
     }
 }
 
+/* One AF as measured by AF_Update. */
+static void jb_af_entry(jbuf_t *j, const af_entry_t *e, uint32_t now_ms)
+{
+    const bool banned = e->banned && (int32_t)(e->banned_until_ms - now_ms) > 0;
+    const bool trusted =
+        e->verified && (uint32_t)(now_ms - e->verified_ms) < AF_TRUST_MS && !banned;
+    jb_printf(j, "{\"khz\":%" PRIu32 ",\"score\":", e->khz);
+    jb_tenths(j, e->score != AF_SCORE_NONE, e->score);
+    jb_printf(j, ",\"last\":");
+    jb_tenths(j, e->measured && e->last != AF_SCORE_NONE, e->last);
+    jb_printf(j, ",\"n\":%u,\"streak\":%u,\"level\":", e->avg.n, e->streak);
+    jb_tenths(j, e->measured, e->level);
+    jb_printf(j, ",\"age_s\":");
+    if (e->measured) {
+        jb_printf(j, "%" PRIu32, (now_ms - e->measured_ms) / 1000);
+    } else {
+        jb_printf(j, "null");
+    }
+    jb_printf(j, ",\"banned\":%s,\"ban_s\":%" PRIu32 ",\"trusted\":%s}", b(banned),
+              banned ? (e->banned_until_ms - now_ms + 999) / 1000 : 0, b(trusted));
+}
+
 static void jb_af(jbuf_t *j, const radio_af_status_t *a)
 {
-    jb_printf(j, "\"af\":{\"active\":%s,\"poor\":%s,\"checking_pi\":%s,\"score\":", b(a->active),
-              b(a->poor), b(a->checking_pi));
+    jb_printf(j, "\"af\":{\"active\":%s,\"poor\":%s,\"checking_pi\":%s,\"probation\":%s,\"score\":",
+              b(a->active), b(a->poor), b(a->checking_pi), b(a->probation));
     jb_tenths(j, a->score != AF_SCORE_NONE, a->score);
-    jb_printf(j, ",\"switches\":%" PRIu32 ",\"pi_fails\":%" PRIu32 ",\"list\":[", a->switches,
-              a->pi_fails);
+    jb_printf(j, ",\"need\":");
+    jb_tenths(j, a->need != AF_SCORE_NONE, a->need);
+    jb_printf(j, ",\"dwell_s\":%" PRIu32 ",\"confirm\":%d,\"switches\":%" PRIu32
+                 ",\"pi_fails\":%" PRIu32 ",\"list\":[",
+              (a->dwell_ms + 999) / 1000, AF_CONFIRM, a->switches, a->pi_fails);
     for (unsigned i = 0; i < a->n && i < AF_MAX; i++) {
-        const af_entry_t *e = &a->e[i];
-        const bool scored = e->measured && e->score != AF_SCORE_NONE;
-        const bool banned = e->banned && (int32_t)(e->banned_until_ms - a->now_ms) > 0;
-        jb_printf(j, "%s{\"khz\":%" PRIu32 ",\"score\":", i ? "," : "", e->khz);
-        jb_tenths(j, scored, e->score);
-        jb_printf(j, ",\"level\":");
-        jb_tenths(j, e->measured, e->level);
-        jb_printf(j, ",\"age_s\":");
-        if (e->measured) {
-            jb_printf(j, "%" PRIu32, (a->now_ms - e->measured_ms) / 1000);
-        } else {
-            jb_printf(j, "null");
-        }
-        jb_printf(j, ",\"banned\":%s}", b(banned));
+        jb_printf(j, "%s", i ? "," : "");
+        jb_af_entry(j, &a->e[i], a->now_ms);
     }
-    static const char *const ev_names[] = {"switched", "other_pi", "no_pi"};
+    static const char *const ev_names[] = {"switched", "other_pi", "no_pi", "jumped"};
     jb_printf(j, "],\"events\":[");
     for (unsigned i = 0; i < a->ev_n && i < RADIO_AF_EVENTS; i++) {
         const radio_af_event_t *ev = &a->ev[i];
         jb_printf(j,
                   "%s{\"type\":\"%s\",\"age_s\":%" PRIu32 ",\"from\":%" PRIu32 ",\"to\":%" PRIu32
                   ",\"score\":%.1f,\"cur\":%.1f,\"pi\":",
-                  i ? "," : "", ev->type < 3 ? ev_names[ev->type] : "?",
+                  i ? "," : "", ev->type < 4 ? ev_names[ev->type] : "?",
                   (a->now_ms - ev->t_ms) / 1000, ev->from_khz, ev->to_khz, ev->score / 10.0,
                   ev->cur / 10.0);
         if (ev->type == RADIO_AF_EV_OTHER_PI) {
@@ -206,6 +221,27 @@ static esp_err_t status_get(httpd_req_t *req)
     jb_str(&j, running ? running->label : "");
     jb_printf(&j, ",\"ota_state\":\"%s\",\"ota_password\":%s},", web_ota_state_name(),
               b(web_ota_password_required()));
+
+    sysmon_info_t sys;
+    sysmon_get_info(&sys);
+    jb_printf(&j, "\"sys\":{\"reset\":");
+    jb_str(&j, sys.reset);
+    jb_printf(&j, ",\"unexpected\":%s,\"warm\":%s,\"crashes\":%" PRIu32 ",\"dump\":",
+              b(sys.unexpected), b(sys.warm), sys.crashes);
+    if (sys.dump) {
+        jb_printf(&j, "{\"task\":");
+        jb_str(&j, sys.task);
+        jb_printf(&j, ",\"elf\":");
+        jb_str(&j, sys.elf);
+        jb_printf(&j, ",\"pc\":\"0x%08" PRIx32 "\",\"bt\":[", sys.pc);
+        for (unsigned i = 0; i < sys.bt_n; i++) {
+            jb_printf(&j, "%s\"0x%08" PRIx32 "\"", i ? "," : "", sys.bt[i]);
+        }
+        jb_printf(&j, "],\"corrupted\":%s}", b(sys.bt_corrupted));
+    } else {
+        jb_printf(&j, "null");
+    }
+    jb_printf(&j, "},");
 
     jb_printf(&j, "\"tef\":{\"ready\":%s,\"op_status\":%d,\"state\":", b(st.tef_ready),
               (int)st.op_state);
@@ -630,6 +666,31 @@ static esp_err_t preset_step_post(httpd_req_t *req)
     return reply(req, (dir == 1 || dir == -1) ? radio_mem_step(dir) : ESP_ERR_INVALID_ARG);
 }
 
+/* The raw core dump, for espcoredump.py (sysmon.h). */
+static esp_err_t coredump_get(httpd_req_t *req)
+{
+    static uint8_t chunk[COREDUMP_CHUNK]; /* httpd task only */
+    size_t size;
+    if (sysmon_dump_size(&size) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no core dump stored");
+    }
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"coredump.bin\"");
+    for (size_t off = 0; off < size;) {
+        const size_t n = MIN(sizeof(chunk), size - off);
+        esp_err_t err = sysmon_dump_read(off, chunk, n);
+        if (err == ESP_OK) {
+            err = httpd_resp_send_chunk(req, (const char *)chunk, (ssize_t)n);
+        }
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "core dump download: %s", esp_err_to_name(err));
+            return err; /* httpd drops the connection: the file is incomplete */
+        }
+        off += n;
+    }
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
 static esp_err_t index_get(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
@@ -771,6 +832,7 @@ esp_err_t web_ui_start(const web_ui_config_t *ui_cfg)
         {.uri = "/", .method = HTTP_GET, .handler = index_get},
         {.uri = "/favicon.ico", .method = HTTP_GET, .handler = favicon_get},
         {.uri = "/api/status", .method = HTTP_GET, .handler = status_get},
+        {.uri = "/api/coredump", .method = HTTP_GET, .handler = coredump_get},
         {.uri = "/api/tune", .method = HTTP_POST, .handler = tune_post},
         {.uri = "/api/step", .method = HTTP_POST, .handler = step_post},
         {.uri = "/api/seek", .method = HTTP_POST, .handler = seek_post},

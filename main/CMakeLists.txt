@@ -16,4 +16,5 @@ idf_component_register(
         log_stream
         net_wifi
         web_ui
+        sysmon
 )

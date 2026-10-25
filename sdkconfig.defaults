@@ -16,8 +16,17 @@ CONFIG_ESP_CONSOLE_USB_CDC=y
 CONFIG_FREERTOS_HZ=1000
 CONFIG_FREERTOS_CHECK_STACKOVERFLOW_CANARY=y
 CONFIG_COMPILER_STACK_CHECK_MODE_NORM=y
+# Watchdogs reset the chip (the default only prints). The task watchdog watches the idle task
+# and the radio and qn_slave tasks; a hang there (e.g. ESP-IDF 5.4.0's I2C master spinning on a
+# busy bus after a NACK) otherwise leaves the tuner on its last station with Wi-Fi gone. The
+# panic stores a core dump; sysmon resumes the station after the reset.
 CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_PANIC=y
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=5
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
+CONFIG_ESP_INT_WDT=y
+CONFIG_ESP_INT_WDT_TIMEOUT_MS=300
+CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT=y
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
@@ -31,6 +40,9 @@ CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2=y
 # The fitted TEF6686 module has a 9.216 MHz crystal (verified on air: stereo
 # pilot and RDS lock only with this setting).
 CONFIG_BRIDGE_TEF_REFCLK_9M216=y
+# The car build: the ESP answers the head unit as its QN8035. Kconfig then drops memory channels
+# and CPU DFS (they conflict with the slave's timing); the web UI works as before.
+CONFIG_BRIDGE_QN_EMU_ENABLE=y
 
 # --- Web UI ---
 CONFIG_HTTPD_WS_SUPPORT=y

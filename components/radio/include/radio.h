@@ -39,8 +39,8 @@ typedef struct {
     /** Time since the tuning, 0.1 ms (UM V102 §4.1): 1..320, then 1000 beyond 32 ms. After a
      * tune the radio samples quickly until it passes 32 ms, then every 100 ms. */
     uint16_t age;
-    /** FM, settled sample within the seek level, USN and WAM limits (tuning table; the offset
-     * limit is not judged on one sample). */
+    /** FM, settled sample within the seek limits: level, USN, WAM and frequency offset (tuning
+     * table; one sample's offset, our seek averages several). */
     bool station;
     int16_t level;
     uint16_t usn;        /**< FM ultrasonic noise; AM: noise */
@@ -60,8 +60,9 @@ typedef struct {
 /** What an AF try ended with (radio_af_event_t). */
 typedef enum {
     RADIO_AF_EV_SWITCHED = 0, /**< PI confirmed: to_khz plays now */
-    RADIO_AF_EV_OTHER_PI,     /**< to_khz carries another programme (pi) */
+    RADIO_AF_EV_OTHER_PI,     /**< to_khz carries another programme (pi); after a jump: back */
     RADIO_AF_EV_NO_PI,        /**< no PI from to_khz within the PI check timeout */
+    RADIO_AF_EV_JUMPED,       /**< to_khz plays now, no muted PI check: it is trusted (af.h) */
 } radio_af_ev_type_t;
 
 /** One AF try, for the web UI. */
@@ -70,7 +71,7 @@ typedef struct {
     uint8_t type;      /**< radio_af_ev_type_t */
     uint32_t from_khz; /**< the tuned station */
     uint32_t to_khz;   /**< the candidate */
-    int16_t score;     /**< the candidate's measured score, 0.1 dB */
+    int16_t score;     /**< the candidate's average score, 0.1 dB */
     int16_t cur;       /**< the tuned station's smoothed score at the try, 0.1 dB */
     uint16_t pi;       /**< heard on the candidate (OTHER_PI) */
     uint32_t ban_s;    /**< skip time given (OTHER_PI, NO_PI) */
@@ -83,7 +84,10 @@ typedef struct {
     bool active;        /**< enabled, FM and the PI is known: AFs are followed */
     bool poor;          /**< smoothed score below the trigger: AFs are being measured */
     bool checking_pi;   /**< sitting (muted) on a candidate until its PI answers */
+    bool probation;     /**< jumped to a trusted AF: another PI there sends the tuner back */
     int16_t score;      /**< smoothed score of the tuned station, 0.1 dB, AF_SCORE_NONE if none */
+    int16_t need;       /**< af_threshold: what a candidate's measurements must reach */
+    uint32_t dwell_ms;  /**< until switching is allowed again */
     /** Since the station was tuned (a tune, seek or PI change resets them and the tries below;
      * an AF switch does not). */
     uint32_t switches;
@@ -107,7 +111,7 @@ typedef struct {
     bool seeking;
     bool mute;
     int16_t volume;      /**< 0.1 dB */
-    bool bw_auto;
+    bool bw_auto;        /**< FM: the tuning values TUNING_BW_MODE/FIXED; AM: always false */
     uint16_t bw;         /**< 0.1 kHz, used when !bw_auto */
     bool force_mono;     /**< radio_set_force_mono() */
     bool clock_set;      /**< the system clock was set from RDS clock time */
@@ -158,7 +162,7 @@ typedef struct {
     uint32_t khz;    /**< FM is rounded to the TEF's 10 kHz */
     int16_t volume;  /**< 0.1 dB, -599..240 */
     bool mute;
-    bool bw_auto;    /**< FM only */
+    bool bw_auto;    /**< FM only. FM reports the tuning's bandwidth; radio_start ignores it */
     uint16_t bw;     /**< 0.1 kHz, used when !bw_auto */
 } radio_settings_t;
 
@@ -193,7 +197,8 @@ esp_err_t radio_seek(int dir);                 /**< +1/-1 with wrap-around, 0 st
 esp_err_t radio_scan(uint32_t start_khz, uint32_t stop_khz, uint32_t step_khz);
 esp_err_t radio_set_volume(int16_t volume);    /**< 0.1 dB, -599..240 */
 esp_err_t radio_set_mute(bool mute);
-esp_err_t radio_set_bandwidth(bool automatic, uint16_t bw); /**< 0.1 kHz */
+/** 0.1 kHz. FM: sets the tuning values TUNING_BW_MODE/FIXED (kept by a tuning save). */
+esp_err_t radio_set_bandwidth(bool automatic, uint16_t bw);
 esp_err_t radio_set_deemphasis(uint16_t timeconstant);      /**< 500 or 750 */
 /** Mono regardless of the stereo blend settings (overrides the Stereo_Min mode). */
 esp_err_t radio_set_force_mono(bool on);

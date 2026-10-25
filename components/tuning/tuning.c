@@ -4,6 +4,7 @@
 
 /* FM-module command numbers (UM V102 Rev 1.9 §3). */
 #define FM_SET_TUNE_OPTIONS      2
+#define FM_SET_BANDWIDTH         10
 #define FM_SET_RFAGC             11
 #define FM_SET_MPH_SUPPRESSION   20
 #define FM_SET_CHANNEL_EQUALIZER 22
@@ -83,10 +84,22 @@ const tuning_param_t tuning_params[TUNING_COUNT] = {
                            0, 1, 1),
     [TUNING_NB_SENS] = ROW("nb_sens", G_RX, "Noise blanker sensitivity", "%", NULL,
                            FM_SET_NOISE_BLANKER, 1, 10, 500, 1500, 1000),
-    [TUNING_BW_SENS] = ROW("bw_sens", G_RX, "Auto bandwidth: control sensitivity", "%", NULL,
-                           TUNING_HOST, 0, 10, 500, 1500, 1000),
-    [TUNING_BW_LOW_SENS] = ROW("bw_low", G_RX, "Auto bandwidth: low level sensitivity", "%",
-                               NULL, TUNING_HOST, 0, 10, 500, 1500, 1000),
+    /* Set_Bandwidth (§3.3). Words 5..7 are the extended API (p2.13..p2.17); the chip rounds to
+     * its 16 FM filters (56/64/72/84/97/114/133/151/168/184/200/217/236/254/287/311 kHz). */
+    [TUNING_BW_MODE] = ROW("bw_auto", G_RX, "IF bandwidth", NULL, "0=fixed,1=automatic",
+                           FM_SET_BANDWIDTH, 0, 1, 0, 1, 1),
+    [TUNING_BW_FIXED] = ROW("bw_fix", G_RX, "Fixed bandwidth", "kHz", NULL, FM_SET_BANDWIDTH, 1,
+                            10, 560, 3110, 2360),
+    [TUNING_BW_SENS] = ROW("bw_sens", G_RX, "Auto bandwidth: adjacent channel sensitivity", "%",
+                           NULL, FM_SET_BANDWIDTH, 2, 10, 500, 1500, 1000),
+    [TUNING_BW_LOW_SENS] = ROW("bw_low", G_RX, "Auto bandwidth: same, at low level", "%", NULL,
+                               FM_SET_BANDWIDTH, 3, 10, 500, 1500, 1000),
+    [TUNING_BW_MIN] = ROW("bw_min", G_RX, "Narrowest bandwidth (fixed too)", "kHz", NULL,
+                          FM_SET_BANDWIDTH, 4, 10, 560, 1140, 560),
+    [TUNING_BW_NOMINAL] = ROW("bw_nom", G_RX, "Auto bandwidth: undisturbed", "kHz", NULL,
+                              FM_SET_BANDWIDTH, 5, 10, 1510, 2360, 2360),
+    [TUNING_BW_ATTACK] = ROW("bw_att", G_RX, "Auto bandwidth: attack", "µs", NULL,
+                             FM_SET_BANDWIDTH, 6, 1, 150, 450, 300),
     [TUNING_AGC_START] = ROW("agc", G_RX, "RF AGC start", "dBµV", NULL, FM_SET_RFAGC, 0, 10, 840,
                              920, 920),
     [TUNING_AGC_EXT] = {.key = "agc_ext", .group = G_RX, .label = "RF AGC extension",
@@ -136,14 +149,15 @@ const tuning_param_t tuning_params[TUNING_COUNT] = {
                           FM_SET_STHIBLEND_MAX, 1, 1, 2700, 7000, 4000),
 
     /* AF thresholds are scores (af.h): level minus USN minus WAM, 0.1 dB. The trigger and
-     * margin start from PE5PVB/TEF6686_ESP32 (score difference 70). */
+     * margin start from PE5PVB/TEF6686_ESP32 (score difference 70). AF_Update measurements of the
+     * candidates read lower than the tuned station's quality, so switching errs towards staying. */
     [TUNING_AF_ON] = ROW("af", G_AF, "AF following", NULL, ONOFF, TUNING_HOST, 0, 1, 0, 1, 1),
     [TUNING_AF_REG] = ROW("af_reg", G_AF, "REG (regional variants are other programmes)", NULL,
                           ONOFF, TUNING_HOST, 0, 1, 0, 1, 1),
     [TUNING_AF_TRIGGER] = ROW("af_trig", G_AF, "Check AFs below score", "dB", NULL, TUNING_HOST,
                               0, 10, -200, 800, 300),
-    [TUNING_AF_MARGIN] = ROW("af_margin", G_AF, "Switch margin", "dB", NULL, TUNING_HOST, 0, 10,
-                             0, 300, 70),
+    [TUNING_AF_MARGIN] = ROW("af_margin", G_AF, "Switch margin (3 measurements in a row)", "dB",
+                             NULL, TUNING_HOST, 0, 10, 0, 300, 70),
     [TUNING_AF_INTERVAL] = ROW("af_int", G_AF, "Check interval", "ms", NULL, TUNING_HOST, 0, 1,
                                100, 10000, 500),
     [TUNING_AF_PI_MS] = ROW("af_pi", G_AF, "PI check timeout", "ms", NULL, TUNING_HOST, 0, 1,
@@ -151,8 +165,11 @@ const tuning_param_t tuning_params[TUNING_COUNT] = {
     /* Each PI check mutes the audio: a candidate that is itself weak rarely answers in time. */
     [TUNING_AF_MIN] = ROW("af_min", G_AF, "Minimum candidate score", "dB", NULL, TUNING_HOST, 0,
                           10, -200, 800, 200),
-    [TUNING_AF_BAN] = ROW("af_ban", G_AF, "Skip after a failed PI check (doubles each time)",
-                          "s", NULL, TUNING_HOST, 0, 1, 10, 1800, 60),
+    /* A frequency that failed once fails again from the same place, and every try mutes. */
+    [TUNING_AF_BAN] = ROW("af_ban", G_AF, "Skip after a failed PI check (doubles; another PI 4x)",
+                          "s", NULL, TUNING_HOST, 0, 1, 10, 3600, 300),
+    [TUNING_AF_DWELL] = ROW("af_dwell", G_AF, "Stay after a switch (doubles if repeated soon)",
+                            "s", NULL, TUNING_HOST, 0, 1, 0, 300, 15),
     [TUNING_AFU_BW_MODE] = ROW("afu_bw_auto", G_AF, "AF_Update bandwidth", NULL,
                                "0=fixed,1=automatic", FM_SET_TUNE_OPTIONS, 0, 1, 0, 1, 0),
     [TUNING_AFU_BW] = ROW("afu_bw", G_AF, "AF_Update fixed bandwidth", "kHz", NULL,

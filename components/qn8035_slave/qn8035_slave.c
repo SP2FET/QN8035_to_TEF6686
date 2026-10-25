@@ -15,6 +15,9 @@
 #include "hal/i2c_ll.h"
 #include "sdkconfig.h"
 #include "soc/soc_caps.h"
+#if CONFIG_ESP_TASK_WDT_EN
+#include "esp_task_wdt.h"
+#endif
 
 #if !CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2
 #error "qn8035_slave needs CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2=y (see sdkconfig.defaults)"
@@ -32,6 +35,11 @@ static const char *TAG = "qn8035";
 #define SLAVE_TASK_PRIO (configMAX_PRIORITIES - 2)
 #define TRACE_TASK_PRIO 2
 #define TX_PRELOAD      SOC_I2C_FIFO_LEN
+/* I2C input filter in APB cycles: 15 = 187.5 ns at 80 MHz, the S2 maximum. The v2 slave driver
+ * never sets it (only the master driver does); the head unit's shortest SCL phase is 1.4 us. */
+#define GLITCH_FILTER_CYCLES 15
+/* The slave task waits at most this long, so the task watchdog can watch it. */
+#define WDT_FEED_MS 1000
 
 typedef enum {
     MSG_WRITE,
@@ -192,8 +200,18 @@ static void slave_task(void *arg)
     (void)arg;
     bus_msg_t m;
 
+#if CONFIG_ESP_TASK_WDT_EN
+    if (esp_task_wdt_add(NULL) != ESP_OK) {
+        ESP_LOGW(TAG, "task watchdog: not watched");
+    }
+#endif
     for (;;) {
-        xQueueReceive(s.msgs, &m, portMAX_DELAY);
+#if CONFIG_ESP_TASK_WDT_EN
+        esp_task_wdt_reset();
+#endif
+        if (xQueueReceive(s.msgs, &m, pdMS_TO_TICKS(WDT_FEED_MS)) != pdTRUE) {
+            continue;
+        }
         xSemaphoreTake(s.lock, portMAX_DELAY);
         s.stats.reads += m.rlen;
         s.stats.writes += m.wlen ? 1u : 0u;
@@ -248,7 +266,11 @@ esp_err_t qn8035_slave_start(const qn8035_slave_config_t *cfg, qn8035_slave_even
     ESP_RETURN_ON_FALSE(cfg->i2c_port >= 0 && cfg->i2c_port < SOC_I2C_NUM, ESP_ERR_INVALID_ARG, TAG,
                         "i2c port");
 
-    qn8035_emu_init(&s.emu);
+    if (cfg->restore) {
+        s.emu = *cfg->restore;
+    } else {
+        qn8035_emu_init(&s.emu);
+    }
     s.cb = cb;
     s.cb_ctx = ctx;
     s.trace = cfg->trace;
@@ -281,7 +303,9 @@ esp_err_t qn8035_slave_start(const qn8035_slave_config_t *cfg, qn8035_slave_even
         .receive_buf_depth = 64,
         .slave_addr = cfg->address,
         .addr_bit_len = I2C_ADDR_BIT_LEN_7,
-        /* The head unit's bus already has pull-ups. */
+        /* The head unit's bus has its own pull-ups. The internal ones (~45 kOhm) add a little to
+         * them against the capacitance of the leads to the ESP. */
+        .flags.enable_internal_pullup = true,
     };
     s.hw = I2C_LL_GET_HW(cfg->i2c_port);
     ESP_RETURN_ON_ERROR(i2c_new_slave_device(&sc, &s.dev), TAG, "slave device");
@@ -293,6 +317,7 @@ esp_err_t qn8035_slave_start(const qn8035_slave_config_t *cfg, qn8035_slave_even
     /* The v2 driver always enables stretching and has no option against it. */
     portENTER_CRITICAL(&s.mux);
     i2c_ll_slave_enable_scl_stretch(s.hw, false);
+    i2c_ll_master_set_filter(s.hw, GLITCH_FILTER_CYCLES); /* the controller's filter, slave mode too */
     i2c_ll_update(s.hw);
     fill_tx_locked();
     portEXIT_CRITICAL(&s.mux);
@@ -300,10 +325,23 @@ esp_err_t qn8035_slave_start(const qn8035_slave_config_t *cfg, qn8035_slave_even
     xSemaphoreTake(s.lock, portMAX_DELAY);
     s.stats.running = true;
     xSemaphoreGive(s.lock);
-    ESP_LOGI(TAG, "emulating QN8035 at 0x%02x on I2C%d (SDA %d, SCL %d, INT %d), no clock stretching%s",
+    ESP_LOGI(TAG, "emulating QN8035 at 0x%02x on I2C%d (SDA %d, SCL %d, INT %d), "
+             "no clock stretching, %d ns input filter%s%s",
              cfg->address, cfg->i2c_port, cfg->sda_gpio, cfg->scl_gpio, cfg->int_gpio,
-             cfg->trace ? ", tracing" : "");
+             GLITCH_FILTER_CYCLES * 25 / 2, cfg->trace ? ", tracing" : "",
+             cfg->restore ? ", registers restored" : "");
     return ESP_OK;
+}
+
+bool qn8035_slave_snapshot(qn8035_emu_t *out)
+{
+    if (!s.stats.running) {
+        return false;
+    }
+    portENTER_CRITICAL(&s.mux);
+    *out = s.emu;
+    portEXIT_CRITICAL(&s.mux);
+    return true;
 }
 
 void qn8035_slave_complete_tune(uint32_t khz, bool found, bool by_scan)

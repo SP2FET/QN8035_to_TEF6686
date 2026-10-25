@@ -22,6 +22,7 @@
 #include "radio.h"
 #include "radio_mem.h"
 #include "sdkconfig.h"
+#include "sysmon.h"
 #include "tef6686.h"
 #include "tuning_store.h"
 #include "web_ui.h"
@@ -165,8 +166,10 @@ void app_main(void)
     ESP_ERROR_CHECK(log_stream_init(CONFIG_BRIDGE_LOG_RING_SIZE));
 
     const esp_app_desc_t *app = esp_app_get_description();
-    ESP_LOGI(TAG, "%s %s (ESP-IDF %s), reset reason %d", app->project_name, app->version,
-             app->idf_ver, (int)esp_reset_reason());
+    ESP_LOGI(TAG, "%s %s (ESP-IDF %s)", app->project_name, app->version, app->idf_ver);
+    /* Before anything starts: after a watchdog or panic reset, resume the state from before. */
+    ESP_ERROR_CHECK(sysmon_init());
+    const sysmon_state_t *warm = sysmon_warm_state();
 
     ESP_ERROR_CHECK(init_power());
     ESP_ERROR_CHECK(init_nvs());
@@ -211,6 +214,9 @@ void app_main(void)
     /* Not fatal: without it the radio starts from the defaults and the web UI hides memory. */
     const bool memory = radio_mem_init(&radio_cfg.initial) == ESP_OK;
 #endif
+    if (warm && warm->radio_valid && radio_settings_valid(&warm->radio)) {
+        radio_cfg.initial = warm->radio; /* what played before the reset */
+    }
     ESP_ERROR_CHECK(radio_start(&radio_cfg));
 #if CONFIG_BRIDGE_MEMORY
     if (memory && radio_mem_start() != ESP_OK) {
@@ -227,11 +233,15 @@ void app_main(void)
         .int_gpio = CONFIG_BRIDGE_QN_INT_GPIO,
         .address = QN8035_I2C_ADDR,
         .trace = QN_TRACE,
+        .restore = warm && warm->qn_valid ? &warm->qn : NULL,
     };
     ESP_ERROR_CHECK(qn_bridge_start(&qn_cfg));
 #else
     ESP_LOGI(TAG, "QN8035 emulation disabled (menuconfig: QN8035 emulation)");
 #endif
+
+    /* Snapshots for the next warm restart from here on, before Wi-Fi (its start takes a while). */
+    ESP_ERROR_CHECK(sysmon_start());
 
 #if CONFIG_BRIDGE_WIFI_ENABLE
     const net_wifi_config_t wifi_cfg = {

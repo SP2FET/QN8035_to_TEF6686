@@ -22,7 +22,7 @@ extern "C" {
 #endif
 
 #define TUNING_HOST      0 /**< cmd of a value used by the radio service, not sent to the TEF */
-#define TUNING_MAX_WORDS 4 /**< longest parameter list of a tuning command */
+#define TUNING_MAX_WORDS 7 /**< longest parameter list of a tuning command (Set_Bandwidth) */
 #define TUNING_KEY_MAX   15 /**< NVS key length limit */
 
 typedef enum {
@@ -31,8 +31,9 @@ typedef enum {
     TUNING_EQ,          /**< Set_ChannelEqualizer (22) */
     TUNING_NB_MODE,     /**< Set_NoiseBlanker (23) */
     TUNING_NB_SENS,
-    TUNING_BW_SENS,     /**< host: Set_Bandwidth (10) control_sensitivity */
-    TUNING_BW_LOW_SENS, /**< host: Set_Bandwidth (10) low_level_sensitivity */
+    /** Set_Bandwidth (10), the extended API included: the FM bandwidth is saved with the tuning */
+    TUNING_BW_MODE, TUNING_BW_FIXED, TUNING_BW_SENS, TUNING_BW_LOW_SENS,
+    TUNING_BW_MIN, TUNING_BW_NOMINAL, TUNING_BW_ATTACK,
     TUNING_AGC_START,   /**< Set_RFAGC (11) */
     TUNING_AGC_EXT,     /**< hidden, 0: no external AGC step */
     /** Soft mute: Set_Softmute_Time/Level/Noise/Mph/Max (40, 42..45) */
@@ -70,6 +71,7 @@ typedef enum {
     TUNING_AF_PI_MS,
     TUNING_AF_MIN,
     TUNING_AF_BAN,
+    TUNING_AF_DWELL,
     TUNING_AFU_BW_MODE, TUNING_AFU_BW, TUNING_AFU_MUTE, TUNING_AFU_SAMPLE,
     /** Seek stop criteria (host) */
     TUNING_SEEK_LEVEL,

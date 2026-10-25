@@ -89,6 +89,7 @@ dt{color:var(--dim)}dd{margin:0;word-break:break-word}
 .aft tr:last-child td{border-bottom:0}
 .aft tr.ban{opacity:.55}
 .aft .badge{font-size:.75rem;padding:1px 8px}
+.aft .badge+.badge{margin-left:4px}
 details{border:1px solid var(--bd);border-radius:6px;margin:8px 0;padding:0 10px}
 summary{min-height:44px;display:flex;align-items:center;cursor:pointer;font-weight:600;list-style:none}
 summary::-webkit-details-marker{display:none}
@@ -128,6 +129,15 @@ nav button{flex:1 1 0;display:flex;align-items:center;justify-content:center;gap
 .afe:first-child{border-top:0}
 .afe .badge{font-size:.75rem;padding:1px 8px}
 #p-tuning main{grid-template-columns:1fr}
+.qs{padding:12px 0;border-top:1px solid var(--bd)}
+.qs:first-child{border-top:0;padding-top:0}
+.qs h3{margin:0 0 2px;font-size:1rem}
+.qs p{margin:0 0 8px;font-size:.85rem;color:var(--dim)}
+.qopt{display:grid;grid-template-columns:repeat(auto-fit,minmax(6.5em,1fr));gap:6px}
+.qopt button{min-height:52px;padding:4px 8px;line-height:1.2}
+.qopt small{display:block;font-size:.75rem;color:var(--dim)}
+.qopt button.sel small{color:inherit}
+.qcust{margin-top:6px;font-size:.8rem;color:var(--wa)}
 @media(min-width:900px){#tbody{columns:2;column-gap:10px}#tbody details{break-inside:avoid}}
 </style>
 </head>
@@ -207,10 +217,12 @@ nav button{flex:1 1 0;display:flex;align-items:center;justify-content:center;gap
 </section>
 
 <section class="a-af" aria-labelledby="h-af">
-<div class="hd"><h2 id="h-af">AF</h2><span class="meta" id="afh"><span class="badge" id="afa">AF</span><span class="badge warn" id="afc">CHECKING</span><span class="badge warn" id="afp">PI CHECK</span></span></div>
+<div class="hd"><h2 id="h-af">AF</h2><span class="meta" id="afh"><span class="badge" id="afa">AF</span><span class="badge warn" id="afc">CHECKING</span><span class="badge warn" id="afp">PI CHECK</span><span class="badge warn" id="afj">PI WATCH</span></span></div>
 <div id="afb">
 <div class="stats">
 <div class="stat"><small>Score</small><b id="afs">—</b></div>
+<div class="stat"><small>AF needs</small><b id="afn">—</b></div>
+<div class="stat"><small>Dwell</small><b id="afd">—</b></div>
 <div class="stat"><small>Switches</small><b id="afw">—</b></div>
 <div class="stat"><small>PI fails</small><b id="afpf">—</b></div>
 </div>
@@ -233,6 +245,8 @@ nav button{flex:1 1 0;display:flex;align-items:center;justify-content:center;gap
 <dt>Firmware</dt><dd id="fwv">—</dd>
 <dt>Slot</dt><dd id="fws">—</dd>
 <dt>Clock</dt><dd id="clk">—</dd>
+<dt>Last reset</dt><dd id="sreset">—</dd>
+<dt>Crash dump</dt><dd id="sdump">—</dd>
 </dl>
 <div class="actions">
 <div class="row"><button id="reinit">Re-init</button></div>
@@ -252,7 +266,7 @@ nav button{flex:1 1 0;display:flex;align-items:center;justify-content:center;gap
 <div class="la">
 <b id="vfreq">—</b><span class="badge" id="vst">ST</span><span class="badge warn" id="vmo">MONO</span>
 <span>Level <span id="vlvl">—</span></span><span>USN <span id="vusn">—</span></span><span>WAM <span id="vwam">—</span></span>
-<span>AF <span id="vaf">—</span></span>
+<span>BW <span id="vbw">—</span></span><span>AF <span id="vaf">—</span></span>
 </div>
 <div class="lb">
 <div class="ls"><small>Soft mute</small><span id="vsm">—</span><div class="bar"><i id="vsmb"></i></div></div>
@@ -262,6 +276,13 @@ nav button{flex:1 1 0;display:flex;align-items:center;justify-content:center;gap
 </div>
 </div>
 <main>
+<section class="wide" aria-labelledby="h-q">
+<div class="hd"><h2 id="h-q">Weak signal</h2></div>
+<p class="help">Quick settings for poor reception. A tap applies at once: listen, and watch USN (noise) and WAM (reflections) in the bar above, lower is better. Save keeps the settings after power-off.</p>
+<div id="qbody"><div class="hs">Loading…</div></div>
+<div class="row" style="margin-top:12px"><button id="qsave" class="pri">Save</button><span class="badge" id="qsv">—</span></div>
+</section>
+
 <section class="wide" aria-labelledby="h-hi">
 <div class="hd"><h2 id="h-hi">Signal history</h2><span class="meta"><button id="hbtn" aria-pressed="false">History</button></span></div>
 <div id="hbody" hidden></div>
@@ -399,7 +420,7 @@ function render(s){
   [['vsm','softmute'],['vhc','highcut'],['vsb','stereo'],['vhb','sthiblend']].forEach(([i,k])=>{
     const v=am||!dd?null:dd[k];txt(i,num(v,1,' %'));$(i+'b').style.width=pct(v,100);
   });
-  txt('vaf',am||!s.af?null:num(s.af.score,1,' dB'));
+  txt('vaf',am||!s.af?null:num(s.af.score,1,' dB'));txt('vbw',num(q.bw,0,' kHz'));
   renderAf(s.af||{},am);
   histPush(s,q,dd,am);
   on('rsync',rds.sync);txt('pi',rds.pi);on('rtp',rds.tp);on('rta',rds.ta);
@@ -415,6 +436,7 @@ function render(s){
   const fw=s.fw;
   txt('fwv',fw?fw.version+', built '+fw.built+', IDF '+fw.idf:null);
   txt('fws',fw?fw.partition+', '+(fw.ota_state==='pending'?'on probation (confirms 30 s after boot)':fw.ota_state):null);
+  renderSys(s.sys);
   $('fwp').hidden=!(fw&&fw.ota_password);
   const m=s.mem,me=!!(m&&m.enabled);
   $('msec').hidden=!me;
@@ -425,13 +447,26 @@ function render(s){
     if(k!==memKey){memKey=k;renderMem(false)}
   }
 }
+function renderSys(y){
+  const r=$('sreset'),d=$('sdump');
+  txt('sreset',y?y.reset+(y.warm?', resumed':'')+(y.crashes?' · '+y.crashes+' since power-on':''):null);
+  r.classList.toggle('err',!!(y&&y.unexpected));
+  d.textContent=!y?'—':y.dump?'':'none';
+  if(!y||!y.dump)return;
+  const c=y.dump,a=document.createElement('a');
+  d.append('task '+c.task+', PC '+c.pc+(c.bt.length?', backtrace '+c.bt.join(' '):'')+(c.corrupted?' (corrupted)':'')+', build '+c.elf+' · ');
+  a.href='/api/coredump';a.download='coredump.bin';a.textContent='download';d.appendChild(a);
+}
+const fmtDur=n=>n<120?n+' s':Math.round(n/60)+' min';
 function renderAf(a,am){
   $('afb').hidden=am;$('afm').hidden=!am;$('afh').hidden=am;
   if(am)return;
   renderAfEv(a.events||[]);
-  on('afa',a.active);on('afc',a.poor);on('afp',a.checking_pi);
-  $('afs').textContent=num(a.score,1,' dB');$('afw').textContent=a.switches||0;$('afpf').textContent=a.pi_fails||0;
-  const t=$('aft'),l=a.list||[];
+  on('afa',a.active);on('afc',a.poor);on('afp',a.checking_pi);on('afj',a.probation);
+  $('afs').textContent=num(a.score,1,' dB');$('afn').textContent=num(a.need,1,' dB');
+  $('afd').textContent=a.dwell_s?fmtDur(a.dwell_s):'—';
+  $('afw').textContent=a.switches||0;$('afpf').textContent=a.pi_fails||0;
+  const t=$('aft'),l=a.list||[],cf=a.confirm||3;
   t.textContent='';
   if(!l.length){
     const p=document.createElement('div');p.className='hs';p.textContent='No AF list yet (needs RDS group 0A)';
@@ -443,15 +478,16 @@ function renderAf(a,am){
     tb.appendChild(r);return r;
   };
   tb.className='aft';
-  row('th',['MHz','Score','Level','Age','']);
-  for(const e of l){
-    const r=row('td',[(e.khz/1000).toFixed(2),num(e.score,1),num(e.level,1),typeof e.age_s==='number'?e.age_s+' s':'—','']);
-    if(e.banned){
-      r.className='ban';
-      const b=document.createElement('span');b.className='badge er on';b.textContent='banned';
-      r.lastChild.appendChild(b);
-    }
-  }
+  row('th',['MHz','Avg','Last','Level','Age','']);
+  // Avg and Last are AF_Update scores; they read lower than the tuned station's Score
+  const add=e=>{
+    const r=row('td',[(e.khz/1000).toFixed(2),num(e.score,1),num(e.last,1),num(e.level,1),typeof e.age_s==='number'?e.age_s+' s':'—','']);
+    const bd=(c,x)=>{const b=document.createElement('span');b.className='badge'+(c?' '+c:'');b.textContent=x;r.lastChild.appendChild(b)};
+    if(e.trusted)bd('','trusted');
+    if(e.streak)bd('warn on',Math.min(e.streak,cf)+'/'+cf);
+    if(e.banned){r.className='ban';bd('er on','banned '+fmtDur(e.ban_s))}
+  };
+  for(const e of l)add(e);
   t.appendChild(tb);
 }
 const PTY=['None','News','Current affairs','Information','Sport','Education','Drama','Culture','Science','Varied','Pop music','Rock music','Easy listening','Light classical','Serious classical','Other music','Weather','Finance',"Children's programmes",'Social affairs','Religion','Phone-in','Travel','Leisure','Jazz music','Country music','National music','Oldies music','Folk music','Documentary','Alarm test','Alarm'];
@@ -466,12 +502,12 @@ function renderAfEv(l){
   if(!l.length){const p=document.createElement('div');p.className='hs';p.textContent='No AF tries yet';t.appendChild(p);return}
   const mk=(c,x)=>{const e=document.createElement('span');if(c)e.className=c;e.textContent=x;return e};
   for(const e of l){
-    const r=document.createElement('div'),ok=e.type==='switched';
+    const r=document.createElement('div'),ok=e.type==='switched'||e.type==='jumped';
     r.className='afe';
     r.append(mk('hs',fmtAge(e.age_s)),mk(null,(e.from/1000).toFixed(2)+' → '+(e.to/1000).toFixed(2)+' MHz'),
-      mk(ok?'badge on':e.type==='other_pi'?'badge er on':'badge warn on',ok?'switched':e.type==='other_pi'?'PI '+(e.pi||'?'):'no PI'),
+      mk(ok?'badge on':e.type==='other_pi'?'badge er on':'badge warn on',ok?e.type:e.type==='other_pi'?'PI '+(e.pi||'?'):'no PI'),
       mk('hs','score '+num(e.score,1)+' vs '+num(e.cur,1)+' dB'));
-    if(!ok&&e.ban_s)r.appendChild(mk('hs','skip '+e.ban_s+' s'));
+    if(!ok&&e.ban_s)r.appendChild(mk('hs','skip '+fmtDur(e.ban_s)));
     t.appendChild(r);
   }
 }
@@ -534,7 +570,8 @@ $('kd').onclick=()=>cmd('seek',{dir:'down'});
 $('ku').onclick=()=>cmd('seek',{dir:'up'});
 $('ks').onclick=()=>cmd('seek',{dir:'stop'});
 $('mute').onclick=()=>cmd('mute',{on:st&&st.mute?0:1});
-$('bw').onchange=e=>{cmd('bandwidth',{khz:e.target.value});e.target.blur()};
+// FM: the bandwidth is a reception tuning value, so the Tuning tab has to follow
+$('bw').onchange=e=>{cmd('bandwidth',{khz:e.target.value}).then(()=>{if(tun)loadTun()});e.target.blur()};
 const sendVol=()=>cmd('volume',{db:$('vol').value});
 $('vol').oninput=()=>{
   volDrag=true;txt('volv',(+$('vol').value).toFixed(1)+' dB');
@@ -550,19 +587,71 @@ $('reinit').onclick=()=>{
 
 // ---- Reception tuning (/api/tuning*) ----
 const HELP={
-'Reception':'Multipath suppression (iMS) and the channel equalizer fight reflections (WAM). The noise blanker removes ignition clicks. Auto bandwidth narrows the IF filter next to strong neighbours. Lower the RF AGC start if strong local stations overload the input.',
+'Reception':'Multipath suppression (iMS) and the channel equalizer fight reflections (WAM). The noise blanker removes ignition clicks. IF bandwidth: automatic narrows the filter next to strong neighbours, fixed holds it (narrower = less hiss, more distortion); the undisturbed and narrowest values bound the automatic one. Lower the RF AGC start if strong local stations overload the input.',
 'Soft mute':'Turns the volume down on weak, noisy or reflected signals. Each detector (level, USN noise, WAM multipath) has a start and a slope; the strongest wins, up to Maximum attenuation. Fast times act on short dropouts, slow times on trends.',
 'High cut':'Cuts treble on weak, noisy or reflected signals. The corner limits set how far it may cut.',
 'Stereo blend':'Blends stereo to mono as the signal degrades. Separation limit = forced mono switches stereo off.',
 'Stereo high blend':'Blends only the treble to mono and keeps stereo in the low range.',
-'AF':'Follows the programme to another transmitter from the RDS AF list. When the score (level − USN − WAM, in dB) falls below the trigger, one AF per interval is measured inaudibly (AF_Update). One that beats the score by the margin is tried muted until its PI answers (PI check timeout) and kept only if the PI matches. REG on: regional variants count as other programmes.',
+'AF':'Follows the programme to another transmitter from the RDS AF list. When the score (level − USN − WAM, in dB) falls below the trigger, one AF per interval is measured inaudibly (AF_Update). One that beats the score by the margin three times in a row is tried: a frequency that played the programme in the last 10 minutes at once, others muted until their PI answers (PI check timeout). After a switch the radio stays for the dwell time. A failed PI check skips the frequency for the ban time, doubled each time. REG on: regional variants count as other programmes.',
 'Seek':'A seek stops on the first channel that meets all four limits.'};
 let tun=null,tdTimer=0;
 const dec=p=>Math.round(Math.log10(p.div)),fv=(p,v)=>(v/p.div).toFixed(dec(p));
 const clampV=(p,v)=>Math.max(p.min,Math.min(p.max,Math.round(v)));
 function tstat(){
-  const d=tun.params.some(p=>p.v!==p.sv),e=$('tsv');
-  e.textContent=d?'Unsaved changes':'All saved';e.className='badge'+(d?' warn on':'');$('tdot').hidden=!d;
+  const d=tun.params.some(p=>p.v!==p.sv);
+  for(const e of [$('tsv'),$('qsv')]){e.textContent=d?'Unsaved changes':'All saved';e.className='badge'+(d?' warn on':'')}
+  $('tdot').hidden=!d;qmark();
+}
+// ---- Weak signal: presets over tuning rows, [label, note, values in chip units]; null = keep ----
+const QS=[
+{t:'Filter width',k:['bw_auto','bw_fix','bw_nom'],
+ d:'Narrower lets in less noise, so weak stations hiss less, but loud music and strong neighbours may distort. Auto adapts by itself.',
+ o:[['Auto','236 kHz',[1,null,2360]],['Auto narrow','151 kHz',[1,null,1510]],['Narrow','114 kHz',[0,1140,null]],['Narrowest','84 kHz',[0,840,null]]]},
+{t:'Stereo',k:['st_min_on','st_lv_st','st_usn_st','st_wam_st'],
+ d:'Stereo needs a much stronger signal than mono. Mono sooner blends to mono earlier as the signal fades; Mono gives the least hiss.',
+ o:[['Stereo','normal',[0,460,240,240]],['Mono sooner','',[0,560,160,160]],['Mono','always',[2,null,null,null]]]},
+{t:'Treble cut',k:['hc_lv_st','hc_usn_st','hc_wam_st','hc_max'],
+ d:'Cuts the treble, where the hiss is, while the signal is weak or noisy. Stronger sounds duller but calmer.',
+ o:[['Normal','',[360,360,360,4000]],['Earlier','',[460,240,240,4000]],['Strong','',[560,160,160,2700]]]},
+{t:'Volume dip',k:['sm_lv_st','sm_max','sm_usn'],
+ d:'Turns the volume down while the signal is very bad instead of letting the noise through. More dips sooner, and on noise bursts too.',
+ o:[['Less','',[150,100,0]],['Normal','',[150,200,0]],['More','',[250,300,3]]]}];
+let qgs=[];
+function renderQs(){
+  const body=$('qbody'),by=new Map(tun.params.map(p=>[p.k,p]));
+  const mk=(t,c,x)=>{const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e};
+  body.textContent='';qgs=[];
+  for(const g of QS){
+    const ps=g.k.map(k=>by.get(k));
+    if(ps.some(p=>!p))continue; // an older firmware without these rows
+    const w=mk('div','qs'),row=mk('div','qopt'),cu=mk('div','qcust','Custom values (see Reception tuning below)'),bs=[];
+    for(const [l,n,vs] of g.o){
+      const b=mk('button',null,l);
+      if(n)b.appendChild(mk('small',null,n));
+      b.onclick=()=>qset(ps,vs);
+      bs.push([b,vs]);row.appendChild(b);
+    }
+    w.append(mk('h3',null,g.t),mk('p',null,g.d),row,cu);body.appendChild(w);
+    qgs.push({ps,bs,cu});
+  }
+  qmark();
+}
+function qmark(){ // highlight the option each group's current values match
+  for(const g of qgs){
+    let any=false;
+    for(const [b,vs] of g.bs){
+      const hit=vs.every((v,i)=>v===null||g.ps[i].v===v);
+      any=any||hit;b.classList.toggle('sel',hit);b.setAttribute('aria-pressed',hit);
+    }
+    g.cu.hidden=any;
+  }
+}
+async function qset(ps,vs){
+  for(let i=0;i<ps.length;i++){
+    if(vs[i]===null||ps[i].v===vs[i])continue;
+    ps[i].v=vs[i];tupd(ps[i]);
+    if(!await cmd('tuning',{k:ps[i].k,v:vs[i]}))return loadTun();
+  }
 }
 function tupd(p){ // refresh the controls of p (not the focused one), its reset button and group
   const a=document.activeElement,s=(e,v)=>{if(a!==e)e.value=v};
@@ -626,8 +715,9 @@ function renderTun(){
     r.appendChild(b);g.d.appendChild(r);
     tupd(p);
   }
+  renderQs();
 }
-$('tsave').onclick=async()=>{
+$('tsave').onclick=$('qsave').onclick=async()=>{
   if(!tun||!await cmd('tuning/save'))return;
   tun.params.forEach(p=>p.sv=p.v);tstat();
 };

@@ -9,7 +9,8 @@
  *   POST /api/seek?dir=up|down|stop
  *   POST /api/volume?db=X          (-60..24)
  *   POST /api/mute?on=0|1
- *   POST /api/bandwidth?khz=X      (0 = auto, FM only)
+ *   POST /api/bandwidth?khz=X      (0 = auto, FM only). FM: sets the tuning values bw_auto and
+ *                                  bw_fix, so a tuning save keeps it
  *   POST /api/reinit
  *
  * Reception tuning table. Values are in chip units; the display value is v / div:
@@ -24,18 +25,28 @@
  * /api/status additions:
  *   "q.dsp"       {"softmute","highcut","stereo","sthiblend"} in % of each control's range
  *                 (stereo 100 = mono); null on AM
- *   "af"          {"active","poor","checking_pi","score","switches","pi_fails",
- *                 "list":[{"khz","score","level","age_s","banned"}]}
- *                 score in dB = level - USN - WAM; null when unknown
- *   "af.events"   the last 10 AF tries, newest first: {"type":"switched"|"other_pi"|"no_pi",
- *                 "age_s","from","to","score","cur","pi","ban_s"} (kHz, dB). "pi" is the PI
- *                 heard on the candidate for other_pi, else null; "ban_s" the skip time given
+ *   "af"          {"active","poor","checking_pi","probation","score","need","dwell_s","confirm",
+ *                 "switches","pi_fails","list":[ENTRY]} (af.h). score: the tuned station's
+ *                 quality score; need: what a candidate's AF_Update measurements must reach,
+ *                 "confirm" times in a row; dwell_s: until switching is allowed again
+ *                 ENTRY {"khz","score","last","n","streak","level","age_s","banned","ban_s",
+ *                 "trusted"}: AF_Update average of n measurements and the last one, in dB =
+ *                 level - USN - WAM (null when unknown); trusted: switched to without a PI check
+ *   "af.events"   the last 10 AF tries, newest first: {"type":"switched"|"jumped"|"other_pi"|
+ *                 "no_pi","age_s","from","to","score","cur","pi","ban_s"} (kHz, dB). "cur" is
+ *                 the tuned station's score at the try, "pi" the PI heard on the candidate for
+ *                 other_pi, else null; "ban_s" the skip time given
  *   "rds.pty"     programme type 0..31 (RDS table); null until known
  *   "rds.tp","rds.ta"  traffic programme / traffic announcement flags
  *   "rds.ct"      {"unix": UTC seconds, "off_min": local offset} of the last error-free
  *                 clock-time group; null until one arrives
  *   "clock_set"   true once the system clock was set from RDS clock time
  *   "force_mono"  true while mono is forced (head unit FORCE_MO)
+ *   "sys"         {"reset","unexpected","warm","crashes","dump"} (sysmon.h): this boot's reset
+ *                 reason, whether it resumed the state from before, panic/watchdog/supply resets
+ *                 since power-on; dump null or {"task","elf","pc","bt":[hex],"corrupted"}
+ *   GET  /api/coredump   the stored core dump, raw (espcoredump.py info_corefile -t raw); 404 if
+ *                        none. A new crash overwrites it
  *
  * Memory channels (radio_mem; stand-alone build, else 503). N is the channel number 1..40:
  *   GET  /api/presets                  {"enabled","rev","max","slots":[{slot,band,khz,name}]}

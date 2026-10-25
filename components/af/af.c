@@ -12,6 +12,36 @@ static bool due(uint32_t now, uint32_t t)
     return (int32_t)(now - t) >= 0;
 }
 
+static void avg_add(af_avg_t *a, int16_t x, uint8_t span)
+{
+    if (a->n < span) {
+        a->n++;
+    }
+    a->v16 += ((int32_t)x * 16 - a->v16) / a->n;
+}
+
+static int16_t avg_get(const af_avg_t *a)
+{
+    return a->n ? (int16_t)(a->v16 / 16) : AF_SCORE_NONE;
+}
+
+static bool banned(const af_entry_t *e, uint32_t now_ms)
+{
+    return e->banned && !due(now_ms, e->banned_until_ms);
+}
+
+/* One round of checks plus three intervals: a candidate that is measured again first delays the
+ * others by up to AF_CONFIRM - 1 intervals. */
+static uint32_t fresh_ms(const af_state_t *s, const af_params_t *p)
+{
+    return (uint32_t)(s->n + 3u) * p->interval_ms;
+}
+
+static bool fresh(const af_entry_t *e, uint32_t limit_ms, uint32_t now_ms)
+{
+    return e->measured && (uint32_t)(now_ms - e->measured_ms) <= limit_ms;
+}
+
 static int find(const af_state_t *s, uint32_t khz)
 {
     for (unsigned i = 0; i < s->n; i++) {
@@ -22,12 +52,17 @@ static int find(const af_state_t *s, uint32_t khz)
     return -1;
 }
 
-static void add(af_state_t *s, uint32_t khz)
+static af_entry_t new_entry(uint32_t khz)
 {
-    if (khz == 0 || s->n >= AF_MAX || find(s, khz) >= 0) {
+    return (af_entry_t){.khz = khz, .score = AF_SCORE_NONE, .last = AF_SCORE_NONE};
+}
+
+static void add(af_state_t *s, const af_entry_t *e)
+{
+    if (e->khz == 0 || e->khz == s->tuned.khz || s->n >= AF_MAX || find(s, e->khz) >= 0) {
         return;
     }
-    s->e[s->n++] = (af_entry_t){.khz = khz, .score = AF_SCORE_NONE};
+    s->e[s->n++] = *e;
 }
 
 static void drop(af_state_t *s, unsigned i)
@@ -56,44 +91,47 @@ int16_t af_score(int16_t level, uint16_t usn, uint16_t wam, int16_t offset)
     return (int16_t)((int32_t)level - usn - wam);
 }
 
-void af_reset(af_state_t *s, uint32_t now_ms)
+void af_reset(af_state_t *s, uint32_t tuned_khz, uint32_t now_ms)
 {
     memset(s, 0, sizeof(*s));
+    s->tuned = new_entry(tuned_khz);
     s->hold_until_ms = now_ms + AF_HOLD_MS;
     s->next_check_ms = now_ms;
 }
 
-void af_sync(af_state_t *s, const uint8_t *codes, uint8_t n, uint32_t tuned_khz)
+void af_sync(af_state_t *s, const uint8_t *codes, uint8_t n)
 {
     for (unsigned i = 0; i < n; i++) {
-        const uint32_t khz = af_code_khz(codes[i]);
-        if (khz != tuned_khz) {
-            add(s, khz);
-        }
+        const af_entry_t e = new_entry(af_code_khz(codes[i]));
+        add(s, &e);
     }
 }
 
 void af_quality(af_state_t *s, int16_t score)
 {
-    if (score == AF_SCORE_NONE) {
-        return;
-    }
-    if (!s->have_avg) {
-        s->avg8 = (int32_t)score * 8;
-        s->have_avg = true;
-    } else {
-        s->avg8 += score - s->avg8 / 8; /* ~8 samples time constant */
+    if (score != AF_SCORE_NONE) {
+        avg_add(&s->cur, score, AF_CUR_N);
     }
 }
 
 int16_t af_current(const af_state_t *s)
 {
-    return s->have_avg ? (int16_t)(s->avg8 / 8) : AF_SCORE_NONE;
+    return avg_get(&s->cur);
 }
 
 bool af_poor(const af_state_t *s, const af_params_t *p)
 {
-    return s->have_avg && af_current(s) < p->trigger;
+    return s->cur.n > 0 && af_current(s) < p->trigger;
+}
+
+int16_t af_threshold(const af_state_t *s, const af_params_t *p)
+{
+    const int16_t cur = af_current(s);
+    if (cur == AF_SCORE_NONE) {
+        return AF_SCORE_NONE;
+    }
+    const int32_t need = (int32_t)cur + p->margin;
+    return (int16_t)(need > p->min_score ? need : p->min_score);
 }
 
 uint32_t af_next_check(af_state_t *s, const af_params_t *p, uint32_t now_ms)
@@ -104,53 +142,82 @@ uint32_t af_next_check(af_state_t *s, const af_params_t *p, uint32_t now_ms)
     }
     s->next_check_ms = now_ms + p->interval_ms;
     for (unsigned i = 0; i < s->n; i++) {
-        const unsigned k = (s->next + i) % s->n;
-        af_entry_t *e = &s->e[k];
-        if (e->banned) {
-            if (!due(now_ms, e->banned_until_ms)) {
-                continue;
-            }
+        af_entry_t *e = &s->e[i];
+        if (e->banned && due(now_ms, e->banned_until_ms)) {
             e->banned = false;
         }
-        s->next = (uint8_t)((k + 1) % s->n);
-        return e->khz;
+    }
+    const uint32_t limit = fresh_ms(s, p);
+    for (unsigned i = 0; i < s->n; i++) {
+        const af_entry_t *e = &s->e[i];
+        if (!e->banned && e->streak > 0 && e->streak < AF_CONFIRM && fresh(e, limit, now_ms)) {
+            return e->khz; /* would be tried: confirm it before the round goes on */
+        }
+    }
+    for (unsigned k = 0; k < s->n; k++) {
+        const unsigned i = (s->next + k) % s->n;
+        if (!s->e[i].banned) {
+            s->next = (uint8_t)((i + 1) % s->n);
+            return s->e[i].khz;
+        }
     }
     return 0; /* all banned */
 }
 
-void af_measured(af_state_t *s, uint32_t khz, int16_t score, int16_t level, uint32_t now_ms)
+void af_measured(af_state_t *s, const af_params_t *p, uint32_t khz, int16_t score, int16_t level,
+                 uint32_t now_ms)
 {
     const int i = find(s, khz);
     if (i < 0) {
         return;
     }
     af_entry_t *e = &s->e[i];
-    e->score = score;
+    /* Off frequency: maybe another station. Long unmeasured: the car has moved on. */
+    if (score == AF_SCORE_NONE ||
+        (e->measured && (uint32_t)(now_ms - e->measured_ms) > 2u * fresh_ms(s, p))) {
+        e->avg = (af_avg_t){0};
+        e->streak = 0;
+    }
+    const int16_t need = af_threshold(s, p);
+    if (score != AF_SCORE_NONE && need != AF_SCORE_NONE && score >= need) {
+        e->streak = e->streak < UINT8_MAX ? (uint8_t)(e->streak + 1) : UINT8_MAX;
+    } else {
+        e->streak = 0;
+    }
+    if (score != AF_SCORE_NONE) {
+        avg_add(&e->avg, score, AF_AVG_N);
+    }
+    e->score = avg_get(&e->avg);
+    e->last = score;
     e->level = level;
     e->measured_ms = now_ms;
     e->measured = true;
 }
 
-uint32_t af_pick(const af_state_t *s, const af_params_t *p, uint32_t now_ms)
+uint32_t af_dwell_left(const af_state_t *s, uint32_t now_ms)
 {
-    if (!p->enable || !s->have_avg) {
+    if (!s->switched) {
         return 0;
     }
-    const uint32_t fresh_ms = (uint32_t)(s->n + 1) * p->interval_ms;
-    /* candidates must reach both cur + margin and min_score */
-    int32_t best = (int32_t)af_current(s) + p->margin;
-    if (best < p->min_score) {
-        best = p->min_score;
+    const uint32_t end = s->switched_ms + s->dwell_ms;
+    return due(now_ms, end) ? 0 : end - now_ms;
+}
+
+uint32_t af_pick(const af_state_t *s, const af_params_t *p, uint32_t now_ms)
+{
+    if (!p->enable || s->cur.n == 0 || af_dwell_left(s, now_ms) > 0) {
+        return 0;
     }
-    best--;
+    const int16_t need = af_threshold(s, p);
+    const uint32_t limit = fresh_ms(s, p);
+    int16_t best = need;
     uint32_t khz = 0;
     for (unsigned i = 0; i < s->n; i++) {
         const af_entry_t *e = &s->e[i];
-        if (!e->measured || e->score == AF_SCORE_NONE || (uint32_t)(now_ms - e->measured_ms) > fresh_ms ||
-            (e->banned && !due(now_ms, e->banned_until_ms))) {
+        if (e->streak < AF_CONFIRM || !fresh(e, limit, now_ms) || banned(e, now_ms)) {
             continue;
         }
-        if (e->score > best) {
+        if (e->score > best || (khz == 0 && e->score == best)) {
             best = e->score;
             khz = e->khz;
         }
@@ -158,38 +225,65 @@ uint32_t af_pick(const af_state_t *s, const af_params_t *p, uint32_t now_ms)
     return khz;
 }
 
-uint32_t af_ban(af_state_t *s, uint32_t khz, uint32_t now_ms, uint32_t base_ms)
+bool af_trusted(const af_state_t *s, uint32_t khz, uint32_t now_ms)
+{
+    const int i = find(s, khz);
+    if (i < 0) {
+        return false;
+    }
+    const af_entry_t *e = &s->e[i];
+    return e->verified && (uint32_t)(now_ms - e->verified_ms) < AF_TRUST_MS && !banned(e, now_ms);
+}
+
+uint32_t af_ban(af_state_t *s, uint32_t khz, uint32_t now_ms, uint32_t base_ms, bool other_pi)
 {
     const int i = find(s, khz);
     if (i < 0) {
         return 0;
     }
     af_entry_t *e = &s->e[i];
-    const unsigned shift = e->strikes < AF_BAN_MAX_SHIFT ? e->strikes : AF_BAN_MAX_SHIFT;
+    unsigned shift = e->strikes + (other_pi ? AF_BAN_OTHER_PI_SHIFT : 0u);
+    if (shift > AF_BAN_MAX_SHIFT) {
+        shift = AF_BAN_MAX_SHIFT;
+    }
     const uint32_t ms = base_ms << shift;
     if (e->strikes < UINT8_MAX) {
         e->strikes++;
     }
     e->banned = true;
     e->banned_until_ms = now_ms + ms;
+    e->verified = false;
     return ms;
 }
 
-void af_switched(af_state_t *s, uint32_t from_khz, uint32_t to_khz, uint32_t now_ms)
+void af_switched(af_state_t *s, const af_params_t *p, uint32_t from_khz, uint32_t to_khz,
+                 uint32_t now_ms)
 {
-    int16_t score = af_current(s);
+    af_entry_t tuned = new_entry(to_khz);
     const int i = find(s, to_khz);
     if (i >= 0) {
-        if (s->e[i].measured && s->e[i].score != AF_SCORE_NONE) {
-            score = s->e[i].score;
-        }
+        tuned = s->e[i];
         drop(s, (unsigned)i);
     }
-    add(s, from_khz);
-    if (score != AF_SCORE_NONE) {
-        s->avg8 = (int32_t)score * 8;
-        s->have_avg = true;
+    tuned.banned = false;
+
+    af_entry_t from = s->tuned;
+    from.khz = from_khz;
+    from.verified = true;
+    from.verified_ms = now_ms;
+    from.banned = false;
+    s->tuned = tuned;
+    add(s, &from);
+    for (unsigned k = 0; k < s->n; k++) {
+        s->e[k].streak = 0;
     }
+
+    s->cur = (af_avg_t){0};
+    const bool quick = s->switched && (uint32_t)(now_ms - s->switched_ms) < 2u * s->dwell_ms;
+    const uint32_t cap = p->dwell_ms << AF_DWELL_MAX_SHIFT;
+    s->dwell_ms = quick ? (2u * s->dwell_ms < cap ? 2u * s->dwell_ms : cap) : p->dwell_ms;
+    s->switched = true;
+    s->switched_ms = now_ms;
     s->hold_until_ms = now_ms + AF_HOLD_MS;
     s->next_check_ms = now_ms;
 }

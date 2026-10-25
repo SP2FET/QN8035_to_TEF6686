@@ -37,6 +37,9 @@ typedef struct {
     gpio_num_t int_gpio;  /**< GPIO_NUM_NC if the head unit does not use INT */
     uint16_t address;     /**< QN8035_I2C_ADDR */
     bool trace;           /**< log every transaction (sniffer mode) */
+    /** NULL: the chip's power-on state. Else the model to resume (a warm restart, sysmon.h): the
+     * head unit initialised its chip only once, at its own boot. */
+    const qn8035_emu_t *restore;
 } qn8035_slave_config_t;
 
 /** Runs in the slave task: must not block for long. */
@@ -60,6 +63,9 @@ void qn8035_slave_set_signal(uint8_t rssi, uint8_t snr, bool stereo);
 void qn8035_slave_push_rds(const uint16_t blocks[4], uint8_t err_mask, bool version_b, bool sync);
 
 void qn8035_slave_get_stats(qn8035_slave_stats_t *out);
+
+/** A copy of the model for a warm restart. false when not running. */
+bool qn8035_slave_snapshot(qn8035_emu_t *out);
 
 #ifdef __cplusplus
 }

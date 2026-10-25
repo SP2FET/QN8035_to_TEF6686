@@ -74,7 +74,7 @@ static void test_commands(void)
             TEST_ASSERT_NOT_EQUAL(cmds[i], cmds[j]);
         }
     }
-    static const uint8_t need[] = {2, 11, 20, 22, 23, 40, 42, 45, 50, 56, 60, 66, 70, 75};
+    static const uint8_t need[] = {2, 10, 11, 20, 22, 23, 40, 42, 45, 50, 56, 60, 66, 70, 75};
     for (size_t k = 0; k < sizeof(need); k++) {
         TEST_ASSERT_NOT_NULL_MESSAGE(memchr(cmds, need[k], n), "missing command");
     }
@@ -112,6 +112,8 @@ static void test_default_frames(void)
     check_frame(&t, 42, (const uint16_t[]){2, 150, 220}, 3);
     check_frame(&t, 66, (const uint16_t[]){0, 400}, 2);
     check_frame(&t, 2, (const uint16_t[]){0, 2360, 1000, 2000}, 4);
+    /* UM V102 §3.3: automatic, 236 kHz, 100 %, 100 %, then the extended API defaults */
+    check_frame(&t, 10, (const uint16_t[]){1, 2360, 1000, 1000, 560, 2360, 300}, 7);
     check_frame(&t, 23, (const uint16_t[]){1, 1000}, 2);
     check_frame(&t, 11, (const uint16_t[]){920, 0}, 2);
     check_frame(&t, 20, (const uint16_t[]){1}, 1);
@@ -139,8 +141,15 @@ static void test_find(void)
     TEST_ASSERT_EQUAL_INT(TUNING_AF_MIN, tuning_find("af_min"));
     TEST_ASSERT_EQUAL_INT(TUNING_AF_BAN, tuning_find("af_ban"));
     TEST_ASSERT_EQUAL_INT16(200, tuning_params[TUNING_AF_MIN].def);
-    TEST_ASSERT_EQUAL_INT16(60, tuning_params[TUNING_AF_BAN].def);
+    TEST_ASSERT_EQUAL_INT16(300, tuning_params[TUNING_AF_BAN].def);
+    TEST_ASSERT_EQUAL_INT(TUNING_AF_DWELL, tuning_find("af_dwell"));
+    TEST_ASSERT_EQUAL_INT16(15, tuning_params[TUNING_AF_DWELL].def);
     TEST_ASSERT_EQUAL_STRING("s", tuning_params[TUNING_AF_BAN].unit);
+    /* NVS keys of saved values: renaming one loses what users saved */
+    TEST_ASSERT_EQUAL_INT(TUNING_BW_SENS, tuning_find("bw_sens"));
+    TEST_ASSERT_EQUAL_INT(TUNING_BW_LOW_SENS, tuning_find("bw_low"));
+    TEST_ASSERT_EQUAL_INT(TUNING_BW_MODE, tuning_find("bw_auto"));
+    TEST_ASSERT_EQUAL_INT(TUNING_BW_FIXED, tuning_find("bw_fix"));
 }
 
 static void test_value_ok_and_valid(void)
