@@ -372,6 +372,8 @@ static af_params_t af_params(void)
         .trial_ms = (uint16_t)v[TUNING_AF_TRIAL],
         .dwell_ms = (uint32_t)v[TUNING_AF_DWELL] * 1000u,
         .retry_ms = (uint32_t)v[TUNING_AF_RETRY] * 1000u,
+        .check_usn = (uint16_t)v[TUNING_AF_CHK_USN],
+        .check_gap_ms = (uint32_t)v[TUNING_AF_CHK_GAP] * 1000u,
     };
 }
 
@@ -465,6 +467,16 @@ static void af_new_station(void)
     unlock();
 }
 
+/* AFs the programme was received on before (AF memory) are trusted: tried by an unmuted Jump with
+ * the PI watched, never after a muted PI check. */
+static void af_trust_heard(void)
+{
+    uint8_t codes[AF_MEM_CODES];
+    const uint8_t n =
+        s.tuning.v[TUNING_AF_MEM] && s.af.pi_known ? af_mem_heard(&s.mem, s.af.pi, codes) : 0;
+    af_set_heard(&s.af.st, codes, n);
+}
+
 /* No RDS PI yet: take the programme stored for the frequency (AF memory), so a station heard
  * without RDS still has its AFs. A PI from RDS replaces it (af_follow_rds). */
 static void af_from_memory(void)
@@ -480,6 +492,7 @@ static void af_from_memory(void)
     s.af.pi = pi;
     s.af.pi_known = true;
     s.af.pi_mem = true;
+    af_trust_heard();
     ESP_LOGI(TAG, "AF: following PI %04X from memory (%u AFs) until RDS sends one", pi, n);
 }
 
@@ -529,6 +542,7 @@ static void af_follow_rds(void)
     if (slot >= 0) {
         ESP_LOGD(TAG, "AF memory: PI %04X changed (slot %d)", r->pi, slot);
     }
+    af_trust_heard();
 }
 
 /* A new RDS clock time: the system clock takes UTC, TZ the station's offset, so localtime() and
@@ -624,6 +638,7 @@ static void af_verify_begin(uint32_t khz, int16_t level_avg)
         return;
     }
     s.af.verifying = true;
+    af_check_started(&s.af.st, now_ms());
     s.af.cand = khz;
     s.af.origin = s.status.freq_khz;
     s.af.cand_score = level_avg;
@@ -753,8 +768,8 @@ static void af_accept(void)
     af_trial_start(true);
 }
 
-/* A frequency that carried the programme recently: Jump (1 ms mute slope, UM V102 §3.1) instead
- * of the muted Check, so the trial begins unheard. */
+/* A trusted frequency (af_trusted): Jump (1 ms mute slope, UM V102 §3.1) instead of the muted
+ * Check, so the trial begins unheard. */
 static void af_trial_jump(uint32_t khz, int16_t level_avg)
 {
     s.af.cand = khz;
@@ -890,7 +905,7 @@ static void af_tick(void)
     tef6686_quality_t q;
     if (af_measure(khz, &q)) {
         const int16_t score = af_score(q.level, q.usn, q.wam, q.offset);
-        af_measured(&s.af.st, &p, khz, score, q.level, now_ms());
+        af_measured(&s.af.st, &p, khz, score, q.level, q.usn, now_ms());
         trace_af_measure(khz, &q, score);
         ESP_LOGD(TAG, "AF %lu kHz: level %d usn %u wam %u offset %d -> score %d (need level %d)",
                  (unsigned long)khz, q.level, q.usn, q.wam, q.offset, score,

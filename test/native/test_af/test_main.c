@@ -8,7 +8,8 @@
 static af_state_t s;
 static const af_params_t P = {.enable = true, .reg = true, .trigger = 300, .window = 60,
                               .min_level = 0, .gain = 30, .interval_ms = 500, .trial_ms = 1500,
-                              .dwell_ms = 15000, .retry_ms = 30000};
+                              .dwell_ms = 15000, .retry_ms = 30000,
+                              .check_usn = 250, .check_gap_ms = 20000};
 
 void setUp(void)
 {
@@ -20,7 +21,7 @@ void tearDown(void) {}
 /* An AF_Update result on frequency; its score only has to be one. */
 static void meas(uint32_t khz, int16_t level, uint32_t t)
 {
-    af_measured(&s, &P, khz, -100, level, t);
+    af_measured(&s, &P, khz, -100, level, 50, t);
 }
 
 static const af_entry_t *entry(uint32_t khz)
@@ -159,27 +160,27 @@ static void test_measurement_average(void)
 {
     three_poor();
     const uint32_t k = 87600;
-    af_measured(&s, &P, k, 100, 300, 3000);
+    af_measured(&s, &P, k, 100, 300, 50, 3000);
     const af_entry_t *e = entry(k);
     TEST_ASSERT_EQUAL_INT16(100, e->score);
     TEST_ASSERT_EQUAL_INT16(300, e->level_avg);
-    af_measured(&s, &P, k, 200, 400, 3500);
+    af_measured(&s, &P, k, 200, 400, 50, 3500);
     TEST_ASSERT_EQUAL_INT16(150, e->score);
     TEST_ASSERT_EQUAL_INT16(350, e->level_avg);
     TEST_ASSERT_EQUAL_INT16(400, e->level);
 
     /* off frequency: another station, the averages start again */
-    af_measured(&s, &P, k, AF_SCORE_NONE, 500, 4000);
+    af_measured(&s, &P, k, AF_SCORE_NONE, 500, 50, 4000);
     TEST_ASSERT_EQUAL_INT16(AF_SCORE_NONE, e->score);
     TEST_ASSERT_EQUAL_INT16(AF_SCORE_NONE, e->level_avg);
     TEST_ASSERT_EQUAL_INT16(AF_SCORE_NONE, e->last);
     TEST_ASSERT_EQUAL_INT16(500, e->level);
-    af_measured(&s, &P, k, 300, 260, 4500);
+    af_measured(&s, &P, k, 300, 260, 50, 4500);
     TEST_ASSERT_EQUAL_INT16(300, e->score);
     TEST_ASSERT_EQUAL_INT16(260, e->level_avg);
 
     /* long unmeasured (more than twice a round plus three intervals): the car has moved on */
-    af_measured(&s, &P, k, 100, 300, 4500 + 6001);
+    af_measured(&s, &P, k, 100, 300, 50, 4500 + 6001);
     TEST_ASSERT_EQUAL_INT16(100, e->score);
     TEST_ASSERT_EQUAL_INT16(300, e->level_avg);
 }
@@ -189,13 +190,13 @@ static void test_streak_by_level(void)
 {
     three_poor();
     const uint32_t k = 87600;
-    af_measured(&s, &P, k, -300, 240, 3000);
+    af_measured(&s, &P, k, -300, 240, 50, 3000);
     TEST_ASSERT_EQUAL_UINT8(1, entry(k)->streak);
-    af_measured(&s, &P, k, -300, 239, 3500);
+    af_measured(&s, &P, k, -300, 239, 50, 3500);
     TEST_ASSERT_EQUAL_UINT8(0, entry(k)->streak);
-    af_measured(&s, &P, k, 0, 300, 4000);
+    af_measured(&s, &P, k, 0, 300, 50, 4000);
     TEST_ASSERT_EQUAL_UINT8(1, entry(k)->streak);
-    af_measured(&s, &P, k, AF_SCORE_NONE, 400, 4500); /* off frequency */
+    af_measured(&s, &P, k, AF_SCORE_NONE, 400, 50, 4500); /* off frequency */
     TEST_ASSERT_EQUAL_UINT8(0, entry(k)->streak);
 }
 
@@ -230,8 +231,8 @@ static void test_pick_min_level(void)
     p.min_level = 320; /* above 300 - 60 */
     three_poor();
     for (unsigned i = 0; i < 3; i++) {
-        af_measured(&s, &p, 87600, 0, 300, 3000 + i);
-        af_measured(&s, &p, 87700, 0, 330, 3000 + i);
+        af_measured(&s, &p, 87600, 0, 300, 50, 3000 + i);
+        af_measured(&s, &p, 87700, 0, 330, 50, 3000 + i);
     }
     TEST_ASSERT_EQUAL_UINT32(87700, af_pick(&s, &p, 3100));
 }
@@ -458,9 +459,9 @@ static void test_switched(void)
     af_quality(&s, 200, 300);
     const uint32_t to = s.e[1].khz;
     for (unsigned i = 0; i < 3; i++) {
-        af_measured(&s, &p, to, 0, 300, 4100 + i);
+        af_measured(&s, &p, to, 0, 300, 50, 4100 + i);
     }
-    af_measured(&s, &p, s.e[0].khz, 0, 300, 4200); /* a streak against the old station */
+    af_measured(&s, &p, s.e[0].khz, 0, 300, 50, 4200); /* a streak against the old station */
     TEST_ASSERT_EQUAL_UINT32(to, af_pick(&s, &p, 5000));
     af_switched(&s, &p, TUNED, to, 5000);
 
@@ -550,6 +551,94 @@ static void test_trust(void)
     TEST_ASSERT_TRUE(af_trusted(&s, 87600, 100));
 }
 
+/* An AF_Update result with a given USN (score only has to be one). */
+static void meas_usn(uint32_t khz, int16_t level, uint16_t usn, uint32_t t)
+{
+    af_measured(&s, &P, khz, -100, level, usn, t);
+}
+
+static void test_usn_min(void)
+{
+    three_poor();
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, af_usn_min(entry(87600)));
+    meas_usn(87600, 300, 400, 3000);
+    TEST_ASSERT_EQUAL_UINT16(400, af_usn_min(entry(87600)));
+    meas_usn(87600, 300, 100, 3500);
+    meas_usn(87600, 300, 500, 4000);
+    meas_usn(87600, 300, 600, 4500);
+    TEST_ASSERT_EQUAL_UINT16(100, af_usn_min(entry(87600)));
+    meas_usn(87600, 300, 700, 5000);
+    TEST_ASSERT_EQUAL_UINT16(500, af_usn_min(entry(87600))); /* 100 has dropped out */
+}
+
+static void test_pick_usn_screen(void)
+{
+    three_poor();
+    for (unsigned i = 0; i < AF_CONFIRM; i++) {
+        meas_usn(87600, 300, 600, 3000 + 500 * i);
+    }
+    TEST_ASSERT_EQUAL_UINT32(0, af_pick(&s, &P, 4000)); /* noise at a passable level */
+    meas_usn(87600, 300, 100, 4500);
+    TEST_ASSERT_EQUAL_UINT32(87600, af_pick(&s, &P, 4500));
+    for (unsigned i = 0; i < AF_CONFIRM; i++) {
+        meas_usn(87600, 300, 600, 5000 + 500 * i);
+    }
+    TEST_ASSERT_EQUAL_UINT32(0, af_pick(&s, &P, 6000));
+}
+
+static void test_pick_usn_trusted(void)
+{
+    three_poor();
+    af_verified(&s, 87600, 2000);
+    for (unsigned i = 0; i < AF_CONFIRM; i++) {
+        meas_usn(87600, 300, 600, 3000 + 500 * i);
+    }
+    TEST_ASSERT_EQUAL_UINT32(87600, af_pick(&s, &P, 4000));
+}
+
+static void test_heard(void)
+{
+    three_poor();
+    for (unsigned i = 0; i < AF_CONFIRM; i++) {
+        meas_usn(87600, 300, 600, 3000 + 500 * i);
+    }
+    TEST_ASSERT_FALSE(af_trusted(&s, 87600, 4000));
+    TEST_ASSERT_EQUAL_UINT32(0, af_pick(&s, &P, 4000));
+    const uint8_t heard[] = {1};
+    af_set_heard(&s, heard, 1);
+    TEST_ASSERT_TRUE(af_trusted(&s, 87600, 4000));
+    TEST_ASSERT_FALSE(af_trusted(&s, 87700, 4000));
+    TEST_ASSERT_EQUAL_UINT32(87600, af_pick(&s, &P, 4000));
+    af_ban(&s, 87600, 4000, 1000, false);
+    TEST_ASSERT_FALSE(af_trusted(&s, 87600, 4500));
+    TEST_ASSERT_TRUE(af_trusted(&s, 87600, 6000)); /* the ban has ended */
+    af_set_heard(&s, heard, 0);
+    TEST_ASSERT_FALSE(af_trusted(&s, 87600, 6000));
+}
+
+static void test_check_gap(void)
+{
+    three_poor(); /* A 87600 level 320, B 87700 level 300, C 87800 level 280 */
+    af_params_t p = P;
+    p.check_gap_ms = 2000;
+    const uint32_t k[3] = {87600, 87700, 87800};
+    const int16_t lvl[3] = {320, 300, 280};
+    for (unsigned t = 3000; t <= 5500; t += 500) {
+        for (unsigned i = t <= 4000 ? 0 : 1; i < 3; i++) {
+            af_measured(&s, &p, k[i], -100, lvl[i], 50, t);
+        }
+        if (t == 4000) {
+            TEST_ASSERT_EQUAL_UINT32(87600, af_pick(&s, &p, t));
+            af_check_started(&s, t);
+            af_ban(&s, 87600, t, 100000, false);
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(0, af_pick(&s, &p, 5999)); /* B and C wait for the gap */
+    af_verified(&s, 87800, 5999);
+    TEST_ASSERT_EQUAL_UINT32(87800, af_pick(&s, &p, 5999)); /* a verified AF needs no check */
+    TEST_ASSERT_EQUAL_UINT32(87700, af_pick(&s, &p, 6000)); /* the gap is over */
+}
+
 static void test_pi_match(void)
 {
     TEST_ASSERT_TRUE(af_pi_match(0xD512, 0xD512, false));
@@ -614,6 +703,11 @@ int main(void)
     RUN_TEST(test_dwell_blocks_pick);
     RUN_TEST(test_dwell_escalation);
     RUN_TEST(test_trust);
+    RUN_TEST(test_usn_min);
+    RUN_TEST(test_pick_usn_screen);
+    RUN_TEST(test_pick_usn_trusted);
+    RUN_TEST(test_heard);
+    RUN_TEST(test_check_gap);
     RUN_TEST(test_pi_match);
     RUN_TEST(test_clock_wrap);
     return UNITY_END();

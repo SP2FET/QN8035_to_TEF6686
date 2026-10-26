@@ -48,6 +48,7 @@ typedef void (*qn8035_slave_event_cb_t)(const qn8035_evt_t *evt, void *ctx);
 typedef struct {
     bool running;
     uint32_t writes;
+    uint32_t cmds;    /**< writes with data: commands, not the register pointer set before a read */
     uint32_t reads;
     uint32_t dropped; /**< bus messages or trace records lost */
     char last[48];    /**< last transaction, e.g. "W 00 <- 13" */

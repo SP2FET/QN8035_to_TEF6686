@@ -16,7 +16,7 @@ Mini) replaces it with an **NXP TEF6686** tuner module:
 | QN8035 emulation: register model, I2C slave (no clock stretching), bridge | The car build (`sdkconfig.defaults`), first ride 2026-10-25. Model host-tested, replays the captured cold start byte for byte |
 | Radio service, RDS decoder, web UI, watchdog + core dump | Run in the car. Seek not checked |
 | Reception tuning table, Weak signal card | Live changes used in the car. Save and the extended bandwidth words not checked |
-| AF following 0.4.0: AF_Update screens by level, a trial on settled quality decides | Host-tested, **not yet on air** (the first version hopped, 0.3.0 never switched) |
+| AF following 0.4.1: AF_Update screens by level (muted PI checks also by USN), a trial on settled quality decides | First ride 2026-10-26: switches, too many muted checks (fixed in 0.4.1, not yet on air) |
 | AF memory in NVS, ride recording (`/api/trace`, `scripts/ride_log.py`, `scripts/ride_report.py`) | Host-tested, **not yet on the device** |
 | Web OTA, reset history, station memory (stand-alone build only) | Build and host tests pass, **not yet on the device** (OTA needs one USB flash first) |
 
@@ -225,7 +225,8 @@ details up there before changing protocol code.
   quality is sampled for `afu_sample_time` (default 2 ms, the minimum UM V102 advises for
   detector settling) and frozen with status bit 15 until **Get_Quality_Data (20/81)** reads and
   releases it; Get_Quality_Status (20/80) leaves it frozen. Its USN/WAM swing by tens of dB and
-  read ~30 dB worse than settled values (on air, 2026-10-25): compare levels only.
+  read ~30 dB worse than settled values (on air, 2026-10-25): compare levels only. Noise never
+  reads a low USN, though: the lowest of a few readings tells a clean carrier (2026-10-26).
 - Get_RDS_Data (20/83) **consumes** the buffered group. Status bits [15] data, [14] lost,
   [13] first-PI, [12] B group, [9] sync; dec_error 2 bits per block (A in [15:14]).
 - Audio is **muted after boot** (Set_Mute default 1).
@@ -262,11 +263,13 @@ details up there before changing protocol code.
 3. Seek thresholds for the car antenna (web UI Seek group); the capture's 26 channels are a
    reference list. Behaviour after a failed scan (we leave CH at CH_STOP).
 4. Audio level match between the TEF DAC and the QN8035 outputs.
-5. AF on air (0.4.0). Record rides (docs/ride-logging.md) and set `af_window` from the report's
+5. AF on air (0.4.1). Record rides (docs/ride-logging.md) and set `af_window` from the report's
    AF_Update calibration table, `af_gain`/`af_trial` from the trials. Check how a trial and a
    jump back sound (transmitters of one programme are not time-aligned) and how fast a PI
-   answers after Check (`af_pi`, 300 ms). Lessons so far: a miscorrected block A once changed the
-   PI and reset the AF state (a new PI must now repeat); co-channel use of AFs is normal (expect
+   answers after Check (`af_pi`, 300 ms). Lessons so far: 38 of 47 muted PI checks on the first
+   recorded ride got no PI (noise at a passable level, told apart by its AF_Update USN:
+   `af_chk_usn`); a miscorrected block A once changed the PI and reset the AF state (a new PI
+   must now repeat); co-channel use of AFs is normal (expect
    other-PI bans); deciding on single AF_Update peaks made it hop between transmitters. A build
    that measured the tuned frequency with AF_Update and sent Set_Bandwidth's extended words made
    reception louder and noisier; which one did it is unknown: avoid both untested.

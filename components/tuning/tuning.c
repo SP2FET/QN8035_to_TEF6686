@@ -150,8 +150,9 @@ const tuning_param_t tuning_params[TUNING_COUNT] = {
 
     /* AF (af.h). Scores are level minus USN minus WAM, 0.1 dB, as in PE5PVB/TEF6686_ESP32.
      * AF_Update measurements screen the candidates by level only (their 2 ms USN/WAM samples
-     * are noise); a trial on settled quality decides. Keys of the earlier scheme (af_margin,
-     * af_min: AF_Update scores) are gone, so values saved for them no longer apply. */
+     * are noise; the USN only screens muted PI checks: af_chk_usn); a trial on settled quality
+     * decides. Keys of the earlier scheme (af_margin, af_min: AF_Update scores) are gone, so
+     * values saved for them no longer apply. */
     [TUNING_AF_ON] = ROW("af", G_AF, "AF following", NULL, ONOFF, TUNING_HOST, 0, 1, 0, 1, 1),
     [TUNING_AF_REG] = ROW("af_reg", G_AF, "REG (regional variants are other programmes)", NULL,
                           ONOFF, TUNING_HOST, 0, 1, 0, 1, 1),
@@ -174,6 +175,12 @@ const tuning_param_t tuning_params[TUNING_COUNT] = {
                                100, 10000, 500),
     [TUNING_AF_PI_MS] = ROW("af_pi", G_AF, "PI check timeout", "ms", NULL, TUNING_HOST, 0, 1,
                             100, 2000, 300),
+    /* A muted PI check is worth it only on a clean carrier: noise at a passable level reads a high
+     * USN in every AF_Update (ride of 2026-10-26). 100 % turns the screen off. */
+    [TUNING_AF_CHK_USN] = ROW("af_chk_usn", G_AF, "PI check only after an AF_Update USN below",
+                              "%", NULL, TUNING_HOST, 0, 10, 0, 1000, 250),
+    [TUNING_AF_CHK_GAP] = ROW("af_chk_gap", G_AF, "Least time between two muted PI checks", "s",
+                              NULL, TUNING_HOST, 0, 1, 0, 600, 20),
     /* A frequency that failed once fails again from the same place, and every try mutes. */
     [TUNING_AF_BAN] = ROW("af_ban", G_AF, "Skip after a failed PI check (doubles; another PI 4x)",
                           "s", NULL, TUNING_HOST, 0, 1, 10, 3600, 300),

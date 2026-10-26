@@ -85,12 +85,14 @@ static esp_err_t init_power(void)
 #endif
 
 #if CONFIG_BRIDGE_QN_EMU_ENABLE
-/* Moves with every head-unit command: AF memory writes wait for a quiet bus (af_store.h). */
+/* Moves with every head-unit command: AF memory writes wait for a quiet bus (af_store.h). Commands
+ * only: the head unit reads its status every 50 ms with a register-pointer write first, and
+ * counting those kept af_store from ever writing. */
 static uint32_t qn_activity(void)
 {
     qn8035_slave_stats_t st;
     qn8035_slave_get_stats(&st);
-    return st.writes;
+    return st.cmds;
 }
 #define QN_ACTIVITY qn_activity
 #else

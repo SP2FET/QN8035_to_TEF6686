@@ -60,11 +60,21 @@ static int find(const af_state_t *s, uint32_t khz)
 
 static af_entry_t new_entry(uint32_t khz)
 {
-    return (af_entry_t){.khz = khz,
-                        .score = AF_SCORE_NONE,
-                        .last = AF_SCORE_NONE,
-                        .level_avg = AF_SCORE_NONE,
-                        .trial_score = AF_SCORE_NONE};
+    af_entry_t e = {.khz = khz,
+                    .score = AF_SCORE_NONE,
+                    .last = AF_SCORE_NONE,
+                    .level_avg = AF_SCORE_NONE,
+                    .trial_score = AF_SCORE_NONE};
+    for (unsigned i = 0; i < AF_CONFIRM; i++) {
+        e.usn[i] = UINT16_MAX;
+    }
+    return e;
+}
+
+static bool entry_trusted(const af_entry_t *e, uint32_t now_ms)
+{
+    return !banned(e, now_ms) &&
+           (e->heard || (e->verified && (uint32_t)(now_ms - e->verified_ms) < AF_TRUST_MS));
 }
 
 static void add(af_state_t *s, const af_entry_t *e)
@@ -226,7 +236,7 @@ uint32_t af_next_check(af_state_t *s, const af_params_t *p, uint32_t now_ms)
 }
 
 void af_measured(af_state_t *s, const af_params_t *p, uint32_t khz, int16_t score, int16_t level,
-                 uint32_t now_ms)
+                 uint16_t usn, uint32_t now_ms)
 {
     const int i = find(s, khz);
     if (i < 0) {
@@ -239,7 +249,12 @@ void af_measured(af_state_t *s, const af_params_t *p, uint32_t khz, int16_t scor
         e->avg = (af_avg_t){0};
         e->lavg = (af_avg_t){0};
         e->streak = 0;
+        for (unsigned k = 0; k < AF_CONFIRM; k++) {
+            e->usn[k] = UINT16_MAX;
+        }
     }
+    memmove(&e->usn[1], &e->usn[0], (AF_CONFIRM - 1) * sizeof(e->usn[0]));
+    e->usn[0] = score == AF_SCORE_NONE ? UINT16_MAX : usn;
     const int16_t need = af_need_level(s, p);
     if (score != AF_SCORE_NONE && need != AF_SCORE_NONE && level >= need) {
         e->streak = e->streak < UINT8_MAX ? (uint8_t)(e->streak + 1) : UINT8_MAX;
@@ -256,6 +271,15 @@ void af_measured(af_state_t *s, const af_params_t *p, uint32_t khz, int16_t scor
     e->level = level;
     e->measured_ms = now_ms;
     e->measured = true;
+}
+
+uint16_t af_usn_min(const af_entry_t *e)
+{
+    uint16_t m = UINT16_MAX;
+    for (unsigned i = 0; i < AF_CONFIRM; i++) {
+        m = e->usn[i] < m ? e->usn[i] : m;
+    }
+    return m;
 }
 
 uint32_t af_dwell_left(const af_state_t *s, uint32_t now_ms)
@@ -276,10 +300,14 @@ uint32_t af_pick(const af_state_t *s, const af_params_t *p, uint32_t now_ms)
     const uint32_t limit = fresh_ms(s, p);
     int16_t best = need;
     uint32_t khz = 0;
+    const bool check_ok = !s->checked || due(now_ms, s->check_ms + p->check_gap_ms);
     for (unsigned i = 0; i < s->n; i++) {
         const af_entry_t *e = &s->e[i];
         if (e->streak < AF_CONFIRM || !fresh(e, limit, now_ms) || banned(e, now_ms) ||
             waiting(e, now_ms)) {
+            continue;
+        }
+        if (!entry_trusted(e, now_ms) && (!check_ok || af_usn_min(e) > p->check_usn)) {
             continue;
         }
         if (e->level_avg > best || (khz == 0 && e->level_avg == best)) {
@@ -296,8 +324,25 @@ bool af_trusted(const af_state_t *s, uint32_t khz, uint32_t now_ms)
     if (i < 0) {
         return false;
     }
-    const af_entry_t *e = &s->e[i];
-    return e->verified && (uint32_t)(now_ms - e->verified_ms) < AF_TRUST_MS && !banned(e, now_ms);
+    return entry_trusted(&s->e[i], now_ms);
+}
+
+void af_set_heard(af_state_t *s, const uint8_t *codes, uint8_t n)
+{
+    for (unsigned i = 0; i <= s->n; i++) {
+        af_entry_t *e = i < s->n ? &s->e[i] : &s->tuned;
+        const uint8_t code = af_khz_code(e->khz);
+        e->heard = false;
+        for (unsigned k = 0; code && k < n; k++) {
+            e->heard = e->heard || codes[k] == code;
+        }
+    }
+}
+
+void af_check_started(af_state_t *s, uint32_t now_ms)
+{
+    s->checked = true;
+    s->check_ms = now_ms;
 }
 
 void af_verified(af_state_t *s, uint32_t khz, uint32_t now_ms)

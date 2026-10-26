@@ -30,8 +30,8 @@ extern "C" {
 #endif
 
 typedef struct {
-    /** A counter that moves with every head-unit command (QN8035 bus writes), NULL without a
-     * head unit. Called from the store task. */
+    /** A counter that moves with every head-unit command (not the register-pointer write before
+     * each of its reads), NULL without a head unit. Called from the store task. */
     uint32_t (*activity)(void);
 } af_store_config_t;
 

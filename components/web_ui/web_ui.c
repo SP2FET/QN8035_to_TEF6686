@@ -158,7 +158,8 @@ static void jb_af_entry(jbuf_t *j, const af_entry_t *e, uint32_t now_ms)
 {
     const bool banned = e->banned && (int32_t)(e->banned_until_ms - now_ms) > 0;
     const bool trusted =
-        e->verified && (uint32_t)(now_ms - e->verified_ms) < AF_TRUST_MS && !banned;
+        !banned && (e->heard || (e->verified && (uint32_t)(now_ms - e->verified_ms) < AF_TRUST_MS));
+    const uint16_t usn = af_usn_min(e);
     const bool waiting = e->losses > 0 && (int32_t)(e->retry_until_ms - now_ms) > 0;
     jb_printf(j, "{\"khz\":%" PRIu32 ",\"score\":", e->khz);
     jb_score(j, e->score);
@@ -168,6 +169,8 @@ static void jb_af_entry(jbuf_t *j, const af_entry_t *e, uint32_t now_ms)
     jb_tenths(j, e->measured, e->level);
     jb_printf(j, ",\"lavg\":");
     jb_score(j, e->level_avg);
+    jb_printf(j, ",\"heard\":%s,\"usn\":", b(e->heard));
+    jb_tenths(j, usn != UINT16_MAX, usn);
     jb_printf(j, ",\"trial\":");
     jb_score(j, e->trial_score);
     jb_printf(j, ",\"losses\":%u,\"retry_s\":%" PRIu32 ",\"age_s\":", e->losses,

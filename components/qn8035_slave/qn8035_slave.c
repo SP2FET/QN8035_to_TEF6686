@@ -215,6 +215,7 @@ static void slave_task(void *arg)
         xSemaphoreTake(s.lock, portMAX_DELAY);
         s.stats.reads += m.rlen;
         s.stats.writes += m.wlen ? 1u : 0u;
+        s.stats.cmds += m.wlen > 1u ? 1u : 0u;
         xSemaphoreGive(s.lock);
         /* Reads show up late (at the next write or refresh) but in bus order. */
         if (m.rlen) {

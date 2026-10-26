@@ -68,6 +68,10 @@ bool af_mem_lookup(const af_mem_t *m, uint32_t khz, uint16_t *pi);
 /** Copies pi's codes to codes (AF_MEM_CODES), returns the count, 0 if pi is unknown. */
 uint8_t af_mem_codes(const af_mem_t *m, uint16_t pi, uint8_t *codes);
 
+/** Copies the codes pi was decoded on to codes (AF_MEM_CODES), returns the count, 0 if pi is 0 or
+ * unknown. */
+uint8_t af_mem_heard(const af_mem_t *m, uint16_t pi, uint8_t *codes);
+
 /** Used slots. */
 unsigned af_mem_count(const af_mem_t *m);
 

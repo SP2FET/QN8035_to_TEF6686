@@ -144,6 +144,10 @@ static void test_find(void)
     TEST_ASSERT_EQUAL_INT(TUNING_AF_GAIN, tuning_find("af_gain"));
     TEST_ASSERT_EQUAL_INT(TUNING_AF_MEM, tuning_find("af_mem"));
     TEST_ASSERT_EQUAL_INT(TUNING_AF_BAN, tuning_find("af_ban"));
+    TEST_ASSERT_EQUAL_INT(TUNING_AF_CHK_USN, tuning_find("af_chk_usn"));
+    TEST_ASSERT_EQUAL_INT(TUNING_AF_CHK_GAP, tuning_find("af_chk_gap"));
+    TEST_ASSERT_EQUAL_INT16(250, tuning_params[TUNING_AF_CHK_USN].def);
+    TEST_ASSERT_EQUAL_INT16(20, tuning_params[TUNING_AF_CHK_GAP].def);
     TEST_ASSERT_EQUAL_INT16(150, tuning_params[TUNING_AF_MIN_LEVEL].def);
     TEST_ASSERT_EQUAL_INT16(1500, tuning_params[TUNING_AF_TRIAL].def);
     TEST_ASSERT_EQUAL_INT16(300, tuning_params[TUNING_AF_BAN].def);

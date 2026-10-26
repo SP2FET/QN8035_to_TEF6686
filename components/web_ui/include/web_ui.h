@@ -34,11 +34,14 @@
  *                 (the candidate's mean settled score so far and what it must beat, plus the
  *                 gain); mem: {"progs","saving","pending","writes","errors"} (af_store.h);
  *                 dwell_s: until switching is allowed again
- *                 ENTRY {"khz","score","last","n","streak","level","lavg","trial","losses",
- *                 "retry_s","age_s","banned","ban_s","trusted"}: AF_Update score average of n
- *                 measurements and the last one, last level and level average, the mean score
+ *                 ENTRY {"khz","score","last","n","streak","level","lavg","heard","usn","trial",
+ *                 "losses","retry_s","age_s","banned","ban_s","trusted"}: AF_Update score
+ *                 average of n measurements and the last one, last level and level average,
+ *                 the mean score
  *                 of its last trial, trials lost in a row and the wait before the next (null
- *                 when unknown); trusted: tried without a PI check
+ *                 when unknown); trusted: tried without a PI check; heard: the programme was
+ *                 received on it before (AF memory); usn: lowest USN (%) of its last 3
+ *                 AF_Update readings, null before any
  *   "af.events"   the last 10 AF steps, newest first: {"type","age_s","from","to","score","cur",
  *                 "pi","ban_s"} (kHz, dB). type: check (muted PI check begins), trial (the
  *                 candidate plays), switched/jumped (trial won after a PI check / on a trusted

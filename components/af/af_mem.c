@@ -160,6 +160,21 @@ uint8_t af_mem_codes(const af_mem_t *m, uint16_t pi, uint8_t *codes)
     return m->p[i].n;
 }
 
+uint8_t af_mem_heard(const af_mem_t *m, uint16_t pi, uint8_t *codes)
+{
+    const int i = prog_find(m, pi);
+    if (i < 0) {
+        return 0;
+    }
+    uint8_t n = 0;
+    for (unsigned k = 0; k < m->p[i].n; k++) {
+        if (m->p[i].heard & (1u << k)) {
+            codes[n++] = m->p[i].code[k];
+        }
+    }
+    return n;
+}
+
 unsigned af_mem_count(const af_mem_t *m)
 {
     unsigned n = 0;

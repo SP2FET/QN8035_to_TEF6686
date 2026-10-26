@@ -496,13 +496,14 @@ function renderAf(a,am){
     tb.appendChild(r);return r;
   };
   tb.className='aft';
-  row('th',['MHz','Level','Last','Score','Trial','Age','']);
+  row('th',['MHz','Level','USN','Last','Score','Trial','Age','']);
   // Level and Score are AF_Update averages: 2 ms samples, so the screen uses the level only and
   // a trial on settled quality decides (Trial: its mean score, comparable with Score above)
   const add=e=>{
-    const r=row('td',[(e.khz/1000).toFixed(2),num(e.lavg,1),num(e.level,1),num(e.score,1),num(e.trial,1),typeof e.age_s==='number'?e.age_s+' s':'—','']);
+    const r=row('td',[(e.khz/1000).toFixed(2),num(e.lavg,1),num(e.usn,1,' %'),num(e.level,1),num(e.score,1),num(e.trial,1),typeof e.age_s==='number'?e.age_s+' s':'—','']);
     const bd=(c,x)=>{const b=document.createElement('span');b.className='badge'+(c?' '+c:'');b.textContent=x;r.lastChild.appendChild(b)};
     if(e.trusted)bd('','trusted');
+    if(e.heard)bd('','known');
     if(e.streak)bd('warn on',Math.min(e.streak,cf)+'/'+cf);
     if(e.retry_s)bd('warn','retry '+fmtDur(e.retry_s));
     if(e.banned){r.className='ban';bd('er on','banned '+fmtDur(e.ban_s))}

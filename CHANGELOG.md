@@ -4,6 +4,26 @@ The firmware uses Semantic Versioning. Development releases use 0.x versions and
 change interfaces between minor versions. Versions and Git tags are recorded here;
 target builds and host tests do not establish hardware compatibility.
 
+## 0.4.1 - 2026-10-26
+
+The first recorded ride (43 min) had 47 muted PI checks, 38 of them without a PI (noise at a
+passable level), some in bursts of 3 within 5 s.
+
+### Changed
+
+- A muted PI check needs a clean carrier: one of the candidate's last 3 AF_Update USN readings
+  must be below `af_chk_usn` (25 %). Every AF that answered with a PI had read 10 % or less.
+- At most one muted PI check per `af_chk_gap` (20 s).
+- AFs the programme was received on before (AF memory, `af_mem` on) are trusted: an unmuted Jump
+  with the PI watched, no muted check.
+- Web UI: the AF table shows the lowest recent AF_Update USN and a "known" badge.
+
+### Fixed
+
+- `af_store` never saved: it counted the head unit's register-pointer writes (one before every
+  status read, every 50 ms) as activity. It now counts commands only
+  (`qn8035_slave_stats_t.cmds`).
+
 ## 0.4.0 - 2026-10-26
 
 ### Added

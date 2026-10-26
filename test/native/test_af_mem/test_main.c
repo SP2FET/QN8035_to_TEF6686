@@ -111,6 +111,22 @@ static void test_codes(void)
     TEST_ASSERT_EQUAL_UINT8_ARRAY(codes, out, 3);
 }
 
+static void test_heard(void)
+{
+    uint8_t out[AF_MEM_CODES];
+    const uint8_t codes[] = {45, 55, 70};
+    TEST_ASSERT_EQUAL_UINT8(0, af_mem_heard(&m, 0x3F44, out));
+    af_mem_learn(&m, 0x3F44, 92000, codes, 3);
+    TEST_ASSERT_EQUAL_UINT8(1, af_mem_heard(&m, 0x3F44, out));
+    TEST_ASSERT_EQUAL_UINT8(45, out[0]);
+    af_mem_learn(&m, 0x3F44, 93000, codes, 3);
+    TEST_ASSERT_EQUAL_UINT8(2, af_mem_heard(&m, 0x3F44, out));
+    TEST_ASSERT_EQUAL_UINT8(45, out[0]);
+    TEST_ASSERT_EQUAL_UINT8(55, out[1]);
+    TEST_ASSERT_EQUAL_UINT8(0, af_mem_heard(&m, 0x1234, out));
+    TEST_ASSERT_EQUAL_UINT8(0, af_mem_heard(&m, 0, out));
+}
+
 static void test_lru_eviction(void)
 {
     for (unsigned i = 0; i < AF_MEM_PROGS; i++) {
@@ -177,6 +193,7 @@ int main(void)
     RUN_TEST(test_full_list);
     RUN_TEST(test_lookup);
     RUN_TEST(test_codes);
+    RUN_TEST(test_heard);
     RUN_TEST(test_lru_eviction);
     RUN_TEST(test_load);
     RUN_TEST(test_prog_same);
