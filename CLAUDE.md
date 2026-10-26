@@ -1,76 +1,52 @@
 # QN8035 → TEF6686 bridge
 
-An Android car head unit has a Quintic **QN8035** FM receiver on I2C. This
-project replaces it with an **NXP TEF6686** tuner module. An **ESP32-S2**
-(WEMOS/LOLIN S2 Mini) sits between them:
+An Android car head unit has a Quintic **QN8035** FM receiver on I2C. An **ESP32-S2** (LOLIN S2
+Mini) replaces it with an **NXP TEF6686** tuner module:
 
-- towards the head unit it is an **I2C slave that emulates the QN8035**
-  register map (address 0x10),
-- towards the TEF6686 it is an **I2C master** that drives the real tuner,
-- it serves a **Wi-Fi web UI** with tuner controls and a live log console,
-  for bench testing and debugging.
-
-The head unit's software must not notice the swap.
+- towards the head unit: an **I2C slave emulating the QN8035** register map (0x10). The head
+  unit's software must not notice the swap;
+- towards the TEF6686: an **I2C master** driving the real tuner;
+- a **Wi-Fi web UI** (controls, reception tuning, AF view, live log) for testing.
 
 ## Status
 
 | Part | State |
 |---|---|
-| TEF6686 driver: boot/patch, tune, quality, RDS, audio | **Runs on the bench**: TEF6686 /V102 identified, patch V102 p2.24 loads, tunes, stereo and RDS lock on air |
-| Radio service, seek, RDS decoder | Implemented; RDS decoder host-tested and decodes PI/PS/RT on air. Seek not yet checked |
-| Web UI (REST + WebSocket log) | Runs on the bench (SoftAP) |
-| Web OTA (`/api/ota`, `scripts/ota_upload.py`, bootloader rollback) | Builds; script tested against a mock server. **Not yet tried on the device** (needs one USB flash first) |
-| Station memory (stand-alone build): last settings + 40 memory channels in NVS, web UI card | Builds; channel logic host-tested (11 tests). **Not yet tried on the device** |
-| Reception tuning: weak-signal DSP (iMS, EQ, noise blanker, soft mute, high cut, stereo blend, high blend, FM IF bandwidth fixed or automatic with the extended API, RF AGC), AF and seek thresholds, live in the web UI (a Weak signal card of presets on top of the full table), saved to NVS on request | Builds; table host-tested. **Not yet tried on the device** |
-| AF following: RDS AF list; AF_Update screens candidates by level (3 in a row within the window below the tuned level); a trial (muted PI check, or a jump to a frequency verified within 10 min) keeps the candidate if its settled score beats the tuned station's recent mean by the gain, else jumps back with a doubling retry wait; dwell after a switch, escalating bans from 5 min, REG; head-unit tunes to the programme's frequencies keep the AF | The first version hopped between weak transmitters on air (2026-10-25); 0.3.0 compared AF_Update scores with settled ones and never switched. Trial version (0.4.0): builds, host-tested. **Not yet tried on air** |
-| AF memory: AF lists and heard frequencies of 16 programmes in NVS, wear-limited writes; a station without RDS takes the PI stored for its frequency | Builds; host-tested. **Not yet tried on the device** |
-| Ride recording: `/api/trace` ring (quality, AF_Update, AF steps), `scripts/ride_log.py` records over Wi-Fi, `scripts/ride_report.py` makes HTML + CSV ([docs/ride-logging.md](docs/ride-logging.md)) | Builds; scripts unit-tested on synthetic data. **Not yet run against the device** |
-| Watchdog and warm restart: task watchdog panics on a hang (idle, radio, qn_slave), core dump in flash (`/api/coredump`), reset reason, crash count and a reset history kept in NVS in the web UI, station and QN8035 registers resumed from RTC memory | Watchdog and dump download run in the car. Reset history: builds, **not yet tried** |
-| QN8035 register model | Implemented to the head-unit MCU's driver (CHSC and 0x55 starts, stale completions, 0x4A/0x4C mutes, 85.5 MHz PLL shift, CCA level rule) and matched to the bus capture of the original chip (IDs, reset values, 0x4F, RDS after a tune). Host-tested (27 tests, one replays the captured cold start and preset tunes byte for byte) |
-| QN8035 I2C slave port + bridge | No clock stretching (TX FIFO filled from the ISR), tune done on settled quality. **On by default** (`sdkconfig.defaults`: the car build); first test ride with the head unit 2026-10-25 |
-| Head-unit protocol | Taken from the MCU firmware ([docs/headunit-mcu-firmware.md](docs/headunit-mcu-firmware.md)); confirmed by a bus capture of the original chip ([docs/headunit-bus-capture.md](docs/headunit-bus-capture.md)) |
+| TEF6686 driver (boot/patch, tune, quality, RDS, audio) | On air: /V102, patch p2.24, stereo and RDS lock |
+| QN8035 emulation: register model, I2C slave (no clock stretching), bridge | The car build (`sdkconfig.defaults`), first ride 2026-10-25. Model host-tested, replays the captured cold start byte for byte |
+| Radio service, RDS decoder, web UI, watchdog + core dump | Run in the car. Seek not checked |
+| Reception tuning table, Weak signal card | Live changes used in the car. Save and the extended bandwidth words not checked |
+| AF following 0.4.0: AF_Update screens by level, a trial on settled quality decides | Host-tested, **not yet on air** (the first version hopped, 0.3.0 never switched) |
+| AF memory in NVS, ride recording (`/api/trace`, `scripts/ride_log.py`, `scripts/ride_report.py`) | Host-tested, **not yet on the device** |
+| Web OTA, reset history, station memory (stand-alone build only) | Build and host tests pass, **not yet on the device** (OTA needs one USB flash first) |
+
+Head-unit protocol: [docs/headunit-mcu-firmware.md](docs/headunit-mcu-firmware.md) (MCU firmware
+analysis), confirmed by [docs/headunit-bus-capture.md](docs/headunit-bus-capture.md) (bus capture
+of the original chip). Ride recording: [docs/ride-logging.md](docs/ride-logging.md). Release
+history: [CHANGELOG.md](CHANGELOG.md).
 
 ## Hardware
 
 | Function | ESP32-S2 pin | Notes |
 |---|---|---|
-| TEF6686 SDA | GPIO16 | I2C0 master, 400 kHz. SDA/SCL order is assumed; `BRIDGE_TEF_I2C_AUTOSWAP` probes both orders at boot and logs which one answered |
-| TEF6686 SCL | GPIO17 | Internal pull-ups are enabled but weak (~45 kΩ); fit 2.2–4.7 kΩ to 3V3 if the module has none |
-| Head unit SDA | GPIO33 (default) | I2C1 slave. Not wired yet. **Check the bus voltage first** (it may be 1.8 V) |
-| Head unit SCL | GPIO35 (default) | No clock stretching: the head unit's MCU bit-bangs the bus (~90–140 kHz measured) and never reads SCL, so the slave fills its TX FIFO from the ISR |
-| QN8035 INT | none (default) | Optional: 4.5 ms low pulse per RDS group/CCA end, if the head unit uses it |
-| USB | native USB | Console is USB CDC (`CONFIG_ESP_CONSOLE_USB_CDC`). For the first flash, hold BOOT (GPIO0) and tap RST |
+| TEF6686 SDA / SCL | GPIO16 / GPIO17 | I2C0 master, 400 kHz. Internal pull-ups only (~45 kΩ); fit 2.2–4.7 kΩ if the module has none. `BRIDGE_TEF_I2C_AUTOSWAP` probes both orders |
+| Head unit SDA / SCL | GPIO33 / GPIO35 | I2C1 slave. The MCU (3.3 V STM32F030 or MM32 clone) bit-bangs ~90–140 kHz and never reads SCL: no clock stretching, the ISR fills the TX FIFO |
+| QN8035 INT | none | Optional 4.5 ms low pulse per RDS group/CCA end; this head unit does not use it |
+| USB | native | Console is USB CDC. First flash: hold BOOT (GPIO0), tap RST |
 
-Analog side: the TEF module's audio L/R out replaces the QN8035 audio
-outputs on the head unit side (check levels), and the head unit's FM antenna
-feed goes to the module's antenna input. The QN8035's 32.768 kHz clock input
-from the head unit is not needed. The head unit may power-gate the radio rail
-and probe the chip only once at its boot. The ESP must already answer at
-0x10 by then: it starts the slave before Wi-Fi, and boot time matters. In the
-capture of a cold start with radio as the last source, the first access came 31 s
-after power-up.
-
-TEF reference clock: set `BRIDGE_TEF_REFCLK` to the crystal on the module.
-The fitted module has a **9.216 MHz** crystal (`sdkconfig.defaults`; the
-Kconfig default is 12 MHz; 4 / 55.46667 MHz are also selectable). A wrong
-value does not break I2C or boot, and stations still play audio, but the
-error is **not** the clock ratio: with 9.216 MHz configured as 12 MHz, a
-92.0 MHz station centred at about 105.12 MHz on the dial (×0.875, not the
-×0.768 a pure ratio would give). Stations sit off the 100 kHz grid and
-neither the stereo pilot nor RDS locks, even at 47 dBµV. Those two flags are
-the quick test for the right setting.
+- The TEF module's audio L/R replaces the QN8035's outputs (levels unchecked); the antenna feed
+  goes to the module. The QN8035's 32.768 kHz clock input is not needed.
+- The head unit may power-gate the radio and probe the chip once at its boot (first access 31 s
+  after power-up in the capture): the slave starts before Wi-Fi.
+- TEF crystal: **9.216 MHz** (`BRIDGE_TEF_REFCLK` in `sdkconfig.defaults`; Kconfig default
+  12 MHz). A wrong value still boots and plays, but stations sit off the 100 kHz grid
+  (9.216 configured as 12: 92.0 MHz showed at ~105.12) and neither the stereo pilot nor RDS
+  locks. Those two flags are the quick test.
 
 ## Build, flash, test
 
-**Versioning.** The canonical SemVer is `PROJECT_VER` in the root `CMakeLists.txt`.
-It reaches the ESP-IDF app descriptor and existing boot/status/web/OTA version displays.
-Update it and `CHANGELOG.md` together, then tag the commit `vMAJOR.MINOR.PATCH`.
-During 0.x, minor versions may change interfaces; patch versions are compatible fixes.
-Do not override it with `APP_PROJECT_VER_FROM_CONFIG` or infer it from Git tags.
-
-PlatformIO, ESP-IDF **v5.4.0** (`platform = espressif32@6.10.0`, pinned).
-The layout is a plain ESP-IDF project (`main/` + `components/`), so
-`idf.py build` from a v5.4 shell works too.
+PlatformIO, ESP-IDF **v5.4.0** (`espressif32@6.10.0`, pinned); a plain ESP-IDF layout, so
+`idf.py build` works too. The CLI is `~/.platformio/penv/Scripts/pio.exe` if `pio` is not on PATH.
 
 ```sh
 pio run -e lolin_s2_mini                 # build
@@ -79,79 +55,45 @@ pio run -e lolin_s2_mini -t ota          # build + flash over Wi-Fi (web OTA)
 pio device monitor                       # USB CDC console
 pio run -e lolin_s2_mini -t menuconfig   # "QN8035 -> TEF6686 bridge" menu
 pio test -e native                       # host unit tests (needs gcc on PATH)
-python -B -m unittest discover -s test/scripts -v  # OTA uploader regressions
-python scripts/qn_capture.py captures/seek.csv --view timeline  # decode a bus capture
-python scripts/ride_log.py --note "route"  # record a ride over Wi-Fi (docs/ride-logging.md)
-python scripts/ride_report.py rides/<dir>  # its HTML report and CSVs
+python -B -m unittest discover -s test/scripts -v   # script tests (OTA uploader, ride logger)
+python scripts/qn_capture.py captures/seek.csv --view timeline   # decode a bus capture
+python scripts/ride_log.py --note "route"           # record a ride over Wi-Fi
+python scripts/ride_report.py rides/<dir>           # its HTML report and CSVs
 ```
 
-The CLI is `~/.platformio/penv/Scripts/pio.exe` if `pio` is not on PATH.
-
-**Configuration is code.** `sdkconfig.defaults` is the source of truth. The
-generated `sdkconfig.lolin_s2_mini` is git-ignored. After changing
-`sdkconfig.defaults`, delete **both** `sdkconfig.lolin_s2_mini` and
-`.pio/build/lolin_s2_mini/`. A stale CMake cache silently ignores the
-defaults. This has already happened once.
-
-**CMake re-configure.** PlatformIO re-runs CMake (~2 min) when
-`sdkconfig.lolin_s2_mini`, `sdkconfig.defaults`, or the top-level or `main`
-CMakeLists.txt is newer than `CMakeCache.txt`. CMake does not rewrite an
-unchanged cache, so without help that repeats on every build.
-`scripts/pio_cmake_stamp.py` (a post extra script) bumps the cache mtime after
-each build. A no-change build takes ~12 s. The same check ignores
-`components/*/CMakeLists.txt`: after adding a source file or a dependency to a
-component, touch `main/CMakeLists.txt` to force a re-configure.
-
-Web UI: join Wi-Fi **`TEF-Bridge`** (password `tef6686bridge`) and open
-**http://192.168.4.1/**. You can also set a station SSID in menuconfig to
-join an existing network (the IP address is logged).
-
-**Power.** `BRIDGE_CPU_DFS` defaults on in stand-alone builds: idle CPU 80 MHz,
-active CPU at `ESP_DEFAULT_CPU_FREQ_MHZ` (normally 160 MHz), APB 80 MHz, no
-light sleep. It is unavailable with QN8035 emulation to preserve slave interrupt
-timing. In the emulation build, `BRIDGE_WIFI_ENABLE` can disable Wi-Fi, HTTP and
-the log pump entirely (also disables web OTA; USB remains available). Wi-Fi stays
-on by default. `BRIDGE_QN_TRACE` now defaults off; enable it for bus bring-up.
-`BRIDGE_WIFI_TX_POWER_DBM` (default 8 dBm, max 20) caps the access point's
-transmit power: the phone is next to the head unit, and 20 dBm bursts draw about
-300 mA, enough to pull the supply below 2.84 V (2026-10-25).
-See [docs/power-usage.md](docs/power-usage.md) for analysis and measurement steps.
-
-**Watchdog and warm restart.** The task watchdog panics after 5 s if the idle,
-radio or qn_slave task stops, the interrupt watchdog after 300 ms
-(`sdkconfig.defaults`). The panic handler writes a core dump to the `coredump`
-partition and reboots. `sysmon` keeps the radio settings and the QN8035 register
-model in RTC memory (every 500 ms, two CRC-checked slots, same build only), and
-the next boot resumes from them: the head unit keeps its channel and mute state
-and hears a few seconds of silence. The Device card shows the reset reason, the
-crash count since power-on and the dump's task, PC and backtrace; `GET
-/api/coredump` downloads it for `esp-coredump info_corefile -t raw -c
-coredump.bin .pio/build/lolin_s2_mini/firmware.elf` (ESP-IDF shell, needs the
-toolchain's GDB). Known hang: ESP-IDF 5.4.0's I2C master spins without a
-deadline while the bus stays busy after a NACK (`s_i2c_send_commands`).
-Unexpected resets are also kept in NVS (reason, how long
-the run before lasted, its RDS clock time), so the Device card shows them after
-the power cycle that ends a hang.
-
-**Web OTA.** `-t ota` (`scripts/pio_ota.py`) runs `scripts/ota_upload.py`,
-which POSTs `firmware.bin` to `/api/ota`, waits for the restart and then for
-the confirmation. Plain `python scripts/ota_upload.py [--info] firmware.bin`
-works too. Host: `$OTA_HOST`, else `custom_ota_host` in platformio.ini (the AP
-address). The optional password (`BRIDGE_OTA_PASSWORD`) goes in `$OTA_PASSWORD`,
-never in the repo. The device writes the image to the inactive slot, checks the
-project name, lets `esp_ota_end` verify it, then restarts. The new image runs
-on probation (`BOOTLOADER_APP_ROLLBACK_ENABLE`). `main.c` confirms it after
-30 s; a reset or crash before that boots the previous image again, and
-`/api/ota` refuses uploads until then. The rollback lives in the bootloader, so
-it only exists after a USB flash. A USB upload also blanks `otadata`, so USB
-always boots slot `ota_0` and stays the recovery path. During an upload the
-httpd task serves nothing else (about 10–20 s).
-
-`fw.elf_sha256` is the first 8 descriptor bytes as 16 hex characters, independent
-of `APP_RETRIEVE_LEN_ELF_SHA`. Version 0.1.0 accidentally used the SDK log-hash
-helper and reported only 9 characters with the default config; the uploader
-accepts that exact legacy format as well. It retries through Wi-Fi reconnection
-and ignores old-server responses until the device restarts into the requested build.
+- **Versioning.** `PROJECT_VER` in the root `CMakeLists.txt` is the SemVer (app descriptor,
+  status, OTA). Bump it with `CHANGELOG.md`, then tag `vMAJOR.MINOR.PATCH`. In 0.x a minor
+  version may change interfaces. Never take it from Kconfig or Git tags.
+- **Configuration is code.** `sdkconfig.defaults` is the source of truth (car settings go
+  there, not only into menuconfig). After changing it, delete **both** `sdkconfig.lolin_s2_mini`
+  and `.pio/build/lolin_s2_mini/`: a stale CMake cache silently ignores the defaults.
+- **CMake re-configure** (~2 min) runs when `sdkconfig*` or the top-level or `main`
+  `CMakeLists.txt` is newer than the cache; `scripts/pio_cmake_stamp.py` keeps no-change builds
+  at ~12 s. Component `CMakeLists.txt` changes are not seen: touch `main/CMakeLists.txt` after
+  adding a source file or dependency.
+- **Web UI:** Wi-Fi **`TEF-Bridge`** / `tef6686bridge`, **http://192.168.4.1/** (or a station
+  SSID set in menuconfig; the IP is logged).
+- **Power:** `BRIDGE_CPU_DFS` (80 MHz idle, no light sleep) only in stand-alone builds: it would
+  disturb the slave's interrupt timing.
+  `BRIDGE_WIFI_ENABLE` can drop Wi-Fi, HTTP and OTA in the car build. `BRIDGE_QN_TRACE` (off)
+  logs the head-unit bus. `BRIDGE_WIFI_TX_POWER_DBM` = 8: 20 dBm bursts (~300 mA) pulled the
+  supply below 2.84 V. See [docs/power-usage.md](docs/power-usage.md).
+- **Watchdog and warm restart.** The task watchdog panics after 5 s (idle, radio, qn_slave),
+  the interrupt watchdog after 300 ms; the panic writes a core dump and reboots. `sysmon` keeps
+  the radio settings and the QN8035 model in RTC memory (500 ms, two CRC slots, same build only),
+  so the head unit keeps its channel and mute state. Unexpected resets are kept in NVS (reason,
+  run time, RDS clock). Decode a dump: `GET /api/coredump`, then `esp-coredump info_corefile -t
+  raw -c coredump.bin .pio/build/lolin_s2_mini/firmware.elf` (ESP-IDF shell). Known hang:
+  ESP-IDF 5.4.0's I2C master spins without a deadline while the bus stays busy after a NACK.
+- **Web OTA.** `scripts/ota_upload.py [--info] firmware.bin` (what `-t ota` runs) POSTs to
+  `/api/ota` and waits for the restart and the confirmation. Host `$OTA_HOST`, else
+  `custom_ota_host`; password `$OTA_PASSWORD` (`BRIDGE_OTA_PASSWORD`), never in the repo. The new
+  image runs on probation and `main.c` confirms it after 30 s; a reset before that rolls back
+  (the rollback bootloader exists only after one USB flash). A USB upload blanks `otadata`, so
+  USB always boots `ota_0` and stays the recovery path. httpd serves nothing else during an
+  upload (10–20 s).
+- **Build id:** `fw.elf_sha256` in `/api/status` is the first 8 bytes of the ELF SHA-256 as 16
+  hex characters (0.1.0 reported a 9-character form; the uploader accepts both).
 
 ## Architecture
 
@@ -163,283 +105,187 @@ and ignores old-server responses until the device restarts into the requested bu
                        │ radio_tune/scan/mute/volume      ▲ radio_evt_t (listener)
                        ▼                                  │
                     radio  [task "radio": sole owner of the TEF handle]
-                       │ tef6686_*                        ▲ radio_get_status()
+                       │ tef6686_*                        ▲ radio_get_status(), radio_get_trace()
                        ▼                                  │
  TEF6686 ══I2C0══ tef6686 (driver + patch blobs)          │
                                                           │
- phone ══Wi-Fi══ net_wifi ── web_ui (httpd: /, /api/*, /ws) ── log_stream (ESP_LOG tee)
-                               ├── radio_mem (NVS: settings, memory channels) ── radio API
-                               ├── tuning_store (NVS: reception tuning) ── radio_set_tuning*
-                               ├── af_store (NVS: AF lists per programme) ── radio_get_af_mem
-                               └── sysmon (reset reason, core dump, RTC snapshot of radio + QN8035 model)
+ phone/PC ══Wi-Fi══ net_wifi ── web_ui (httpd: /, /api/*, /ws) ── log_stream (ESP_LOG tee)
+                               ├── radio_mem (NVS: settings, memory channels)
+                               ├── tuning_store (NVS: reception tuning)
+                               ├── af_store (NVS: AF lists per programme)
+                               └── sysmon (resets, core dump, RTC snapshot)
 ```
 
-| Component | Role | Depends on | ESP-IDF free |
+| Component | Role | Depends on | Pure C, host-tested |
 |---|---|---|---|
 | `main` | Start-up order, Kconfig → config structs (`Kconfig.projbuild`) | everything | – |
-| `tef6686` | TEF668x driver: framing, read turnaround, boot state machine, patch selection, typed commands | esp_driver_i2c | no |
-| `tef6686/patch` | V102 p2.24 and V205 p5.12 patch+LUT blobs, generated by `regen_patch.py` | – | yes |
-| `radio` | Command queue, polling (quality + DSP processing status 100 ms, RDS 20 ms, health 2 s), seek state machine, AF following (AF_Update screen, Check + PI verification, trials), AF memory in RAM, trace ring, reception tuning applied at boot and live, recovery, status snapshot, listeners | tef6686, rds, af, tuning, trace | no |
-| `rds` | PI/PS/RT, AF list (0A), PTY/TP/TA and clock time (4A) decoder | – | **yes** (host-tested) |
-| `af` | AF decisions (`af.h`): candidate list, AF_Update level screen with streaks, round-robin checks, trial judgement on settled scores, retry waits, dwell, trust, bans, PI match with REG. AF memory (`af_mem.h`): AF lists and heard frequencies per PI, lookup by frequency | – | **yes** (host-tested) |
-| `trace` | Sequence-numbered record ring for clients that poll "since N" | – | **yes** (host-tested) |
-| `af_store` | Owns NVS namespace `af_mem`: loads the AF memory at boot, writes changed programme slots (one 36-byte record each; settle 60 s, gap 30 s, ≤ 64 per power-on, 10 s after the last head-unit command) | af, radio, nvs_flash | no |
-| `tuning` | Reception tuning table: one row per FM command word (UM V102 ranges and defaults) or host value (AF, seek, bandwidth sensitivity), frame building | – | **yes** (host-tested) |
-| `tuning_store` | Owns NVS namespace `tuning`: loads the saved values at boot, writes non-default values when the web UI saves | tuning, nvs_flash | no |
-| `presets` | Memory channels: slots, name sanitising (UTF-8), versioned flash image | – | **yes** (host-tested) |
-| `radio_mem` | Stand-alone build only: owns NVS namespace `radio_mem`, restores the settings at boot, saves them 2 s after they stop changing, memory channel API | radio, presets, nvs_flash | no |
-| `qn8035_emu` | QN8035 register file: bus writes → events, tuner state → registers | – | **yes** (host-tested) |
-| `qn8035_slave` | I2C slave v2 port, ISR→task hand-off, INT pulse, bus trace | qn8035_emu, esp_driver_i2c/gpio | no |
-| `bridge` | Maps QN8035 events ↔ radio commands/events, RSSI/SNR mapping | radio, qn8035_slave | no |
-| `log_stream` | Tees ESP_LOG output into a ring buffer (history + follow) | log | no |
-| `net_wifi` | SoftAP (always), optional STA with back-off | esp_wifi | no |
-| `sysmon` | Reset reason and crash count, reset history (NVS), core dump summary and download, warm-restart snapshot (radio settings, QN8035 model) in RTC memory | radio, qn8035_slave, espcoredump, nvs_flash | no |
-| `web_ui` | Embedded `www/index.html`, JSON API (`/api/trace` included), WebSocket log pump, firmware upload (`web_ota.c`) | radio, radio_mem, tuning_store, af_store, log_stream, qn8035_slave, sysmon, app_update | no |
-
-### Tasks and ownership
+| `tef6686` | TEF668x driver: framing, read turnaround, boot, patch selection, typed commands; `patch/` blobs from `regen_patch.py` | esp_driver_i2c | no |
+| `radio` | Command queue; polls quality + DSP status (100 ms), RDS (20 ms), health (2 s); seek; AF following (AF_Update screen, PI check, trials); AF memory in RAM; trace ring; tuning at boot and live; recovery; status snapshot | tef6686, rds, af, tuning, trace | no |
+| `rds` | PI/PS/RT, AF list (0A), PTY/TP/TA, clock time (4A) | – | yes |
+| `af` | `af.h`: AF decisions (level screen, streaks, trials, retry waits, dwell, trust, bans, PI match with REG). `af_mem.h`: AF lists and heard frequencies per PI | – | yes |
+| `trace` | Sequence-numbered record ring for "since N" polling | – | yes |
+| `tuning` | Reception tuning table: one row per FM command word (UM V102 range and default) or host value (AF, seek) | – | yes |
+| `presets` | Memory channels: slots, UTF-8 names, versioned image | – | yes |
+| `qn8035_emu` | QN8035 register file: bus writes → events, tuner state → registers | – | yes |
+| `qn8035_slave` | I2C slave v2 port, ISR→task hand-off, INT pulse, bus trace | qn8035_emu | no |
+| `bridge` | QN8035 events ↔ radio commands/events, RSSI/SNR mapping | radio, qn8035_slave | no |
+| `tuning_store` | NVS `tuning`: loads at boot, writes non-default values on Save | tuning | no |
+| `af_store` | NVS `af_mem`: loads the AF memory at boot, writes changed programme slots (rate-limited, below) | af, radio | no |
+| `radio_mem` | Stand-alone build only. NVS `radio_mem`: settings restored at boot and saved 2 s after they settle, memory channels | radio, presets | no |
+| `sysmon` | Reset reason, crash count, reset history (NVS), core dump summary, warm-restart snapshot | radio, qn8035_slave | no |
+| `log_stream`, `net_wifi`, `web_ui` | Log tee ring; SoftAP (+ optional STA); page, JSON API, WebSocket log, OTA | | no |
 
 | Task | Prio | Owns / does |
 |---|---|---|
-| `radio` | 5 | The TEF6686 handle. Nothing else talks to the tuner. Commands arrive via queue; `radio_get_status()` copies a mutex-protected snapshot. Watched by the task watchdog: waits at most 1 s |
-| `qn_slave` | max-2 | Hands the events decoded in the I2C ISR to the bridge. The QN8035 model itself runs in the ISR (spinlock shared with the setters), which refills the TX FIFO for the next read. **No logging in the ISR**. Watched by the task watchdog: waits at most 1 s |
-| `sysmon` | 1 | Copies `radio_get_settings()` and the QN8035 model into RTC memory every 500 ms (warm restart); reads the core dump summary once at start |
-| `qn_trace` | 2 | Formats and logs bus transactions queued by `qn_slave` (drops when full) |
-| `log_pump` | 3 | Moves new log bytes to WebSocket clients via `httpd_queue_work` |
-| `radio_mem` | 2 | Samples `radio_get_settings()` every 500 ms and writes them once stable for 2 s (not while seeking). Memory channel writes happen in the caller (httpd) |
-| `af_store` | 1 | Copies the AF memory every 2 s and writes changed programme slots to NVS, rate-limited (af_store.h) |
-| httpd | default | All HTTP/WS handlers run in this one task, so static buffers inside handlers are safe |
-
-The I2C slave receive callback runs in ISR context: it applies the write to
-the model, refills the TX FIFO and queues the events (pure C and register
-writes, no logging).
+| `radio` | 5 | The TEF6686 handle; nothing else talks to the tuner. Commands via queue, status copied under a mutex. Watchdog-watched, waits ≤ 1 s |
+| `qn_slave` | max-2 | Hands events from the I2C ISR to the bridge. The QN8035 model runs **in the ISR** (spinlock shared with the setters) and refills the TX FIFO. Watchdog-watched, waits ≤ 1 s |
+| `qn_trace` | 2 | Logs bus transactions queued by `qn_slave` (drops when full) |
+| `log_pump` | 3 | Moves log bytes to WebSocket clients via `httpd_queue_work` |
+| `sysmon`, `af_store` | 1 | RTC snapshot every 500 ms; AF memory writes (copy every 2 s) |
+| `radio_mem` | 2 | Settings autosave (stand-alone build) |
+| httpd | default | All HTTP/WS handlers in one task: static buffers in handlers are safe |
 
 ### Web API
 
-`GET /api/status` returns JSON. Commands are `POST` with query parameters:
-`/api/tune?band=FM|AM&khz=N`, `/api/step?dir=up|down`,
-`/api/seek?dir=up|down|stop`, `/api/volume?db=X`, `/api/mute?on=0|1`,
-`/api/bandwidth?khz=X` (0 = auto; FM sets the tuning values `bw_auto`/`bw_fix`, so a tuning save keeps it) and `/api/reinit`. `POST /api/ota` takes
-the raw `firmware.bin` as its body (`X-OTA-Password` header if a password is
-set); `/api/status` reports the running build under `fw`. `GET /ws` is a
-WebSocket that pushes raw log text. The full list is in
-[web_ui.h](components/web_ui/include/web_ui.h). The page must stay
-self-contained, with no CDN or web fonts: the AP has no internet.
+All endpoints and JSON fields are documented in [web_ui.h](components/web_ui/include/web_ui.h).
+The page polls `GET /api/status` every 0.5 s and builds its charts in the browser. Commands are
+`POST` with query parameters (`/api/tune`, `step`, `seek`, `volume`, `mute`, `bandwidth`,
+`reinit`, `tuning*`, `preset/*`, `ota`). `GET /api/trace?since=N` serves the ride recorder.
+Tuning values travel in chip units (display = v / div). The page must stay self-contained (no
+CDN, no web fonts): the AP has no internet.
 
-Reception tuning: `GET /api/tuning` returns the whole table (key `k`, group,
-label, unit, choices, `div`, min/max/default, current `v` and saved `sv`, in
-chip units; display = v / div). `POST /api/tuning?k=KEY&v=N` changes one value
-live, `/api/tuning/save` writes the current set to NVS, `/api/tuning/revert`
-goes back to the saved set and `/api/tuning/defaults` to the defaults (both not
-saved). `/api/status` carries `q.dsp` (soft mute, high cut, stereo blend, high
-blend in % of each control's range), `af` (state, smoothed score, list with
-the last measurement of each AF, `events`: the last 10 tries), `rds.pty`,
-`rds.tp`, `rds.ta`, `rds.ct` (UTC seconds + local offset), `clock_set` and
-`force_mono`. The page's signal history charts are built in the browser from
-these polls (opt-in, nothing extra on the device).
+**Clock:** the radio sets the system clock (UTC) and `TZ` from error-free RDS 4A groups; log time
+stamps show uptime until then, the station's local time after.
 
-**Clock.** The radio sets the system clock (UTC) and `TZ` from RDS clock time
-(group 4A, error-free groups only). Log time stamps come from the system clock
-(`CONFIG_LOG_TIMESTAMP_SOURCE_SYSTEM`): `HH:MM:SS.mmm` of uptime until a
-station sends CT, the station's local time after.
+## Engineering rules
 
-Restarts: `/api/status` has `sys` (reset reason, `warm`, `crashes` since power-on, `resets` and `history` from flash, `dump` with task, PC and backtrace) and `GET /api/coredump` downloads the stored core dump. The AF object also carries `need`, `dwell_s` and `probation`, and every list entry `last`, `n`, `streak`, `ban_s` and `trusted`.
-
-Memory channels (stand-alone build): `GET /api/presets` lists the used channels, and `POST /api/preset/store[?slot=N][&name=S]`, `/api/preset/recall?slot=N`, `/api/preset/rename?slot=N&name=S`, `/api/preset/clear?slot=N` and `/api/preset/step?dir=up|down` change them. N is the channel number as shown, 1..40. `/api/status` has a `mem` object whose `rev` changes with every channel change.
-
-## Engineering rules for this repo
-
-- **ESP-IDF 5.4 APIs only.** Use the new `driver/i2c_master.h` and
-  `driver/i2c_slave.h` (slave **v2**, `CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2`),
-  not the legacy `driver/i2c.h`. Check API signatures against the local SDK
-  in `~/.platformio/packages/framework-espidf`, not newer docs. `IS_ENABLED()`
-  does not exist in 5.4; use `#if CONFIG_...`.
-- **Components never read `CONFIG_BRIDGE_*`.** `main.c` maps Kconfig to
-  config structs. Components may only check SDK options they hard-depend on.
-- **Hardware-independent logic goes in pure-C components with host tests.**
-  The QN8035 model and the RDS decoder are examples. Add or adjust tests in
-  `test/native/` with every behaviour change. `pio test -e native` must
-  stay green. Build flags there are `-Wall -Wextra -Werror`.
-- **One owner per peripheral handle.** Other tasks go through that owner's
-  API or queue. Make ownership explicit in the header comment.
-- **ISR and callback code only signals.** Copy, `xQueueSendFromISR`, return.
-  No logging, no blocking, no driver calls. Keep logging out of
-  time-critical paths: queue a record and log it from a low-priority task.
-  The one exception is `qn8035_slave`: the head unit cannot wait for a task
-  (no clock stretching), so its receive callback runs the register model and
-  writes the TX FIFO under a spinlock.
-- **Errors.** Use `ESP_RETURN_ON_ERROR`/`ESP_RETURN_ON_FALSE` in init paths.
-  `ESP_ERROR_CHECK` is only for unrecoverable start-up in `app_main`. Runtime
-  I/O errors are counted and recovered: `radio` re-boots the tuner after 5
-  consecutive failures or when Get_Operation_Status falls back to boot or
-  idle. Never turn a failed read into a plausible value.
-- **Every wait has a deadline.** No unbounded polling loops. FreeRTOS stack
-  sizes are in **bytes**. Tick comparisons must be wrap-safe
-  (`(int32_t)(now - t) >= 0`). Tasks the task watchdog watches (radio,
-  qn_slave) reset it every loop and wait at most 1 s; it panics after 5 s.
-- **Keep the chip's units at the API boundary** and name them in comments:
-  TEF uses 0.1 dBµV, 0.1 %, 0.1 kHz and FM in 10 kHz steps. QN8035 CH is
-  50 kHz steps from 60 MHz. `radio` uses kHz for frequencies.
-- **No heap allocation in steady state**, except for the web log chunks
-  (bounded per period).
-- **Flash writes stall the CPU** (single-core S2, cache off) for up to tens of ms. Keep them out of the QN8035 emulation build (`BRIDGE_MEMORY` depends on `!BRIDGE_QN_EMU_ENABLE`) and rate-limit them elsewhere. Three exceptions: the reception tuning Save button (`tuning_store`), a rare, deliberate write that has to work in the car build too; `sysmon`'s reset history: one NVS write at boot after an unexpected reset, before the QN8035 slave starts, at most 16 per power-on; and `af_store`'s AF memory: one 36-byte record per changed programme, once stable for a minute, at most one per 30 s and 64 per power-on, and only 10 s after the last head-unit command. The QN8035 slave's receive interrupt runs from flash, so a head-unit read during a write can return a stale byte.
-- **Static DRAM is full** (0.4.0 overflowed `dram0_0_seg` by 3.5 kB). Allocate new large buffers once at start from the heap (the trace ring, af_store's working copies) and degrade gracefully if that fails.
-- **Reception tuning lives in the `tuning` table, not in Kconfig.** Add a DSP parameter as a table row with the UM V102 range and default (one row per command word, all words of a command covered). The radio applies every row at each tuner boot, so the defaults must be the chip's documented ones unless there is a reason, given in a comment.
-- **Patch blobs are generated, never hand-edited.** Run
-  `components/tef6686/patch/regen_patch.py`. Provenance and SHA-256 hashes
-  are in the file headers. Never reconstruct patch bytes from PDF text.
-- **Style:** C11/gnu17, 4-space indent, `snake_case`, module prefix on
-  public symbols, `static` for everything else, about 100 columns. Comment
-  only what is not obvious (why, units, source section).
-- **Git:** do not add a `Co-Authored-By` trailer to commits in this project.
+- **ESP-IDF 5.4 APIs only**: `driver/i2c_master.h`, `driver/i2c_slave.h` (slave **v2**), never
+  `driver/i2c.h`. Check signatures in `~/.platformio/packages/framework-espidf`, not newer docs.
+  No `IS_ENABLED()` in 5.4: use `#if CONFIG_...`.
+- **Components never read `CONFIG_BRIDGE_*`**: `main.c` maps Kconfig to config structs.
+  Components may check only SDK options they hard-depend on.
+- **Hardware-independent logic goes in pure-C components with host tests** in `test/native/`,
+  updated with every behaviour change. `pio test -e native` stays green (`-Wall -Wextra -Werror`).
+- **One owner per peripheral handle**; others use its API or queue. Name the owner in the header.
+- **ISR and callback code only signals** (copy, `xQueueSendFromISR`, return): no logging,
+  blocking or driver calls. Log from a low-priority task. Only exception: `qn8035_slave`'s receive
+  callback runs the model and writes the TX FIFO under a spinlock (no clock stretching).
+- **Errors:** `ESP_RETURN_ON_ERROR`/`ESP_RETURN_ON_FALSE` in init paths; `ESP_ERROR_CHECK` only
+  for unrecoverable start-up in `app_main`. Runtime I/O errors are counted and recovered (`radio`
+  re-boots the tuner after 5 failures in a row or when the chip falls back to boot/idle). Never
+  turn a failed read into a plausible value.
+- **Every wait has a deadline.** Stack sizes are in **bytes**. Tick comparisons are wrap-safe
+  (`(int32_t)(now - t) >= 0`). Watched tasks reset the watchdog every loop and wait ≤ 1 s.
+- **Units:** keep the chip's at the API boundary and name them (TEF: 0.1 dBµV, 0.1 %, 0.1 kHz, FM
+  in 10 kHz steps; QN8035 CH: 50 kHz steps from 60 MHz; `radio`: kHz).
+- **Memory:** no heap allocation in steady state (except the bounded web log chunks). The S2's
+  static DRAM segment is full (0.4.0 overflowed it by 3.5 kB): allocate large buffers once at
+  start from the heap and degrade gracefully if that fails.
+- **Flash writes stall the CPU** (single core, cache off) for up to tens of ms, and the QN8035
+  slave's receive ISR runs from flash, so a head-unit read during a write can return a stale
+  byte. Keep writes out of the emulation build (`BRIDGE_MEMORY` depends on
+  `!BRIDGE_QN_EMU_ENABLE`), except: the tuning Save button (rare, deliberate); `sysmon`'s reset
+  history (at boot, before the slave starts, ≤ 16 per power-on); `af_store` (one 36-byte record
+  per changed programme, stable for 60 s, ≥ 30 s apart, ≤ 64 per power-on, 10 s after the last
+  head-unit command).
+- **Reception tuning lives in the `tuning` table, not Kconfig**: one row per command word, all
+  words of a command covered, UM V102 range and default. Rows are applied at every tuner boot,
+  so defaults are the chip's documented ones unless a comment says why. Renaming a key drops what
+  users saved under it.
+- **Patch blobs are generated** by `components/tef6686/patch/regen_patch.py` (provenance and
+  SHA-256 in the headers), never hand-edited or rebuilt from PDF text.
+- **Style:** C11/gnu17, 4-space indent, `snake_case`, module prefix on public symbols, `static`
+  otherwise, ~100 columns. Comment only what is not obvious (why, units, source section).
+- **Git:** no `Co-Authored-By` trailer. Each build handed over for testing gets a commit with
+  its build id (`fw.elf_sha256`) in the message.
 
 ## Reference facts (verified against sources)
 
-The sources are the local skills `nxp-tef6686-development` (UM TEF668X V102
-Rev 1.9, "UM V102") and `qn8035-development` (datasheet Rev 0.08 register
-chapter), plus PE5PVB/TEF6686_ESP32 @ `3a770542a029`. Look up details there
-before changing protocol code.
+Sources: the local skills `nxp-tef6686-development` (UM TEF668X V102 Rev 1.9, "UM V102") and
+`qn8035-development` (datasheet Rev 0.08), plus PE5PVB/TEF6686_ESP32 @ `3a770542a029`. Look
+details up there before changing protocol code.
 
 **TEF6686**
-- 7-bit address **0x64** (manual's C8h/C9h are shifted). Write frame:
-  `[module, cmd, index=1, BE16 params…]`. Modules: FM 0x20, AM 0x21,
-  AUDIO 0x30, APPL 0x40.
-- Get: write `[module, cmd, 1]` with STOP, then wait **≥ 27 µs** (we use
-  50 µs, UM V102 §5.6), then do a separate read. Do not use a combined
-  repeated-start `transmit_receive`.
-- Boot: reset `1E 5A 01 5A 5A`, then `1C 00 00`, then `1C 00 74` + patch in
-  `1B`-prefixed blocks of ≤ 24 bytes, then `1C 00 00`, then `1C 00 75` + LUT,
-  then `1C 00 00`, then Start `14 00 01` (boot→idle < 50 ms), then
-  Set_ReferenceClock `40 04 01 [Hz hi][Hz lo][type]`, then Activate
-  `40 05 01 0001` (idle→active < 100 ms). All Gets return 0 in boot state, so
-  zeros are not identity evidence.
-- Get_Operation_Status (40/80): 0 boot, 1 idle, 2 standby, 3 FM, 4 AM.
-  Get_Identification (40/82): device `0x09xx` (low byte 14 = TEF6686).
-  Generation = `hi(hw)*100 + hi(sw)`, which gives 102 or 205 and selects the
-  patch (auto mode).
-- Tune_To mode: 1 Preset, 2 Search (muted until End/Preset), 3 AF update,
-  4 Jump, 5 Check, 7 End (mode only). Quality time stamp: 0 means still
-  tuning; we wait for ≥ 10 ms of data during seek.
-- Get_RDS_Data (20/83) **consumes** the buffered group. Status bits: [15]
-  data available, [14] lost, [13] first-PI, [12] B group, [9] sync. dec_error
-  uses 2 bits per block (A in [15:14]).
-- After boot, audio is **muted by default** (Set_Mute default = 1).
-- AF_Update (Tune_To mode 3) visits a frequency and returns by itself, about
-  6 ms with the default 2 ms sample time (Set_Tune_Options, 20/02). Its quality
-  is frozen with status bit 15 set until **Get_Quality_Data (20/81)** reads and
-  releases it; Get_Quality_Status (20/80) leaves it frozen. Check (mode 5) tunes
-  like Jump but keeps the mute until End (mode 7) or another Jump.
-- Get_Processing_Status (20/86): softmute, highcut, stereo, sthiblend in 0.1 %
-  of each control's _Min.._Max range.
-- Weak-signal command families (UM V102 §3): _Time (slow attack/decay ms,
-  fast attack/decay 0.1 ms), _Level (mode, start 0.1 dBµV, slope 0.1 dB),
-  _Noise/_Mph (mode, start, slope in 0.1 % of USN/WAM), _Max/_Min (mode,
-  limit). Soft mute 40-45, high cut 50-59, stereo 60-66, stereo high blend
-  70-76. Set_Softmute_Mod exists for AM only.
+- 7-bit address **0x64** (the manual's C8h/C9h are shifted). Write `[module, cmd, index=1, BE16
+  params…]`; modules FM 0x20, AM 0x21, AUDIO 0x30, APPL 0x40.
+- Get: write `[module, cmd, 1]` with STOP, wait **≥ 27 µs** (we use 50 µs, UM V102 §5.6), then a
+  separate read. No combined repeated-start `transmit_receive`.
+- Boot: `1E 5A 01 5A 5A`; `1C 00 00`; `1C 00 74` + patch in `1B` blocks of ≤ 24 bytes; `1C 00 00`;
+  `1C 00 75` + LUT; `1C 00 00`; Start `14 00 01` (→ idle < 50 ms); Set_ReferenceClock `40 04 01
+  [Hz hi][Hz lo][type]`; Activate `40 05 01 0001` (→ active < 100 ms). All Gets return 0 in boot
+  state: zeros are no identity evidence.
+- Get_Operation_Status (40/80): 0 boot, 1 idle, 2 standby, 3 FM, 4 AM. Get_Identification (40/82):
+  device `0x09xx` (low byte 14 = TEF6686); generation `hi(hw)*100 + hi(sw)` = 102 or 205 selects
+  the patch.
+- Tune_To modes: 1 Preset (~32 ms mute), 2 Search (muted until End/Preset), 3 AF_Update, 4 Jump
+  (minimum mute, DSP changes gradually), 5 Check (like Jump, muted until End or Jump), 7 End.
+  Quality time stamp: 0 = still tuning, 1..320 = 0.1..32 ms after the tune, 1000 = later; we
+  treat ≥ 32 ms as settled.
+- AF_Update visits a frequency and returns by itself (~6 ms, 1 ms mute slopes, inaudible). Its
+  quality is sampled for `afu_sample_time` (default 2 ms, the minimum UM V102 advises for
+  detector settling) and frozen with status bit 15 until **Get_Quality_Data (20/81)** reads and
+  releases it; Get_Quality_Status (20/80) leaves it frozen. Its USN/WAM swing by tens of dB and
+  read ~30 dB worse than settled values (on air, 2026-10-25): compare levels only.
+- Get_RDS_Data (20/83) **consumes** the buffered group. Status bits [15] data, [14] lost,
+  [13] first-PI, [12] B group, [9] sync; dec_error 2 bits per block (A in [15:14]).
+- Audio is **muted after boot** (Set_Mute default 1).
+- Get_Processing_Status (20/86): softmute, highcut, stereo, sthiblend in 0.1 % of each control's
+  _Min.._Max range.
+- Weak-signal families (UM V102 §3): _Time (slow ms, fast 0.1 ms), _Level (mode, start
+  0.1 dBµV, slope 0.1 dB), _Noise/_Mph (mode, start, slope in 0.1 % of USN/WAM), _Max/_Min.
+  Soft mute 40-45, high cut 50-59, stereo 60-66, high blend 70-76. Set_Softmute_Mod is AM only.
 
 **QN8035**
-- 7-bit address **0x10**. Drivers read single registers: write reg, then
-  repeated-start read of 1 byte. Registers 0x00–0x18 are documented; vendor
-  recipes also write undocumented registers up to 0x57 (the shadow covers
-  0x00–0x7F).
-- f = 60 MHz + CH × 50 kHz. CH[9:8] is in CH_STEP[1:0]; the scan
-  start/stop high bits and FSTEP are packed into CH_STEP too.
-- Tune: SYSTEM1 = RXREQ|CHSC|CCA_CH_DIS (Jieli). Some drivers write
-  CCA_CH_DIS|RXREQ|RDSEN without CHSC (dilshan). Seek: CHSC with CCA_CH_DIS=0
-  scans CH_START→CH_STOP. The chip clears CHSC when done, and STATUS1
-  RXCCA_FAIL=1 means nothing was found.
-- CID2 reads 0x84 (drivers check `& 0xFC == 0x84`). INT_CTRL is at **0x18**
-  (the old prose says 0x17, which is the clock register, so it is wrong).
-- RDS: RDSD0..7 = blocks A..D, high byte first. STATUS2 bit 7 toggles on each
-  group, bit 4 is sync, bits 3..0 are per-block errors.
+- 7-bit address **0x10**. This head unit reads single registers: write the register, STOP, then
+  a 1-byte read. The first data bit comes 115 µs after the STOP: the FIFO must be filled within
+  ~100 µs. Generic drivers use a repeated-start read instead, which the slave does not support. Registers 0x00–0x18 are documented; recipes also write undocumented ones up to 0x57
+  (the shadow covers 0x00–0x7F).
+- f = 60 MHz + CH × 50 kHz; CH[9:8], the scan start/stop high bits and FSTEP are in CH_STEP.
+- Tune: SYSTEM1 = RXREQ|CHSC|CCA_CH_DIS (some drivers: CCA_CH_DIS|RXREQ|RDSEN, no CHSC).
+  Seek: CHSC with CCA_CH_DIS=0 scans CH_START→CH_STOP; the chip clears CHSC when done, STATUS1 RXCCA_FAIL=1 means nothing found. This head unit never uses
+  the chip's scan (CH_START = CH_STOP on every captured tune).
+- CID1 reads 0x42, CID2 0x84 (drivers check `& 0xFC == 0x84`), register 0x58 reads 0x33.
+  INT_CTRL is at **0x18** (old prose says 0x17, the clock register).
+- RDS: RDSD0..7 = blocks A..D, high byte first. STATUS2 bit 7 toggles per group, bit 4 sync, bits
+  3..0 per-block errors.
+- The head unit: polls STATUS2 every 50 ms and STATUS1 every 502 ms, reads RDS when bit 7
+  toggles; mutes via 0x4A and its BD37534 (volume is BD37534 only); one seek press scans the band;
+  four tunes in standby precede the init.
 
-## Open questions (verify on hardware before relying on them)
+## Open questions (verify on hardware)
 
-1. ~~TEF module crystal and SDA/SCL order~~ Resolved: 9.216 MHz crystal, and
-   the tuner ACKs with SDA=GPIO16, SCL=GPIO17.
-2. ~~How the head unit's driver talks to the QN8035~~ Resolved: a bus capture of
-   V03.12 with the original chip ([docs/headunit-bus-capture.md](docs/headunit-bus-capture.md))
-   matches the V03.03 firmware analysis write for write (corrections listed there).
-   Bit-banged ~90–140 kHz, single-register reads with a STOP after the register
-   byte, CHSC polled only during seek, INT unused, mute in 0x4A and the BD37534.
-   One seek press runs a full-band scan. Volume is BD37534 only. Four tunes in standby come before the init.
-3. Head-unit bus voltage (the MCU is a 3.3 V STM32F030 or MM32 clone). Clock
-   stretching: not tolerated, handled by filling the TX FIFO.
-4. I2C slave v2 on the S2 with stretching off: check on the logic analyser
-   that the hardware sends exactly the FIFO bytes after the address, and
-   whether a NACKed read leaves a byte prefetched (the read count and the
-   pointer would be one too high). Repeated-start reads are not supported;
-   this head unit does not use them. The capture gives the deadline: the first
-   data bit of a read is clocked 115 µs after the STOP of the register write
-   (STOP to START 2 µs), so the FIFO must be filled within about 100 µs.
-5. ~~Real CID1 value~~ Resolved: CID1 reads 0x42 (ver 2: CHSC start, 0x4A mute)
-   and register 0x58 reads 0x33 (id 0x13 spur list). The emulator returns the same
-   since 0.2.0; see the comparison in
-   [docs/headunit-bus-capture.md](docs/headunit-bus-capture.md).
-6. RSSISIG/SNR scaling (`bridge`: RSSI = dBµV + 43, SNR is a heuristic that
-   follows the web UI seek limits around the MCU's seek threshold, SNR > 25;
-   the MCU shows RSSISIG − 40). Calibrate against the real chip on a known
-   station. Reference values from the original chip are in
-   [docs/headunit-bus-capture.md](docs/headunit-bus-capture.md): RSSISIG 0x46 on
-   93.3 MHz, and the SNR of each of the 26 channels its scan accepted.
-7. QN8035 behaviour after a failed scan (we leave CH at CH_STOP). This head
-   unit never uses the chip's own scan: CH_START = CH_STOP on every captured tune.
-8. Seek thresholds (level/USN/WAM/offset) for a car antenna (now in the web
-   UI's Seek group). The captured scan of the original chip (26 channels passed
-   at RXCCAD = 20) is a reference list for the bench location.
-9. Audio level match between the TEF DAC and the QN8035 outputs.
-10. AF on air: does an AF_Update check disturb RDS sync or audio on the tuned
-    station? How fast does the PI answer after a Check tuning (the PI check
-    timeout, default 300 ms)? Does the RDS buffer hold a group from before the
-    Check (we drain it first)? Watch the AF card and the log while driving.
-    First on-air run (2026-10-19, weak station, score 16-18 dB): bans were lost every
-    10-20 s because one miscorrected block A changed the PI and reset the AF state.
-    Fixed: a new PI must repeat before it counts, the RDS buffer is flushed after
-    jumping back, and bans double per repeated failure. Two AFs of PI 3348 carried
-    strong local stations (PI 3205, 3209): co-channel use is normal, expect bans.
-    Second run (2026-10-25, weak signal, captures/Screenshot_2026-10-25-*): it hopped
-    between three transmitters of PI 3F44 every 3-50 s on single AF_Update peaks, and
-    each PI check muted 100-220 ms. Single samples swing between about -40 and +45 dB;
-    as AFs they averaged ~30 dB below the tuned quality score. Reworked: 3 wins in a row,
-    dwell, jumps without a PI check to frequencies verified within 10 min, bans from 5 min.
-    A build that also measured the tuned frequency with AF_Update (as a like-for-like
-    reference) and sent Set_Bandwidth's extended words made reception louder and noisier
-    on all stations; both were taken out. Which one did it is not known.
-    0.3.0 then never switched: AF_Update scores (2 ms of USN/WAM) read ~30 dB below settled
-    ones, so no candidate met the margin. 0.4.0 screens by AF_Update level only and decides with
-    a trial on settled quality. Record a ride (docs/ride-logging.md) and set `af_window` from the
-    report's AF_Update calibration table (level bias of AF_Update against settled readings).
-11. Weak-signal defaults: we send the UM V102 Rev 1.9 power-up values at every
-    boot. Confirm patch p2.24 does not expect others (PE5PVB's init table
-    differs in places, e.g. Stereo_Time). In the car (weak coverage) the Weak
-    signal card's "Mono sooner" works well (2026-10-25); kept as an option.
-12. A trial plays the candidate for `af_trial` (1.5 s) and may jump back: check on air how
-    that sounds (transmitters of one programme are not time-aligned). The
-    extended Set_Bandwidth words (Weak signal: Auto narrow) are sent only once
-    changed: check that they narrow the filter (live bar BW) without side effects.
-13. The hang of 2026-10-25 (station stuck, head unit ignored, Wi-Fi network gone
-    until a power cycle). With the watchdog armed it left no core dump, so no task
-    stalled: the chip itself stopped or kept resetting. Suspect the supply: with the
-    brown-out reset raised to 2.84 V the bench board reset every time a Wi-Fi client
-    connected, so the 3.3 V rail dips below that on transmit bursts, into the range
-    where the core runs on while the in-package flash may not. Back at 2.44 V until
-    the supply is fixed (bulk capacitance at 3V3, the TEF module off the S2 Mini's
-    regulator); Wi-Fi transmit power down to 8 dBm meanwhile. Check the reset history after the next hang. The only dump in flash then was older, from a
-    stand-alone build: a NULL read in the ROM USB driver under the USB console
-    interrupt (`esp_usb_console_cdc_acm_cb`), with a USB host attached.
-14. AF memory assumes the programme stored for a frequency until RDS sends a PI. Far from
-    home a frequency can carry another programme: a switch made before the PI arrives plays
-    the stored one. The AF card shows PI FROM MEMORY meanwhile; tuning row `af_mem` turns it
-    off.
+1. Logic analyser on the head-unit bus: does the slave send exactly the FIFO bytes, and does a
+   NACKed read leave a byte prefetched (read count and pointer one too high)?
+2. RSSI/SNR mapping (`bridge`: RSSI = dBµV + 43; SNR a heuristic around the MCU's threshold,
+   SNR > 25; the MCU shows RSSISIG − 40). Reference: the original chip read RSSISIG 0x46 on
+   93.3 MHz; the SNR of the 26 channels its scan accepted is in the capture doc.
+3. Seek thresholds for the car antenna (web UI Seek group); the capture's 26 channels are a
+   reference list. Behaviour after a failed scan (we leave CH at CH_STOP).
+4. Audio level match between the TEF DAC and the QN8035 outputs.
+5. AF on air (0.4.0). Record rides (docs/ride-logging.md) and set `af_window` from the report's
+   AF_Update calibration table, `af_gain`/`af_trial` from the trials. Check how a trial and a
+   jump back sound (transmitters of one programme are not time-aligned) and how fast a PI
+   answers after Check (`af_pi`, 300 ms). Lessons so far: a miscorrected block A once changed the
+   PI and reset the AF state (a new PI must now repeat); co-channel use of AFs is normal (expect
+   other-PI bans); deciding on single AF_Update peaks made it hop between transmitters. A build
+   that measured the tuned frequency with AF_Update and sent Set_Bandwidth's extended words made
+   reception louder and noisier; which one did it is unknown: avoid both untested.
+6. AF memory assumes the programme stored for a frequency until RDS sends a PI; far from home a
+   frequency may carry another programme, and a switch before the PI arrives plays the stored one
+   (AF card: PI FROM MEMORY; tuning row `af_mem` turns it off).
+7. Weak-signal defaults are the UM V102 power-up values; confirm patch p2.24 expects no others
+   (PE5PVB differs, e.g. Stereo_Time). "Mono sooner" works well in weak coverage. Check that the
+   extended Set_Bandwidth words (Auto narrow) narrow the filter without side effects.
+8. The hang of 2026-10-25 (station stuck, head unit ignored, Wi-Fi gone until a power cycle) left
+   no core dump. Suspect the supply: with the brown-out level at 2.84 V the board reset on every
+   Wi-Fi connect. Brown-out back at 2.44 V and TX power at 8 dBm until the supply is fixed (bulk
+   capacitance at 3V3, the TEF module off the S2 Mini's regulator). Check the reset history after
+   the next hang. (The only stored dump was older: a NULL read in the ROM USB console driver with a
+   USB host attached.)
 
 ## Roadmap
 
-1. **TEF bench bring-up**: flash, confirm the patch loads and the
-   identification reads, tune, check RDS and audio. Use the web UI and log.
-2. ~~**Head-unit capture**~~ Done: [docs/headunit-bus-capture.md](docs/headunit-bus-capture.md),
-   decoded with `scripts/qn_capture.py`.
-3. **Emulation on the bench**: enable `BRIDGE_QN_EMU_ENABLE`. Replay the
-   captured sequences from a second MCU acting as master; compare responses.
-4. **In the car.**
-5. Later: AM on the head unit side (QN8035 is FM-only), AM weak-signal
-   tuning (the table covers FM only), EON (AFs of other networks, group 14),
+1. Rides with the recorder; tune AF from the reports.
+2. Head-unit bus on the logic analyser (open questions 1, 2).
+3. Later: AM on the head unit side (the QN8035 is FM-only), AM weak-signal tuning, EON (group 14),
    TA/TP.

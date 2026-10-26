@@ -25,17 +25,28 @@
  * /api/status additions:
  *   "q.dsp"       {"softmute","highcut","stereo","sthiblend"} in % of each control's range
  *                 (stereo 100 = mono); null on AM
- *   "af"          {"active","poor","checking_pi","probation","score","need","dwell_s","confirm",
- *                 "switches","pi_fails","list":[ENTRY]} (af.h). score: the tuned station's
- *                 quality score; need: what a candidate's AF_Update measurements must reach,
- *                 "confirm" times in a row; dwell_s: until switching is allowed again
- *                 ENTRY {"khz","score","last","n","streak","level","age_s","banned","ban_s",
- *                 "trusted"}: AF_Update average of n measurements and the last one, in dB =
- *                 level - USN - WAM (null when unknown); trusted: switched to without a PI check
- *   "af.events"   the last 10 AF tries, newest first: {"type":"switched"|"jumped"|"other_pi"|
- *                 "no_pi","age_s","from","to","score","cur","pi","ban_s"} (kHz, dB). "cur" is
- *                 the tuned station's score at the try, "pi" the PI heard on the candidate for
- *                 other_pi, else null; "ban_s" the skip time given
+ *   "af"          {"active","poor","checking_pi","probation","pi","pi_mem","score","level",
+ *                 "need","trial","mem","dwell_s","confirm","switches","pi_fails","list":[ENTRY]}
+ *                 (af.h). score/level: the tuned station's smoothed quality score (dB = level -
+ *                 USN - WAM) and level (dBuV); need: the level a candidate's AF_Update
+ *                 measurements must reach "confirm" times in a row to be tried; pi_mem: the PI
+ *                 comes from the AF memory; trial: null or {"khz","left_ms","n","mean","ref"}
+ *                 (the candidate's mean settled score so far and what it must beat, plus the
+ *                 gain); mem: {"progs","saving","pending","writes","errors"} (af_store.h);
+ *                 dwell_s: until switching is allowed again
+ *                 ENTRY {"khz","score","last","n","streak","level","lavg","trial","losses",
+ *                 "retry_s","age_s","banned","ban_s","trusted"}: AF_Update score average of n
+ *                 measurements and the last one, last level and level average, the mean score
+ *                 of its last trial, trials lost in a row and the wait before the next (null
+ *                 when unknown); trusted: tried without a PI check
+ *   "af.events"   the last 10 AF steps, newest first: {"type","age_s","from","to","score","cur",
+ *                 "pi","ban_s"} (kHz, dB). type: check (muted PI check begins), trial (the
+ *                 candidate plays), switched/jumped (trial won after a PI check / on a trusted
+ *                 frequency), worse (trial lost, back), other_pi, no_pi (PI check failed), abort
+ *                 (a command came in). score/cur: for check and trial the candidate's AF_Update
+ *                 level (dBuV) and the tuned score; for results the trial mean and the tuned
+ *                 station's mean; null if none. pi: heard on the candidate for other_pi;
+ *                 ban_s: the skip (other_pi, no_pi) or retry wait (worse)
  *   "rds.pty"     programme type 0..31 (RDS table); null until known
  *   "rds.tp","rds.ta"  traffic programme / traffic announcement flags
  *   "rds.ct"      {"unix": UTC seconds, "off_min": local offset} of the last error-free
@@ -48,6 +59,9 @@
  *                 history [{"reason","n","up_s","wall"}] newest first: n = resets since that
  *                 power-on, up_s = how long the run before lasted, wall = its UTC end (RDS
  *                 clock) or null; dump null or {"task","elf","pc","bt":[hex],"corrupted"}
+ *   GET  /api/trace?since=N   the radio's trace from sequence number N on (radio_trace_t), for
+ *                        a PC recording a ride (scripts/ride_log.py): {"boot","now","first",
+ *                        "lost","r":[records],"next"}. Chip units. boot changes with every start
  *   GET  /api/coredump   the stored core dump, raw (espcoredump.py info_corefile -t raw); 404 if
  *                        none. A new crash overwrites it
  *
