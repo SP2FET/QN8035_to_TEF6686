@@ -373,7 +373,6 @@ static af_params_t af_params(void)
         .dwell_ms = (uint32_t)v[TUNING_AF_DWELL] * 1000u,
         .retry_ms = (uint32_t)v[TUNING_AF_RETRY] * 1000u,
         .check_usn = (uint16_t)v[TUNING_AF_CHK_USN],
-        .check_gap_ms = (uint32_t)v[TUNING_AF_CHK_GAP] * 1000u,
     };
 }
 
@@ -413,6 +412,7 @@ static void publish_af(void)
     a->switches = s.af.switches;
     a->pi_fails = s.af.pi_fails;
     a->now_ms = now;
+    a->lists = st->lists;
     a->n = s.af.st.n;
     memcpy(a->e, s.af.st.e, sizeof(a->e));
     unlock();
@@ -467,8 +467,8 @@ static void af_new_station(void)
     unlock();
 }
 
-/* AFs the programme was received on before (AF memory) are trusted: tried by an unmuted Jump with
- * the PI watched, never after a muted PI check. */
+/* AFs the programme was received on before (AF memory) are trusted while a transmitter lists them
+ * (af.h): tried by an unmuted Jump with the PI watched, never after a muted PI check. */
 static void af_trust_heard(void)
 {
     uint8_t codes[AF_MEM_CODES];
@@ -536,6 +536,7 @@ static void af_follow_rds(void)
         af_sync(&s.af.st, codes, n);
     }
     af_sync(&s.af.st, r->af, r->af_count);
+    af_listed(&s.af.st, r->af, r->af_count, now_ms());
     lock();
     const int slot = af_mem_learn(&s.mem, r->pi, s.status.freq_khz, r->af, r->af_count);
     unlock();
@@ -638,7 +639,6 @@ static void af_verify_begin(uint32_t khz, int16_t level_avg)
         return;
     }
     s.af.verifying = true;
-    af_check_started(&s.af.st, now_ms());
     s.af.cand = khz;
     s.af.origin = s.status.freq_khz;
     s.af.cand_score = level_avg;
@@ -695,6 +695,7 @@ static void af_trial_start(bool checked)
     s.af.t_start = xTaskGetTickCount();
     s.af.cur_score = s.af.st.trial_ref;
     lock();
+    rds_af_clear(&s.status.rds); /* the candidate's own AF list counts from now on */
     s.status.freq_khz = s.af.cand;
     s.status.q.valid = false;
     s.status.af.trial = true; /* with the frequency: radio_get_settings */
@@ -716,6 +717,7 @@ static void af_trial_back(void)
     s.af.probation = false;
     af_jump_back();
     lock();
+    rds_af_clear(&s.status.rds); /* the origin's own AF list counts from now on */
     s.status.freq_khz = s.af.origin;
     s.status.q.valid = false;
     s.status.af.trial = false;

@@ -63,6 +63,10 @@ typedef struct {
 
 void rds_reset(rds_state_t *s);
 
+/** Forgets the AF list (and a pending LF/MF marker) but nothing else: the tuner moved to another
+ * transmitter of the programme, whose list is the one that counts. */
+void rds_af_clear(rds_state_t *s);
+
 /**
  * Feed one group. err[i] is the error grade of block i (A..D).
  * Returns true if the group was accepted. A PI different from the valid one is taken only

@@ -179,8 +179,6 @@ const tuning_param_t tuning_params[TUNING_COUNT] = {
      * USN in every AF_Update (ride of 2026-10-26). 100 % turns the screen off. */
     [TUNING_AF_CHK_USN] = ROW("af_chk_usn", G_AF, "PI check only after an AF_Update USN below",
                               "%", NULL, TUNING_HOST, 0, 10, 0, 1000, 250),
-    [TUNING_AF_CHK_GAP] = ROW("af_chk_gap", G_AF, "Least time between two muted PI checks", "s",
-                              NULL, TUNING_HOST, 0, 1, 0, 600, 20),
     /* A frequency that failed once fails again from the same place, and every try mutes. */
     [TUNING_AF_BAN] = ROW("af_ban", G_AF, "Skip after a failed PI check (doubles; another PI 4x)",
                           "s", NULL, TUNING_HOST, 0, 1, 10, 3600, 300),

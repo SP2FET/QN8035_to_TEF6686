@@ -38,6 +38,12 @@ static void clear_text(rds_state_t *s)
     memset(&s->ct, 0, sizeof(s->ct));
 }
 
+void rds_af_clear(rds_state_t *s)
+{
+    s->af_count = 0;
+    s->af_lfmf = false;
+}
+
 void rds_reset(rds_state_t *s)
 {
     memset(s, 0, sizeof(*s));

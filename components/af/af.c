@@ -71,12 +71,6 @@ static af_entry_t new_entry(uint32_t khz)
     return e;
 }
 
-static bool entry_trusted(const af_entry_t *e, uint32_t now_ms)
-{
-    return !banned(e, now_ms) &&
-           (e->heard || (e->verified && (uint32_t)(now_ms - e->verified_ms) < AF_TRUST_MS));
-}
-
 static void add(af_state_t *s, const af_entry_t *e)
 {
     if (e->khz == 0 || e->khz == s->tuned.khz || s->n >= AF_MAX || find(s, e->khz) >= 0) {
@@ -300,14 +294,13 @@ uint32_t af_pick(const af_state_t *s, const af_params_t *p, uint32_t now_ms)
     const uint32_t limit = fresh_ms(s, p);
     int16_t best = need;
     uint32_t khz = 0;
-    const bool check_ok = !s->checked || due(now_ms, s->check_ms + p->check_gap_ms);
     for (unsigned i = 0; i < s->n; i++) {
         const af_entry_t *e = &s->e[i];
         if (e->streak < AF_CONFIRM || !fresh(e, limit, now_ms) || banned(e, now_ms) ||
             waiting(e, now_ms)) {
             continue;
         }
-        if (!entry_trusted(e, now_ms) && (!check_ok || af_usn_min(e) > p->check_usn)) {
+        if (!af_entry_trusted(e, s->lists, now_ms) && af_usn_min(e) > p->check_usn) {
             continue;
         }
         if (e->level_avg > best || (khz == 0 && e->level_avg == best)) {
@@ -324,7 +317,15 @@ bool af_trusted(const af_state_t *s, uint32_t khz, uint32_t now_ms)
     if (i < 0) {
         return false;
     }
-    return entry_trusted(&s->e[i], now_ms);
+    return af_entry_trusted(&s->e[i], s->lists, now_ms);
+}
+
+bool af_entry_trusted(const af_entry_t *e, bool lists, uint32_t now_ms)
+{
+    return !banned(e, now_ms) &&
+           ((e->verified && (uint32_t)(now_ms - e->verified_ms) < AF_TRUST_MS) ||
+            (e->heard &&
+             (!lists || (e->listed && (uint32_t)(now_ms - e->listed_ms) < AF_TRUST_MS))));
 }
 
 void af_set_heard(af_state_t *s, const uint8_t *codes, uint8_t n)
@@ -339,10 +340,19 @@ void af_set_heard(af_state_t *s, const uint8_t *codes, uint8_t n)
     }
 }
 
-void af_check_started(af_state_t *s, uint32_t now_ms)
+void af_listed(af_state_t *s, const uint8_t *codes, uint8_t n, uint32_t now_ms)
 {
-    s->checked = true;
-    s->check_ms = now_ms;
+    s->lists = s->lists || n > 0;
+    for (unsigned i = 0; i <= s->n; i++) {
+        af_entry_t *e = i < s->n ? &s->e[i] : &s->tuned;
+        const uint8_t code = af_khz_code(e->khz);
+        for (unsigned k = 0; code && k < n; k++) {
+            if (codes[k] == code) {
+                e->listed = true;
+                e->listed_ms = now_ms;
+            }
+        }
+    }
 }
 
 void af_verified(af_state_t *s, uint32_t khz, uint32_t now_ms)

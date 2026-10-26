@@ -25,22 +25,26 @@
  * /api/status additions:
  *   "q.dsp"       {"softmute","highcut","stereo","sthiblend"} in % of each control's range
  *                 (stereo 100 = mono); null on AM
- *   "af"          {"active","poor","checking_pi","probation","pi","pi_mem","score","level",
+ *   "af"          {"active","poor","checking_pi","probation","pi","pi_mem","lists","score","level",
  *                 "need","trial","mem","dwell_s","confirm","switches","pi_fails","list":[ENTRY]}
  *                 (af.h). score/level: the tuned station's smoothed quality score (dB = level -
  *                 USN - WAM) and level (dBuV); need: the level a candidate's AF_Update
  *                 measurements must reach "confirm" times in a row to be tried; pi_mem: the PI
- *                 comes from the AF memory; trial: null or {"khz","left_ms","n","mean","ref"}
+ *                 comes from the AF memory; lists: an AF list arrived from RDS since tuning
+ *                 (until then heard AFs are trusted from AF memory alone);
+ *                 trial: null or {"khz","left_ms","n","mean","ref"}
  *                 (the candidate's mean settled score so far and what it must beat, plus the
  *                 gain); mem: {"progs","saving","pending","writes","errors"} (af_store.h);
  *                 dwell_s: until switching is allowed again
- *                 ENTRY {"khz","score","last","n","streak","level","lavg","heard","usn","trial",
+ *                 ENTRY {"khz","score","last","n","streak","level","lavg","heard","listed","usn",
+ *                 "trial",
  *                 "losses","retry_s","age_s","banned","ban_s","trusted"}: AF_Update score
  *                 average of n measurements and the last one, last level and level average,
  *                 the mean score
  *                 of its last trial, trials lost in a row and the wait before the next (null
  *                 when unknown); trusted: tried without a PI check; heard: the programme was
- *                 received on it before (AF memory); usn: lowest USN (%) of its last 3
+ *                 received on it before (AF memory); listed: in a transmitter's AF list within
+ *                 10 min; heard and listed AFs are trusted; usn: lowest USN (%) of its last 3
  *                 AF_Update readings, null before any
  *   "af.events"   the last 10 AF steps, newest first: {"type","age_s","from","to","score","cur",
  *                 "pi","ban_s"} (kHz, dB). type: check (muted PI check begins), trial (the

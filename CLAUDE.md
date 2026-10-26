@@ -16,7 +16,7 @@ Mini) replaces it with an **NXP TEF6686** tuner module:
 | QN8035 emulation: register model, I2C slave (no clock stretching), bridge | The car build (`sdkconfig.defaults`), first ride 2026-10-25. Model host-tested, replays the captured cold start byte for byte |
 | Radio service, RDS decoder, web UI, watchdog + core dump | Run in the car. Seek not checked |
 | Reception tuning table, Weak signal card | Live changes used in the car. Save and the extended bandwidth words not checked |
-| AF following 0.4.1: AF_Update screens by level (muted PI checks also by USN), a trial on settled quality decides | First ride 2026-10-26: switches, too many muted checks (fixed in 0.4.1, not yet on air) |
+| AF following 0.4.2: AF_Update screens by level (muted PI checks also by USN), a trial on settled quality decides | First ride 2026-10-26: switches, too many muted checks (0.4.2 not yet on air) |
 | AF memory in NVS, ride recording (`/api/trace`, `scripts/ride_log.py`, `scripts/ride_report.py`) | Host-tested, **not yet on the device** |
 | Web OTA, reset history, station memory (stand-alone build only) | Build and host tests pass, **not yet on the device** (OTA needs one USB flash first) |
 
@@ -263,7 +263,7 @@ details up there before changing protocol code.
 3. Seek thresholds for the car antenna (web UI Seek group); the capture's 26 channels are a
    reference list. Behaviour after a failed scan (we leave CH at CH_STOP).
 4. Audio level match between the TEF DAC and the QN8035 outputs.
-5. AF on air (0.4.1). Record rides (docs/ride-logging.md) and set `af_window` from the report's
+5. AF on air (0.4.2). Record rides (docs/ride-logging.md) and set `af_window` from the report's
    AF_Update calibration table, `af_gain`/`af_trial` from the trials. Check how a trial and a
    jump back sound (transmitters of one programme are not time-aligned) and how fast a PI
    answers after Check (`af_pi`, 300 ms). Lessons so far: 38 of 47 muted PI checks on the first
@@ -275,7 +275,10 @@ details up there before changing protocol code.
    reception louder and noisier; which one did it is unknown: avoid both untested.
 6. AF memory assumes the programme stored for a frequency until RDS sends a PI; far from home a
    frequency may carry another programme, and a switch before the PI arrives plays the stored one
-   (AF card: PI FROM MEMORY; tuning row `af_mem` turns it off).
+   (AF card: PI FROM MEMORY; tuning row `af_mem` turns it off). Stored frequencies skip the muted
+   PI check only while a transmitter of the programme lists them (within 10 min), or while no AF
+   list arrived from RDS at all (then a far-away frequency carrying a local programme shows only
+   by its PI during the trial).
 7. Weak-signal defaults are the UM V102 power-up values; confirm patch p2.24 expects no others
    (PE5PVB differs, e.g. Stereo_Time). "Mono sooner" works well in weak coverage. Check that the
    extended Set_Bandwidth words (Auto narrow) narrow the filter without side effects.

@@ -117,6 +117,7 @@ typedef struct {
      * an AF switch does not). */
     uint32_t switches;
     uint32_t pi_fails;  /**< candidates rejected by the PI check */
+    bool lists;         /**< an AF list arrived from RDS since tuning (af_state_t.lists) */
     uint32_t now_ms;    /**< clock of the entries' times */
     uint8_t n;
     af_entry_t e[AF_MAX];

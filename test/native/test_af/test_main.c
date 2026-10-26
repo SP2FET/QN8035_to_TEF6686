@@ -9,7 +9,7 @@ static af_state_t s;
 static const af_params_t P = {.enable = true, .reg = true, .trigger = 300, .window = 60,
                               .min_level = 0, .gain = 30, .interval_ms = 500, .trial_ms = 1500,
                               .dwell_ms = 15000, .retry_ms = 30000,
-                              .check_usn = 250, .check_gap_ms = 20000};
+                              .check_usn = 250};
 
 void setUp(void)
 {
@@ -596,47 +596,65 @@ static void test_pick_usn_trusted(void)
     TEST_ASSERT_EQUAL_UINT32(87600, af_pick(&s, &P, 4000));
 }
 
-static void test_heard(void)
+static void usn_ready(void)
 {
     three_poor();
     for (unsigned i = 0; i < AF_CONFIRM; i++) {
         meas_usn(87600, 300, 600, 3000 + 500 * i);
     }
+}
+
+static void test_heard(void)
+{
+    usn_ready();
     TEST_ASSERT_FALSE(af_trusted(&s, 87600, 4000));
     TEST_ASSERT_EQUAL_UINT32(0, af_pick(&s, &P, 4000));
     const uint8_t heard[] = {1};
+    const uint8_t other[] = {9}; /* 87700 does not matter: 87.6 MHz is code 1 */
     af_set_heard(&s, heard, 1);
+    /* no AF list from RDS yet: the stored list stands in */
     TEST_ASSERT_TRUE(af_trusted(&s, 87600, 4000));
     TEST_ASSERT_FALSE(af_trusted(&s, 87700, 4000));
     TEST_ASSERT_EQUAL_UINT32(87600, af_pick(&s, &P, 4000));
-    af_ban(&s, 87600, 4000, 1000, false);
-    TEST_ASSERT_FALSE(af_trusted(&s, 87600, 4500));
-    TEST_ASSERT_TRUE(af_trusted(&s, 87600, 6000)); /* the ban has ended */
+    af_listed(&s, other, 0, 4000); /* an empty list is no list */
+    TEST_ASSERT_TRUE(af_trusted(&s, 87600, 4000));
+    af_listed(&s, other, 1, 4000); /* a list without it */
+    TEST_ASSERT_FALSE(af_trusted(&s, 87600, 4000));
+    TEST_ASSERT_EQUAL_UINT32(0, af_pick(&s, &P, 4000));
+    af_listed(&s, heard, 1, 4000);
+    TEST_ASSERT_TRUE(af_trusted(&s, 87600, 4000));
+    TEST_ASSERT_EQUAL_UINT32(87600, af_pick(&s, &P, 4000));
+    TEST_ASSERT_TRUE(af_trusted(&s, 87600, 4000 + AF_TRUST_MS - 1));
+    TEST_ASSERT_FALSE(af_trusted(&s, 87600, 4000 + AF_TRUST_MS)); /* not listed again */
+    af_listed(&s, heard, 1, 4000 + AF_TRUST_MS);
+    TEST_ASSERT_TRUE(af_trusted(&s, 87600, 4000 + AF_TRUST_MS));
+    const uint32_t t = 4000 + AF_TRUST_MS;
+    af_ban(&s, 87600, t, 1000, false);
+    TEST_ASSERT_FALSE(af_trusted(&s, 87600, t + 500));
+    TEST_ASSERT_TRUE(af_trusted(&s, 87600, t + 2000)); /* the ban has ended */
     af_set_heard(&s, heard, 0);
-    TEST_ASSERT_FALSE(af_trusted(&s, 87600, 6000));
+    TEST_ASSERT_FALSE(af_trusted(&s, 87600, t + 2000));
 }
 
-static void test_check_gap(void)
+static void test_listed_not_heard(void)
 {
-    three_poor(); /* A 87600 level 320, B 87700 level 300, C 87800 level 280 */
-    af_params_t p = P;
-    p.check_gap_ms = 2000;
-    const uint32_t k[3] = {87600, 87700, 87800};
-    const int16_t lvl[3] = {320, 300, 280};
-    for (unsigned t = 3000; t <= 5500; t += 500) {
-        for (unsigned i = t <= 4000 ? 0 : 1; i < 3; i++) {
-            af_measured(&s, &p, k[i], -100, lvl[i], 50, t);
-        }
-        if (t == 4000) {
-            TEST_ASSERT_EQUAL_UINT32(87600, af_pick(&s, &p, t));
-            af_check_started(&s, t);
-            af_ban(&s, 87600, t, 100000, false);
-        }
-    }
-    TEST_ASSERT_EQUAL_UINT32(0, af_pick(&s, &p, 5999)); /* B and C wait for the gap */
-    af_verified(&s, 87800, 5999);
-    TEST_ASSERT_EQUAL_UINT32(87800, af_pick(&s, &p, 5999)); /* a verified AF needs no check */
-    TEST_ASSERT_EQUAL_UINT32(87700, af_pick(&s, &p, 6000)); /* the gap is over */
+    usn_ready();
+    const uint8_t heard[] = {1};
+    af_listed(&s, heard, 1, 4000);
+    TEST_ASSERT_FALSE(af_trusted(&s, 87600, 4000));
+    TEST_ASSERT_EQUAL_UINT32(0, af_pick(&s, &P, 4000));
+}
+
+static void test_reset_lists(void)
+{
+    usn_ready();
+    const uint8_t heard[] = {1};
+    const uint8_t other[] = {9};
+    af_set_heard(&s, heard, 1);
+    af_listed(&s, other, 1, 4000);
+    TEST_ASSERT_FALSE(af_trusted(&s, 87600, 4000));
+    af_reset(&s, TUNED, 5000);
+    TEST_ASSERT_FALSE(s.lists);
 }
 
 static void test_pi_match(void)
@@ -707,7 +725,8 @@ int main(void)
     RUN_TEST(test_pick_usn_screen);
     RUN_TEST(test_pick_usn_trusted);
     RUN_TEST(test_heard);
-    RUN_TEST(test_check_gap);
+    RUN_TEST(test_listed_not_heard);
+    RUN_TEST(test_reset_lists);
     RUN_TEST(test_pi_match);
     RUN_TEST(test_clock_wrap);
     return UNITY_END();

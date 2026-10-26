@@ -103,6 +103,20 @@ static void test_af_basic_and_dedup(void)
     TEST_ASSERT_EQUAL_UINT8(2, s.af_count);
 }
 
+static void test_af_clear(void)
+{
+    af_group(0xE350, OK);
+    af_group(0x2ACD, OK);
+    TEST_ASSERT_EQUAL_UINT8(2, s.af_count);
+    rds_af_clear(&s);
+    TEST_ASSERT_EQUAL_UINT8(0, s.af_count);
+    TEST_ASSERT_EQUAL_HEX16(0xD312, s.pi);
+    af_group(0xE350, OK);
+    af_group(0x2ACD, OK);
+    TEST_ASSERT_EQUAL_UINT8(2, s.af_count);
+    TEST_ASSERT_EQUAL_UINT8(80, s.af[0]);
+}
+
 static void test_af_lfmf_skipped(void)
 {
     af_group(0xFA10, OK);
@@ -345,6 +359,7 @@ int main(void)
     RUN_TEST(test_large_error_not_used_for_text);
     RUN_TEST(test_unprintable_characters);
     RUN_TEST(test_af_basic_and_dedup);
+    RUN_TEST(test_af_clear);
     RUN_TEST(test_af_lfmf_skipped);
     RUN_TEST(test_af_bad_block_c_and_0b);
     RUN_TEST(test_af_pi_change_clears);

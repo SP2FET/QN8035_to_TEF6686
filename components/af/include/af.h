@@ -13,10 +13,11 @@
  * 2026-10-25, louder and noisier: do not.) Noise never reads a low USN, so the lowest of the
  * last AF_CONFIRM readings decides whether a muted PI check is worth it (ride of 2026-10-26).
  *
- * A try is a trial. The radio service tunes there (a Jump if the frequency carried the programme
- * before, af_trusted: AF memory, or within AF_TRUST_MS; else a muted PI check first, only after
- * the USN screen and at most one per check_gap_ms), the candidate plays, and its settled
- * quality score is averaged for the trial time. Settled scores on both sides decide: the
+ * A try is a trial. The radio service tunes there (a Jump if af_trusted: the PI was confirmed
+ * there within AF_TRUST_MS, or the programme was received there before and a transmitter lists
+ * it, or none has sent a list; else a muted PI check first, only after the USN screen), the
+ * candidate plays, and its settled quality score is averaged for the trial time. Settled scores
+ * on both sides decide: the
  * candidate stays if it beats the tuned station's recent mean by the gain, else the tuner jumps
  * back and the candidate waits a retry time that doubles with every trial it loses. After a
  * switch the tuner stays for a dwell time that doubles while switches follow each other quickly.
@@ -83,8 +84,6 @@ typedef struct {
     /** A candidate that lost a trial waits this long, doubled for each further loss in a row (up
      * to 2^AF_RETRY_MAX_SHIFT times). */
     uint32_t retry_ms;
-    /** Between the starts of two muted PI checks (af_check_started); trusted AFs need none. */
-    uint32_t check_gap_ms;
 } af_params_t;
 
 /** Mean of the first n samples while n < span, then exponential with weight 1/span. */
@@ -112,6 +111,9 @@ typedef struct {
     bool banned;
     bool verified;            /**< carried the programme (PI confirmed) until verified_ms */
     bool heard;               /**< the programme was received on it before (af_set_heard) */
+    bool listed;              /**< a transmitter's AF list had it (af_listed) */
+    /** valid while listed: last seen in a transmitter's AF list */
+    uint32_t listed_ms;
     uint8_t strikes;          /**< failed PI checks; each one doubles the next ban */
     uint8_t losses;           /**< trials lost in a row; each one doubles the retry wait */
     uint8_t streak;           /**< measurements in a row that reached af_need_level (saturates) */
@@ -121,6 +123,8 @@ typedef struct {
     af_entry_t e[AF_MAX];
     uint8_t n;
     uint8_t next;           /**< round-robin position */
+    /** a transmitter's AF list arrived since af_reset (af_listed): heard AFs must then be listed */
+    bool lists;
     af_entry_t tuned;       /**< the tuned frequency: back into the list, trusted, after a switch */
     af_avg_t cur;           /**< the tuned station's quality score */
     af_avg_t cur_level;     /**< the tuned station's level, 0.1 dBuV */
@@ -128,8 +132,6 @@ typedef struct {
     uint8_t ref_n;
     uint8_t ref_pos;
     uint32_t hold_until_ms;
-    bool checked;
-    uint32_t check_ms;      /**< start of the last muted PI check, valid while checked */
     uint32_t next_check_ms;
     bool switched;          /**< switched_ms and dwell_ms are valid */
     uint32_t switched_ms;
@@ -202,7 +204,7 @@ uint16_t af_usn_min(const af_entry_t *e);
  * The AF to try now, or 0: while the tuned station is poor, the not banned, not waiting AF with
  * the best average level among those whose last AF_CONFIRM measurements and average level all
  * reach af_need_level. An AF that is not af_trusted also needs a USN reading of at most check_usn
- * among its last AF_CONFIRM, and a muted PI check (af_check_started) at least check_gap_ms ago.
+ * among its last AF_CONFIRM.
  * Nothing during a trial or the dwell after a switch. Measurements count as recent for one round
  * of checks plus three intervals.
  */
@@ -211,14 +213,20 @@ uint32_t af_pick(const af_state_t *s, const af_params_t *p, uint32_t now_ms);
 /** ms until af_pick may switch again, 0 if it may now. */
 uint32_t af_dwell_left(const af_state_t *s, uint32_t now_ms);
 
-/** khz carried the programme before (heard: AF memory) or within AF_TRUST_MS (the tuner played it
- * with the right PI), and is not banned: the radio may jump there without a muted PI check. */
+/** khz is not banned and either the PI was confirmed there within AF_TRUST_MS, or the programme
+ * was received there before (heard, AF memory) and a transmitter of the programme listed it within
+ * AF_TRUST_MS (af_listed), or no AF list has arrived from RDS at all (lists false: the stored
+ * list stands in, so a station without RDS still follows its AFs without muted checks): the radio
+ * may jump there without a muted PI check. Once lists are broadcast, the listed condition keeps a
+ * stored frequency untrusted far from home, where it may carry a local programme. */
 bool af_trusted(const af_state_t *s, uint32_t khz, uint32_t now_ms);
-/** The AF codes the programme was received on before (AF memory): those entries are trusted while
- * not banned, every other entry is not. */
+/** af_trusted for one entry; lists is af_state_t.lists. */
+bool af_entry_trusted(const af_entry_t *e, bool lists, uint32_t now_ms);
+/** The AF codes the programme was received on before (AF memory): such entries are trusted while
+ * also listed (af_listed), or while no AF list has arrived from RDS at all, and not banned. */
 void af_set_heard(af_state_t *s, const uint8_t *codes, uint8_t n);
-/** A muted PI check began; the next waits check_gap_ms. */
-void af_check_started(af_state_t *s, uint32_t now_ms);
+/** Codes of an AF list a transmitter of the programme broadcasts now (n > 0 sets lists). */
+void af_listed(af_state_t *s, const uint8_t *codes, uint8_t n, uint32_t now_ms);
 /** khz answered a PI check with the programme's PI. */
 void af_verified(af_state_t *s, uint32_t khz, uint32_t now_ms);
 

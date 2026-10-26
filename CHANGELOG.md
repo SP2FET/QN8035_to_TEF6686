@@ -4,6 +4,19 @@ The firmware uses Semantic Versioning. Development releases use 0.x versions and
 change interfaces between minor versions. Versions and Git tags are recorded here;
 target builds and host tests do not establish hardware compatibility.
 
+## 0.4.2 - 2026-10-26
+
+### Changed
+
+- No rate limit for muted PI checks (`af_chk_gap` from 0.4.1 is gone): in a weak area the best
+  station must be found as soon as possible.
+- A frequency the programme was received on before (AF memory) skips the muted PI check only while
+  a transmitter of the programme lists it in its AF list (within the last 10 min), or while no AF
+  list has arrived from RDS at all (no RDS, or a station that sends none): then the stored list
+  stands in. Far from home a stored frequency may carry a local programme.
+- The decoder's AF list (web UI) is the list of the transmitter that plays: it starts again at
+  every AF trial and return.
+
 ## 0.4.1 - 2026-10-26
 
 The first recorded ride (43 min) had 47 muted PI checks, 38 of them without a PI (noise at a

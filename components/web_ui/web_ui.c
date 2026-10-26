@@ -154,11 +154,10 @@ static const char *af_ev_name(uint8_t type)
 }
 
 /* One AF as measured by AF_Update, and its last trial. */
-static void jb_af_entry(jbuf_t *j, const af_entry_t *e, uint32_t now_ms)
+static void jb_af_entry(jbuf_t *j, const af_entry_t *e, bool lists, uint32_t now_ms)
 {
     const bool banned = e->banned && (int32_t)(e->banned_until_ms - now_ms) > 0;
-    const bool trusted =
-        !banned && (e->heard || (e->verified && (uint32_t)(now_ms - e->verified_ms) < AF_TRUST_MS));
+    const bool listed = e->listed && (uint32_t)(now_ms - e->listed_ms) < AF_TRUST_MS;
     const uint16_t usn = af_usn_min(e);
     const bool waiting = e->losses > 0 && (int32_t)(e->retry_until_ms - now_ms) > 0;
     jb_printf(j, "{\"khz\":%" PRIu32 ",\"score\":", e->khz);
@@ -169,7 +168,7 @@ static void jb_af_entry(jbuf_t *j, const af_entry_t *e, uint32_t now_ms)
     jb_tenths(j, e->measured, e->level);
     jb_printf(j, ",\"lavg\":");
     jb_score(j, e->level_avg);
-    jb_printf(j, ",\"heard\":%s,\"usn\":", b(e->heard));
+    jb_printf(j, ",\"heard\":%s,\"listed\":%s,\"usn\":", b(e->heard), b(listed));
     jb_tenths(j, usn != UINT16_MAX, usn);
     jb_printf(j, ",\"trial\":");
     jb_score(j, e->trial_score);
@@ -181,7 +180,8 @@ static void jb_af_entry(jbuf_t *j, const af_entry_t *e, uint32_t now_ms)
         jb_printf(j, "null");
     }
     jb_printf(j, ",\"banned\":%s,\"ban_s\":%" PRIu32 ",\"trusted\":%s}", b(banned),
-              banned ? (e->banned_until_ms - now_ms + 999) / 1000 : 0, b(trusted));
+              banned ? (e->banned_until_ms - now_ms + 999) / 1000 : 0,
+              b(af_entry_trusted(e, lists, now_ms)));
 }
 
 static void jb_af(jbuf_t *j, const radio_af_status_t *a)
@@ -193,7 +193,7 @@ static void jb_af(jbuf_t *j, const radio_af_status_t *a)
     } else {
         jb_printf(j, "null");
     }
-    jb_printf(j, ",\"pi_mem\":%s,\"score\":", b(a->pi_mem));
+    jb_printf(j, ",\"pi_mem\":%s,\"lists\":%s,\"score\":", b(a->pi_mem), b(a->lists));
     jb_score(j, a->score);
     jb_printf(j, ",\"level\":");
     jb_score(j, a->level);
@@ -221,7 +221,7 @@ static void jb_af(jbuf_t *j, const radio_af_status_t *a)
               (a->dwell_ms + 999) / 1000, AF_CONFIRM, a->switches, a->pi_fails);
     for (unsigned i = 0; i < a->n && i < AF_MAX; i++) {
         jb_printf(j, "%s", i ? "," : "");
-        jb_af_entry(j, &a->e[i], a->now_ms);
+        jb_af_entry(j, &a->e[i], a->lists, a->now_ms);
     }
     jb_printf(j, "],\"events\":[");
     for (unsigned i = 0; i < a->ev_n && i < RADIO_AF_EVENTS; i++) {
