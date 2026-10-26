@@ -4,7 +4,7 @@ The firmware uses Semantic Versioning. Development releases use 0.x versions and
 change interfaces between minor versions. Versions and Git tags are recorded here;
 target builds and host tests do not establish hardware compatibility.
 
-## [Unreleased]
+## 0.3.0 - 2026-10-26
 
 ### Added
 
