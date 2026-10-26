@@ -1,4 +1,4 @@
-/* Host tests for the AF memory: pio test -e native */
+/* Host tests for the per-channel AF memory: pio test -e native */
 #include <string.h>
 #include <unity.h>
 
@@ -14,188 +14,233 @@ void setUp(void)
 
 void tearDown(void) {}
 
-static const af_mem_prog_t *prog(uint16_t pi)
+/* the slot of channel khz */
+static const af_mem_slot_t *slot(uint32_t khz)
 {
-    for (unsigned i = 0; i < AF_MEM_PROGS; i++) {
-        if (m.p[i].pi == pi) {
-            return &m.p[i];
+    for (unsigned i = 0; i < AF_MEM_SLOTS; i++) {
+        if (m.s[i].pi != 0 && m.s[i].code == af_khz_code(khz)) {
+            return &m.s[i];
         }
     }
     TEST_FAIL_MESSAGE("not stored");
     return NULL;
 }
 
-static void test_learn_new(void)
+static void test_learn_creates_slot(void)
 {
-    const uint8_t codes[] = {45, 70, 88}; /* 92.0, 94.5, 96.3 MHz */
-    TEST_ASSERT_EQUAL_INT(0, af_mem_learn(&m, 0x3F44, 92000, codes, 3));
-    const af_mem_prog_t *p = prog(0x3F44);
-    TEST_ASSERT_EQUAL_UINT8(3, p->n);
-    TEST_ASSERT_EQUAL_UINT32(1u << 0, p->heard); /* PI decoded on 92.0 */
+    const uint8_t codes[] = {70, 88}; /* 94.5, 96.3 MHz */
+    TEST_ASSERT_EQUAL_INT(0, af_mem_learn(&m, 0x3F44, 92000, codes, 2));
+    const af_mem_slot_t *p = slot(92000);
+    TEST_ASSERT_EQUAL_HEX16(0x3F44, p->pi);
+    TEST_ASSERT_EQUAL_UINT8(af_khz_code(92000), p->code);
+    TEST_ASSERT_EQUAL_UINT8(2, p->n);
     TEST_ASSERT_EQUAL_UINT(1, af_mem_count(&m));
+    uint16_t pi = 0;
+    TEST_ASSERT_TRUE(af_mem_lookup(&m, 92000, &pi));
+    TEST_ASSERT_EQUAL_HEX16(0x3F44, pi);
+    TEST_ASSERT_FALSE(af_mem_lookup(&m, 94500, &pi)); /* listed, not received there */
+    TEST_ASSERT_FALSE(af_mem_lookup(&m, 92050, &pi));
 }
 
 static void test_learn_changes_only_on_content(void)
 {
-    const uint8_t codes[] = {45, 70};
+    const uint8_t codes[] = {70, 88};
     af_mem_learn(&m, 0x3F44, 92000, codes, 2);
-    const uint32_t used = prog(0x3F44)->used;
+    const uint32_t used = slot(92000)->used;
     TEST_ASSERT_EQUAL_INT(-1, af_mem_learn(&m, 0x3F44, 92000, codes, 2)); /* recency only */
-    TEST_ASSERT_TRUE(prog(0x3F44)->used != used);
+    TEST_ASSERT_TRUE(slot(92000)->used != used);
     TEST_ASSERT_EQUAL_INT(-1, af_mem_learn(&m, 0x3F44, 92000, NULL, 0));
-
-    const uint8_t more[] = {70, 88};
-    TEST_ASSERT_EQUAL_INT(0, af_mem_learn(&m, 0x3F44, 92000, more, 2)); /* a new AF */
-    TEST_ASSERT_EQUAL_UINT8(3, prog(0x3F44)->n);
-    TEST_ASSERT_EQUAL_INT(0, af_mem_learn(&m, 0x3F44, 94500, NULL, 0)); /* heard on 94.5 */
-    TEST_ASSERT_EQUAL_UINT32((1u << 0) | (1u << 1), prog(0x3F44)->heard);
-    TEST_ASSERT_EQUAL_INT(-1, af_mem_learn(&m, 0x3F44, 94500, NULL, 0));
+    const uint8_t more[] = {88, 100};
+    TEST_ASSERT_EQUAL_INT(0, af_mem_learn(&m, 0x3F44, 92000, more, 2));
+    TEST_ASSERT_EQUAL_UINT8(3, slot(92000)->n);
 }
 
-static void test_learn_ignores_bad_input(void)
+static void test_bad_input(void)
 {
     const uint8_t codes[] = {0, 205, 250, 1};
-    TEST_ASSERT_EQUAL_INT(-1, af_mem_learn(&m, 0, 92000, codes, 4)); /* PI 0000 */
+    TEST_ASSERT_EQUAL_INT(-1, af_mem_learn(&m, 0, 92000, codes, 4));
+    TEST_ASSERT_EQUAL_INT(-1, af_mem_learn(&m, 0x1234, 92050, codes, 4)); /* off the raster */
     TEST_ASSERT_EQUAL_UINT(0, af_mem_count(&m));
-    af_mem_learn(&m, 0x1234, 92050, codes, 4); /* tuned off the raster */
-    TEST_ASSERT_EQUAL_UINT8(1, prog(0x1234)->n);
-    TEST_ASSERT_EQUAL_UINT8(1, prog(0x1234)->code[0]);
-    TEST_ASSERT_EQUAL_UINT32(0, prog(0x1234)->heard);
+    af_mem_learn(&m, 0x1234, 92000, codes, 4);
+    TEST_ASSERT_EQUAL_UINT8(1, slot(92000)->n);
+    TEST_ASSERT_EQUAL_UINT8(1, slot(92000)->codes[0]);
 }
 
-static void test_full_list(void)
+static void test_own_code_never_listed(void)
 {
-    uint8_t codes[AF_MEM_CODES];
-    for (unsigned i = 0; i < AF_MEM_CODES; i++) {
-        codes[i] = (uint8_t)(10 + i);
-    }
-    af_mem_learn(&m, 0x2000, 0, codes, AF_MEM_CODES);
-    const uint8_t extra[] = {100};
-    TEST_ASSERT_EQUAL_INT(-1, af_mem_learn(&m, 0x2000, 0, extra, 1));
-    TEST_ASSERT_EQUAL_INT(-1, af_mem_learn(&m, 0x2000, 97500, NULL, 0)); /* code 100: no room */
-    TEST_ASSERT_EQUAL_INT(0, af_mem_learn(&m, 0x2000, 88500, NULL, 0)); /* code 10: listed */
-    TEST_ASSERT_EQUAL_UINT32(1u, prog(0x2000)->heard);
+    const uint8_t codes[] = {af_khz_code(92000), 70};
+    af_mem_learn(&m, 0x3F44, 92000, codes, 2);
+    TEST_ASSERT_EQUAL_UINT8(1, slot(92000)->n);
+    TEST_ASSERT_EQUAL_UINT8(70, slot(92000)->codes[0]);
 }
 
-static void test_lookup(void)
+static void test_two_channels_same_pi(void)
 {
-    uint16_t pi = 0;
-    TEST_ASSERT_FALSE(af_mem_lookup(&m, 92000, &pi));
-    const uint8_t a[] = {45, 70};
-    af_mem_learn(&m, 0xAAAA, 0, a, 2); /* lists 92.0 */
-    TEST_ASSERT_TRUE(af_mem_lookup(&m, 92000, &pi));
-    TEST_ASSERT_EQUAL_HEX16(0xAAAA, pi);
-    TEST_ASSERT_FALSE(af_mem_lookup(&m, 92050, &pi));
-    TEST_ASSERT_FALSE(af_mem_lookup(&m, 93000, &pi));
+    const uint8_t a[] = {70};
+    const uint8_t b[] = {45, 88};
+    af_mem_learn(&m, 0x3F44, 92000, a, 1);
+    af_mem_learn(&m, 0x3F44, 93000, b, 2);
+    TEST_ASSERT_EQUAL_UINT(2, af_mem_count(&m));
+    TEST_ASSERT_EQUAL_UINT8(1, slot(92000)->n);
+    TEST_ASSERT_EQUAL_UINT8(2, slot(93000)->n);
 
-    af_mem_learn(&m, 0xBBBB, 92000, NULL, 0); /* heard on 92.0 */
-    af_mem_learn(&m, 0xAAAA, 0, a, 2);        /* used last, but only lists it */
-    TEST_ASSERT_TRUE(af_mem_lookup(&m, 92000, &pi));
-    TEST_ASSERT_EQUAL_HEX16(0xBBBB, pi);
-
-    af_mem_learn(&m, 0xCCCC, 92000, NULL, 0); /* also heard there, more recently */
-    TEST_ASSERT_TRUE(af_mem_lookup(&m, 92000, &pi));
-    TEST_ASSERT_EQUAL_HEX16(0xCCCC, pi);
-    af_mem_learn(&m, 0xBBBB, 0, NULL, 0);
-    TEST_ASSERT_TRUE(af_mem_lookup(&m, 92000, &pi));
-    TEST_ASSERT_EQUAL_HEX16(0xBBBB, pi);
-}
-
-static void test_codes(void)
-{
     uint8_t out[AF_MEM_CODES];
-    TEST_ASSERT_EQUAL_UINT8(0, af_mem_codes(&m, 0x3F44, out));
-    const uint8_t codes[] = {45, 70, 88};
-    af_mem_learn(&m, 0x3F44, 0, codes, 3);
-    TEST_ASSERT_EQUAL_UINT8(3, af_mem_codes(&m, 0x3F44, out));
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(codes, out, 3);
-}
-
-static void test_heard(void)
-{
-    uint8_t out[AF_MEM_CODES];
-    const uint8_t codes[] = {45, 55, 70};
-    TEST_ASSERT_EQUAL_UINT8(0, af_mem_heard(&m, 0x3F44, out));
-    af_mem_learn(&m, 0x3F44, 92000, codes, 3);
-    TEST_ASSERT_EQUAL_UINT8(1, af_mem_heard(&m, 0x3F44, out));
-    TEST_ASSERT_EQUAL_UINT8(45, out[0]);
-    af_mem_learn(&m, 0x3F44, 93000, codes, 3);
     TEST_ASSERT_EQUAL_UINT8(2, af_mem_heard(&m, 0x3F44, out));
-    TEST_ASSERT_EQUAL_UINT8(45, out[0]);
-    TEST_ASSERT_EQUAL_UINT8(55, out[1]);
+    TEST_ASSERT_EQUAL_UINT8(af_khz_code(92000), out[0]);
+    TEST_ASSERT_EQUAL_UINT8(af_khz_code(93000), out[1]);
     TEST_ASSERT_EQUAL_UINT8(0, af_mem_heard(&m, 0x1234, out));
     TEST_ASSERT_EQUAL_UINT8(0, af_mem_heard(&m, 0, out));
 }
 
+static void test_other_pi_resets_slot(void)
+{
+    const uint8_t a[] = {70, 88};
+    af_mem_learn(&m, 0xAAAA, 92000, a, 2);
+    const uint8_t b[] = {100};
+    TEST_ASSERT_EQUAL_INT(0, af_mem_learn(&m, 0xBBBB, 92000, b, 1));
+    TEST_ASSERT_EQUAL_UINT(1, af_mem_count(&m));
+    TEST_ASSERT_EQUAL_HEX16(0xBBBB, slot(92000)->pi);
+    TEST_ASSERT_EQUAL_UINT8(1, slot(92000)->n);
+    TEST_ASSERT_EQUAL_UINT8(100, slot(92000)->codes[0]);
+}
+
+static void test_list(void)
+{
+    uint8_t out[AF_MEM_CODES];
+    const uint8_t a[] = {70, 88};
+    af_mem_learn(&m, 0x3F44, 92000, a, 2);
+    TEST_ASSERT_EQUAL_UINT8(2, af_mem_list(&m, 92000, 0x3F44, out));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(a, out, 2);
+    TEST_ASSERT_EQUAL_UINT8(0, af_mem_list(&m, 92000, 0x1234, out)); /* another PI */
+    TEST_ASSERT_EQUAL_UINT8(0, af_mem_list(&m, 93000, 0x3F44, out)); /* another channel */
+    TEST_ASSERT_EQUAL_UINT8(0, af_mem_list(&m, 92050, 0x3F44, out));
+}
+
+static void test_overflow_replaces_list(void)
+{
+    uint8_t codes[AF_MEM_CODES];
+    for (unsigned i = 0; i < AF_MEM_CODES; i++) {
+        codes[i] = (uint8_t)(100 + i);
+    }
+    af_mem_learn(&m, 0x2000, 88000, codes, AF_MEM_CODES);
+    TEST_ASSERT_EQUAL_UINT8(AF_MEM_CODES, slot(88000)->n);
+    TEST_ASSERT_EQUAL_INT(-1, af_mem_learn(&m, 0x2000, 88000, codes, AF_MEM_CODES));
+
+    /* a new list: 30 codes with a duplicate and the channel's own code among them */
+    uint8_t fresh[30];
+    for (unsigned i = 0; i < 30; i++) {
+        fresh[i] = (uint8_t)(10 + i);
+    }
+    fresh[3] = fresh[2];
+    fresh[5] = af_khz_code(88000);
+    TEST_ASSERT_EQUAL_INT(0, af_mem_learn(&m, 0x2000, 88000, fresh, 30));
+    const af_mem_slot_t *p = slot(88000);
+    TEST_ASSERT_EQUAL_UINT8(AF_MEM_CODES, p->n);
+    TEST_ASSERT_EQUAL_UINT8(10, p->codes[0]);
+    TEST_ASSERT_TRUE(af_mem_slot_valid(p));
+    TEST_ASSERT_EQUAL_INT(-1, af_mem_learn(&m, 0x2000, 88000, fresh, 30)); /* same again */
+}
+
+static void test_forget(void)
+{
+    const uint8_t a[] = {70};
+    af_mem_learn(&m, 0xAAAA, 92000, a, 1);
+    TEST_ASSERT_EQUAL_INT(-1, af_mem_forget(&m, 0xBBBB, 92000)); /* another PI: kept */
+    TEST_ASSERT_EQUAL_INT(-1, af_mem_forget(&m, 0xAAAA, 93000));
+    TEST_ASSERT_EQUAL_UINT(1, af_mem_count(&m));
+    const int i = af_mem_forget(&m, 0xAAAA, 92000);
+    TEST_ASSERT_TRUE(i >= 0);
+    TEST_ASSERT_EQUAL_UINT(0, af_mem_count(&m));
+    af_mem_slot_t empty;
+    memset(&empty, 0, sizeof(empty));
+    TEST_ASSERT_EQUAL_MEMORY(&empty, &m.s[i], sizeof(empty));
+}
+
 static void test_lru_eviction(void)
 {
-    for (unsigned i = 0; i < AF_MEM_PROGS; i++) {
-        af_mem_learn(&m, (uint16_t)(0x1000 + i), 0, NULL, 0);
+    for (unsigned i = 0; i < AF_MEM_SLOTS; i++) {
+        af_mem_learn(&m, (uint16_t)(0x1000 + i), 88000 + 100 * i, NULL, 0);
     }
-    TEST_ASSERT_EQUAL_UINT(AF_MEM_PROGS, af_mem_count(&m));
-    af_mem_learn(&m, 0x1000, 0, NULL, 0); /* the oldest is used again */
-    const int slot = af_mem_learn(&m, 0x2000, 0, NULL, 0);
-    TEST_ASSERT_EQUAL_INT(1, slot); /* 0x1001 made room */
-    TEST_ASSERT_EQUAL_HEX16(0x2000, m.p[1].pi);
-    TEST_ASSERT_EQUAL_HEX16(0x1000, m.p[0].pi);
-    TEST_ASSERT_EQUAL_UINT(AF_MEM_PROGS, af_mem_count(&m));
+    TEST_ASSERT_EQUAL_UINT(AF_MEM_SLOTS, af_mem_count(&m));
+    af_mem_learn(&m, 0x1000, 88000, NULL, 0); /* the oldest is used again */
+    const int i = af_mem_learn(&m, 0x2000, 100000, NULL, 0);
+    TEST_ASSERT_EQUAL_INT(1, i); /* channel 88100 made room */
+    TEST_ASSERT_EQUAL_HEX16(0x2000, m.s[1].pi);
+    TEST_ASSERT_EQUAL_HEX16(0x1000, m.s[0].pi);
+    TEST_ASSERT_EQUAL_UINT(AF_MEM_SLOTS, af_mem_count(&m));
 }
 
-static void test_load(void)
+static void test_slot_valid(void)
 {
-    af_mem_prog_t p = {.pi = 0x3F44, .n = 2, .code = {45, 70}, .heard = 1, .used = 77};
-    TEST_ASSERT_TRUE(af_mem_load(&m, 3, &p));
-    TEST_ASSERT_EQUAL_HEX16(0x3F44, m.p[3].pi);
-    TEST_ASSERT_EQUAL_UINT32(77, m.clock);
-    TEST_ASSERT_FALSE(af_mem_load(&m, 4, &p)); /* the same PI twice */
-    TEST_ASSERT_FALSE(af_mem_load(&m, AF_MEM_PROGS, &p));
+    const uint8_t ch = af_khz_code(92000);
+    af_mem_slot_t p = {.pi = 0x3F44, .code = ch, .n = 2, .codes = {70, 88}};
+    TEST_ASSERT_TRUE(af_mem_slot_valid(&p));
+    af_mem_slot_t bad = p;
+    bad.pi = 0;
+    TEST_ASSERT_FALSE(af_mem_slot_valid(&bad));
+    bad = p;
+    bad.code = 0;
+    TEST_ASSERT_FALSE(af_mem_slot_valid(&bad));
+    bad.code = 205;
+    TEST_ASSERT_FALSE(af_mem_slot_valid(&bad));
+    bad = p;
+    bad.n = AF_MEM_CODES + 1;
+    TEST_ASSERT_FALSE(af_mem_slot_valid(&bad));
+    bad = p;
+    bad.codes[1] = 205;
+    TEST_ASSERT_FALSE(af_mem_slot_valid(&bad));
+    bad = p;
+    bad.codes[1] = ch; /* the channel's own code */
+    TEST_ASSERT_FALSE(af_mem_slot_valid(&bad));
+}
 
-    af_mem_prog_t bad = p;
-    bad.pi = 0x1111;
-    bad.heard = 1u << 2; /* beyond n */
-    TEST_ASSERT_FALSE(af_mem_load(&m, 5, &bad));
-    bad.heard = 0;
-    bad.code[1] = 205;
-    TEST_ASSERT_FALSE(af_mem_load(&m, 5, &bad));
-    bad.code[1] = 70;
+static void test_load_and_same(void)
+{
+    af_mem_slot_t p = {
+        .pi = 0x3F44, .code = af_khz_code(92000), .n = 2, .codes = {70, 88}, .used = 77};
+    TEST_ASSERT_TRUE(af_mem_load(&m, 3, &p));
+    TEST_ASSERT_EQUAL_HEX16(0x3F44, m.s[3].pi);
+    TEST_ASSERT_EQUAL_UINT32(77, m.clock);
+    TEST_ASSERT_TRUE(af_mem_slot_same(&p, &m.s[3]));
+    TEST_ASSERT_FALSE(af_mem_load(&m, 4, &p)); /* the same channel twice */
+    TEST_ASSERT_FALSE(af_mem_load(&m, AF_MEM_SLOTS, &p));
+    af_mem_slot_t bad = p;
+    bad.code = af_khz_code(93000);
     bad.n = AF_MEM_CODES + 1;
     TEST_ASSERT_FALSE(af_mem_load(&m, 5, &bad));
-    bad.n = 2;
-    bad.pi = 0;
-    TEST_ASSERT_FALSE(af_mem_load(&m, 5, &bad));
-    TEST_ASSERT_EQUAL_HEX16(0, m.p[5].pi);
+    TEST_ASSERT_EQUAL_HEX16(0, m.s[5].pi);
 
-    /* learning goes on from the loaded recency */
-    af_mem_learn(&m, 0x5555, 0, NULL, 0);
-    TEST_ASSERT_EQUAL_UINT32(78, prog(0x5555)->used);
-}
+    af_mem_learn(&m, 0x5555, 95000, NULL, 0); /* recency goes on from the loaded one */
+    TEST_ASSERT_EQUAL_UINT32(78, slot(95000)->used);
 
-static void test_prog_same(void)
-{
-    af_mem_prog_t a = {.pi = 0x3F44, .n = 2, .code = {45, 70}, .heard = 1, .used = 1};
-    af_mem_prog_t b = a;
+    af_mem_slot_t b = p;
     b.used = 99;
-    b.code[5] = 9; /* beyond n: not content */
-    TEST_ASSERT_TRUE(af_mem_prog_same(&a, &b));
-    b.heard = 3;
-    TEST_ASSERT_FALSE(af_mem_prog_same(&a, &b));
-    b = a;
-    b.code[1] = 71;
-    TEST_ASSERT_FALSE(af_mem_prog_same(&a, &b));
+    b.codes[5] = 9; /* beyond n: not content */
+    TEST_ASSERT_TRUE(af_mem_slot_same(&p, &b));
+    b.codes[1] = 71;
+    TEST_ASSERT_FALSE(af_mem_slot_same(&p, &b));
+    b = p;
+    b.code = af_khz_code(93000);
+    TEST_ASSERT_FALSE(af_mem_slot_same(&p, &b));
+    b = p;
+    b.pi = 1;
+    TEST_ASSERT_FALSE(af_mem_slot_same(&p, &b));
 }
 
 int main(void)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_learn_new);
+    RUN_TEST(test_learn_creates_slot);
     RUN_TEST(test_learn_changes_only_on_content);
-    RUN_TEST(test_learn_ignores_bad_input);
-    RUN_TEST(test_full_list);
-    RUN_TEST(test_lookup);
-    RUN_TEST(test_codes);
-    RUN_TEST(test_heard);
+    RUN_TEST(test_bad_input);
+    RUN_TEST(test_own_code_never_listed);
+    RUN_TEST(test_two_channels_same_pi);
+    RUN_TEST(test_other_pi_resets_slot);
+    RUN_TEST(test_list);
+    RUN_TEST(test_overflow_replaces_list);
+    RUN_TEST(test_forget);
     RUN_TEST(test_lru_eviction);
-    RUN_TEST(test_load);
-    RUN_TEST(test_prog_same);
+    RUN_TEST(test_slot_valid);
+    RUN_TEST(test_load_and_same);
     return UNITY_END();
 }

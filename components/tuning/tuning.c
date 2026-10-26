@@ -163,6 +163,10 @@ const tuning_param_t tuning_params[TUNING_COUNT] = {
     [TUNING_AF_ON] = ROW("af", G_AF, "AF following", NULL, ONOFF, TUNING_HOST, 0, 1, 0, 1, 1),
     [TUNING_AF_REG] = ROW("af_reg", G_AF, "REG (regional variants are other programmes)", NULL,
                           ONOFF, TUNING_HOST, 0, 1, 0, 1, 1),
+    /* Where transmitters of the programme take turns being the best: switch back and forth
+     * quickly (af.h, af_params_t.fast). */
+    [TUNING_AF_FAST] = ROW("af_fast", G_AF, "Fast mode: try an AF after one measurement, short "
+                           "waits that do not double", NULL, ONOFF, TUNING_HOST, 0, 1, 0, 1, 0),
     [TUNING_AF_TRIGGER] = ROW("af_trig", G_AF, "Check AFs below score", "dB", NULL, TUNING_HOST,
                               0, 10, -200, 800, 300),
     /* Wide: a candidate a little weaker can still sound cleaner (less multipath), and a trial
@@ -178,8 +182,14 @@ const tuning_param_t tuning_params[TUNING_COUNT] = {
                             10000, 1500),
     [TUNING_AF_RETRY] = ROW("af_retry", G_AF, "Retry an AF that lost a trial after (doubles)",
                             "s", NULL, TUNING_HOST, 0, 1, 5, 600, 30),
-    [TUNING_AF_INTERVAL] = ROW("af_int", G_AF, "Check interval", "ms", NULL, TUNING_HOST, 0, 1,
-                               100, 10000, 500),
+    [TUNING_AF_FAST_RETRY] = ROW("af_f_retry", G_AF, "Fast mode: retry an AF that lost a trial "
+                                 "after", "s", NULL, TUNING_HOST, 0, 1, 1, 600, 5),
+    [TUNING_AF_INTERVAL] = ROW("af_int", G_AF, "Check interval while reception is poor", "ms",
+                               NULL, TUNING_HOST, 0, 1, 100, 10000, 500),
+    /* AF_Update is inaudible (UM V102 §3.1): AFs ranked while reception is still good are
+     * re-measured best first when it turns poor, so a fade needs no full round of checks. */
+    [TUNING_AF_BG_INT] = ROW("af_bg_int", G_AF, "Check interval while reception is good (0 = no "
+                             "checks)", "ms", NULL, TUNING_HOST, 0, 1, 0, 10000, 2000),
     [TUNING_AF_PI_MS] = ROW("af_pi", G_AF, "PI check timeout", "ms", NULL, TUNING_HOST, 0, 1,
                             100, 2000, 300),
     /* A muted PI check is worth it only on a clean carrier: noise at a passable level reads a high
@@ -187,10 +197,12 @@ const tuning_param_t tuning_params[TUNING_COUNT] = {
     [TUNING_AF_CHK_USN] = ROW("af_chk_usn", G_AF, "PI check only after an AF_Update USN below",
                               "%", NULL, TUNING_HOST, 0, 10, 0, 1000, 250),
     /* A frequency that failed once fails again from the same place, and every try mutes. */
-    [TUNING_AF_BAN] = ROW("af_ban", G_AF, "Skip after a failed PI check (doubles; another PI 4x)",
-                          "s", NULL, TUNING_HOST, 0, 1, 10, 3600, 300),
+    [TUNING_AF_BAN] = ROW("af_ban", G_AF, "Skip after a failed PI check (another PI 4x; doubles "
+                          "unless fast)", "s", NULL, TUNING_HOST, 0, 1, 10, 3600, 300),
     [TUNING_AF_DWELL] = ROW("af_dwell", G_AF, "Stay after a switch (doubles if repeated soon)",
                             "s", NULL, TUNING_HOST, 0, 1, 0, 300, 15),
+    [TUNING_AF_FAST_DWELL] = ROW("af_f_dwell", G_AF, "Fast mode: stay after a switch", "s", NULL,
+                                 TUNING_HOST, 0, 1, 0, 300, 3),
     /* The PI stored for the frequency may be another region's programme: a PI from RDS replaces
      * it at once, but a switch made before that plays the stored programme. */
     [TUNING_AF_MEM] = ROW("af_mem", G_AF,

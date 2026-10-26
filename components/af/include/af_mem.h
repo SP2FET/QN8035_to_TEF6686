@@ -1,19 +1,19 @@
 /**
  * @file
- * AF memory: the AF lists of the programmes heard, kept across power cycles (af_store writes
- * them to NVS), so a station heard without RDS can still be followed.
+ * AF memory: the AF lists of the channels heard, kept across power cycles (af_store writes them
+ * to NVS), so a station heard without RDS can still be followed.
  *
- * Each programme (PI) keeps the RDS AF codes it sent plus the frequencies where its PI was
- * decoded ("heard"). A frequency found in several programmes (one frequency carries different
- * programmes in different regions) resolves to a programme heard there before one that only
- * lists it, then to the most recently used. The least recently used programme makes room for a
- * new one.
+ * One slot per channel (a frequency a programme was received on): the PI decoded there and the
+ * AF list that transmitter broadcasts. The same programme on several channels takes several
+ * slots, each with its own list (no union across transmitters, so a list never fills up with
+ * codes of other transmitters). Another PI on a channel resets its slot; af_mem_forget empties
+ * it. The least recently used slot makes room for a new channel.
  *
  * The table is a fixed set of slots, and af_store keeps each slot under its own NVS key: a
  * change rewrites one 36-byte record, not the table. Only content changes count (af_mem_learn,
- * af_mem_prog_same); the recency stamp is stored along when a slot is written for another
- * reason. AF lists rarely change, so after the first reception of a programme its slot is
- * hardly ever written again.
+ * af_mem_slot_same); the recency stamp is stored along when a slot is written for another
+ * reason. AF lists rarely change, so after the first reception of a channel its slot is hardly
+ * ever written again.
  *
  * Pure C, no ESP-IDF dependency (host-tested, see test/native/test_af_mem).
  */
@@ -26,50 +26,59 @@
 extern "C" {
 #endif
 
-/** Layout version of a stored slot: af_store drops slots of another version. */
-#define AF_MEM_VERSION 1
-#define AF_MEM_PROGS   16
-#define AF_MEM_CODES   25 /**< a method A list carries up to 25 */
+/** Layout version of a stored slot. */
+#define AF_MEM_VERSION 2
+#define AF_MEM_SLOTS   16 /**< channels */
+#define AF_MEM_CODES   25 /**< an RDS method A list carries up to 25 */
 
 typedef struct {
-    uint16_t pi;                /**< 0: empty slot (PI 0000 is never on air) */
+    uint16_t pi;                 /**< 0: empty slot (PI 0000 is never on air) */
+    uint8_t code;                /**< the channel: af_khz_code() of the frequency pi was received on */
     uint8_t n;
-    uint8_t code[AF_MEM_CODES]; /**< RDS AF codes 1..204 (af_code_khz) */
-    uint32_t heard;             /**< bit i: the PI was decoded on code[i] */
-    uint32_t used;              /**< af_mem_t.clock at the last use */
-} af_mem_prog_t;
+    uint8_t codes[AF_MEM_CODES]; /**< the AF list the transmitter on the channel broadcasts,
+                                      without the channel's own code */
+    uint32_t used;               /**< af_mem_t.clock at the last use */
+} af_mem_slot_t;
 
 typedef struct {
-    af_mem_prog_t p[AF_MEM_PROGS];
-    uint32_t clock; /**< counts uses, orders the programmes by recency */
+    af_mem_slot_t s[AF_MEM_SLOTS];
+    uint32_t clock; /**< counts uses, orders the slots by recency */
 } af_mem_t;
+
+_Static_assert(AF_MEM_SLOTS <= AF_MEM_CODES, "af_mem_heard callers pass an AF_MEM_CODES buffer");
+_Static_assert(sizeof(af_mem_slot_t) == 36, "one NVS record per slot");
 
 void af_mem_init(af_mem_t *m);
 
-/** A slot read back from flash is usable: PI set, counts and codes in range. */
-bool af_mem_prog_valid(const af_mem_prog_t *p);
-/** Puts a slot read back from flash in place. false (the slot stays empty) if it is not valid or
- * its PI is in another slot already. */
-bool af_mem_load(af_mem_t *m, unsigned slot, const af_mem_prog_t *p);
+/** A slot read back from flash is usable: PI set, channel and codes valid, counts in range. */
+bool af_mem_slot_valid(const af_mem_slot_t *p);
+/** Puts a slot read back from flash in place. false (the slot stays as it was) if it is not valid
+ * or its channel is in another slot already. */
+bool af_mem_load(af_mem_t *m, unsigned slot, const af_mem_slot_t *p);
 /** Same stored content, the recency aside. */
-bool af_mem_prog_same(const af_mem_prog_t *a, const af_mem_prog_t *b);
+bool af_mem_slot_same(const af_mem_slot_t *a, const af_mem_slot_t *b);
 
 /**
- * pi plays on tuned_khz and sends the AF codes (may be none): add what is new and mark the
- * programme used. Returns the slot whose content changed (a new programme, code or heard
- * frequency), -1 if only the recency did or pi is 0. A list that is full keeps its codes.
+ * pi plays on tuned_khz, whose transmitter sends the AF codes so far (may be none): bind them to
+ * the channel and mark the slot used. Another PI on the channel resets the slot. A code that no
+ * longer fits replaces the list with codes (the transmitter's current list). Returns the slot
+ * whose content changed, -1 if only the recency did, pi is 0 or tuned_khz is off the RDS raster.
  */
 int af_mem_learn(af_mem_t *m, uint16_t pi, uint32_t tuned_khz, const uint8_t *codes, uint8_t n);
 
-/** The programme khz most likely carries: one heard there before one that lists it, then the
- * most recently used. false if no programme has khz. */
+/** khz does not carry pi (another programme is there): empties its slot if it holds pi. Returns
+ * the slot, -1 if nothing changed. */
+int af_mem_forget(af_mem_t *m, uint16_t pi, uint32_t khz);
+
+/** The programme stored for channel khz. false if none or khz is off the RDS raster. */
 bool af_mem_lookup(const af_mem_t *m, uint32_t khz, uint16_t *pi);
 
-/** Copies pi's codes to codes (AF_MEM_CODES), returns the count, 0 if pi is unknown. */
-uint8_t af_mem_codes(const af_mem_t *m, uint16_t pi, uint8_t *codes);
+/** Copies the AF list stored for channel khz to codes (AF_MEM_CODES) if it carries pi; returns
+ * the count, 0 if not. */
+uint8_t af_mem_list(const af_mem_t *m, uint32_t khz, uint16_t pi, uint8_t *codes);
 
-/** Copies the codes pi was decoded on to codes (AF_MEM_CODES), returns the count, 0 if pi is 0 or
- * unknown. */
+/** Copies the channel codes of the slots that carry pi (where it was received) to codes
+ * (AF_MEM_CODES), returns the count, 0 if pi is 0 or unknown. */
 uint8_t af_mem_heard(const af_mem_t *m, uint16_t pi, uint8_t *codes);
 
 /** Used slots. */

@@ -14,7 +14,7 @@
 static const char *TAG = "af_store";
 
 #define NAMESPACE  "af_mem"
-#define KEY_VER    "ver"
+#define KEY_VER    "cver" /* not the old "ver": its "p0".. records stay */
 #define TASK_STACK 3072
 #define TASK_PRIO  1
 #define PERIOD_MS  2000
@@ -24,9 +24,9 @@ static const char *TAG = "af_store";
 #define MAX_WRITES 64    /* per power-on */
 
 typedef struct {
-    af_mem_prog_t saved[AF_MEM_PROGS]; /* what flash holds */
-    af_mem_prog_t seen[AF_MEM_PROGS];  /* the last copy, for the settle time */
-    TickType_t changed[AF_MEM_PROGS];
+    af_mem_slot_t saved[AF_MEM_SLOTS]; /* what flash holds */
+    af_mem_slot_t seen[AF_MEM_SLOTS];  /* the last copy, for the settle time */
+    TickType_t changed[AF_MEM_SLOTS];
     af_mem_t copy;
 } work_t;
 
@@ -36,7 +36,7 @@ static struct {
     af_store_config_t cfg;
     work_t *w; /* store task only after init; from the heap: the S2's static DRAM is full */
     volatile bool running;
-    volatile unsigned progs, pending;
+    volatile unsigned channels, pending;
     volatile uint32_t writes, errors;
 } s;
 
@@ -47,7 +47,7 @@ static inline bool reached(TickType_t now, TickType_t t)
 
 static void slot_key(unsigned slot, char key[4])
 {
-    snprintf(key, 4, "p%u", slot);
+    snprintf(key, 4, "c%u", slot);
 }
 
 esp_err_t af_store_init(af_mem_t *out)
@@ -62,35 +62,34 @@ esp_err_t af_store_init(af_mem_t *out)
     esp_err_t err = nvs_get_u8(s.nvs, KEY_VER, &ver);
     if (err == ESP_OK && ver == AF_MEM_VERSION) {
         unsigned loaded = 0;
-        for (unsigned i = 0; i < AF_MEM_PROGS; i++) {
+        for (unsigned i = 0; i < AF_MEM_SLOTS; i++) {
             char key[4];
             slot_key(i, key);
-            af_mem_prog_t p;
+            af_mem_slot_t p;
             size_t len = sizeof(p);
             if (nvs_get_blob(s.nvs, key, &p, &len) == ESP_OK && len == sizeof(p) &&
                 af_mem_load(out, i, &p)) {
                 loaded++;
             }
         }
-        memcpy(s.w->saved, out->p, sizeof(s.w->saved));
-        memcpy(s.w->seen, out->p, sizeof(s.w->seen));
-        s.progs = loaded;
-        ESP_LOGI(TAG, "%u programmes' AF lists loaded", loaded);
+        memcpy(s.w->saved, out->s, sizeof(s.w->saved));
+        memcpy(s.w->seen, out->s, sizeof(s.w->seen));
+        s.channels = loaded;
+        ESP_LOGI(TAG, "%u channels' AF lists loaded", loaded);
         return ESP_OK;
     }
     if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
         return err;
     }
-    /* First boot, or slots of another layout: start empty. Before the head-unit bus runs. */
+    /* First boot, or a newer or older cver: start empty. Before the head-unit bus runs. */
     if (err == ESP_OK) {
-        ESP_LOGW(TAG, "stored AF lists have layout %u, not %u: dropped", ver, AF_MEM_VERSION);
-        ESP_RETURN_ON_ERROR(nvs_erase_all(s.nvs), TAG, "erase");
+        ESP_LOGW(TAG, "stored AF lists have layout %u, not %u: ignored", ver, AF_MEM_VERSION);
     }
     ESP_RETURN_ON_ERROR(nvs_set_u8(s.nvs, KEY_VER, AF_MEM_VERSION), TAG, "version");
     return nvs_commit(s.nvs);
 }
 
-static bool write_slot(unsigned slot, const af_mem_prog_t *p)
+static bool write_slot(unsigned slot, const af_mem_slot_t *p)
 {
     char key[4];
     slot_key(slot, key);
@@ -107,7 +106,7 @@ static bool write_slot(unsigned slot, const af_mem_prog_t *p)
         return false;
     }
     s.writes++;
-    ESP_LOGI(TAG, "PI %04X: %u AFs saved (slot %u, write %lu)", p->pi, p->n, slot,
+    ESP_LOGI(TAG, "PI %04X on code %u: %u AFs saved (slot %u, write %lu)", p->pi, p->code, p->n, slot,
              (unsigned long)s.writes);
     return true;
 }
@@ -134,13 +133,13 @@ static void store_task(void *arg)
         radio_get_af_mem(&w->copy);
         int due = -1;
         unsigned pending = 0;
-        for (unsigned i = 0; i < AF_MEM_PROGS; i++) {
-            const af_mem_prog_t *p = &w->copy.p[i];
-            if (!af_mem_prog_same(p, &w->seen[i])) {
+        for (unsigned i = 0; i < AF_MEM_SLOTS; i++) {
+            const af_mem_slot_t *p = &w->copy.s[i];
+            if (!af_mem_slot_same(p, &w->seen[i])) {
                 w->seen[i] = *p;
                 w->changed[i] = now;
             }
-            if (af_mem_prog_same(p, &w->saved[i])) {
+            if (af_mem_slot_same(p, &w->saved[i])) {
                 continue;
             }
             pending++;
@@ -149,7 +148,7 @@ static void store_task(void *arg)
             }
         }
         s.pending = pending;
-        s.progs = af_mem_count(&w->copy);
+        s.channels = af_mem_count(&w->copy);
         if (due < 0 || (wrote && !reached(now, last_write + pdMS_TO_TICKS(GAP_MS))) ||
             !reached(now, act_t + pdMS_TO_TICKS(QUIET_MS))) {
             continue;
@@ -161,8 +160,8 @@ static void store_task(void *arg)
             }
             continue;
         }
-        if (write_slot((unsigned)due, &w->copy.p[due])) {
-            w->saved[due] = w->copy.p[due];
+        if (write_slot((unsigned)due, &w->copy.s[due])) {
+            w->saved[due] = w->copy.s[due];
         }
         last_write = now; /* a failed write waits the gap too */
         wrote = true;
@@ -184,7 +183,7 @@ void af_store_get_info(af_store_info_t *out)
 {
     *out = (af_store_info_t){
         .running = s.running,
-        .progs = s.progs,
+        .channels = s.channels,
         .pending = s.pending,
         .writes = s.writes,
         .errors = s.errors,

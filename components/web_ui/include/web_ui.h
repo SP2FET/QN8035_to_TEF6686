@@ -26,7 +26,7 @@
  *   "q.dsp"       {"softmute","highcut","stereo","sthiblend"} in % of each control's range
  *                 (stereo 100 = mono); null on AM
  *   "af"          {"active","poor","checking_pi","probation","pi","pi_mem","lists","score","level",
- *                 "need","trial","mem","dwell_s","confirm","switches","pi_fails","list":[ENTRY]}
+ *                 "need","trial","mem","dwell_s","confirm","fast","switches","pi_fails","list":[ENTRY]}
  *                 (af.h). score/level: the tuned station's smoothed quality score (dB = level -
  *                 USN - WAM) and level (dBuV); need: the level a candidate's AF_Update
  *                 measurements must reach "confirm" times in a row to be tried; pi_mem: the PI
@@ -34,8 +34,10 @@
  *                 (until then heard AFs are trusted from AF memory alone);
  *                 trial: null or {"khz","left_ms","n","mean","ref"}
  *                 (the candidate's mean settled score so far and what it must beat, plus the
- *                 gain); mem: {"progs","saving","pending","writes","errors"} (af_store.h);
- *                 dwell_s: until switching is allowed again
+ *                 gain); mem: {"channels","saving","pending","writes","errors"} (af_store.h);
+ *                 dwell_s: until switching is allowed again; fast: fast AF mode (af_params_t.fast);
+ *                 mem.channels: channels in the AF memory (one slot per frequency a programme
+ *                 was received on, with that transmitter's AF list)
  *                 ENTRY {"khz","score","last","n","streak","level","lavg","heard","listed","usn",
  *                 "trial",
  *                 "losses","retry_s","age_s","banned","ban_s","trusted"}: AF_Update score

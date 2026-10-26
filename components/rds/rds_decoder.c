@@ -134,6 +134,9 @@ bool rds_process_group(rds_state_t *s, const uint16_t blk[4], const uint8_t err[
     if (version_b) {
         update_pi(s, blk[2], err[2]); /* block C' repeats PI */
     }
+    if (err[0] <= RDS_ERR_SMALL && s->pi_valid && blk[0] != s->pi) {
+        return false; /* another station (PI not confirmed yet): use nothing of it */
+    }
 
     if (err[1] == RDS_ERR_NONE) {
         s->pty = (uint8_t)((b >> 5) & 0x1Fu);

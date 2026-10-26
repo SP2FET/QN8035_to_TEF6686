@@ -4,36 +4,14 @@
 
 #include "af.h"
 
-static int prog_find(const af_mem_t *m, uint16_t pi)
+static int chan_find(const af_mem_t *m, uint8_t code)
 {
-    for (unsigned i = 0; i < AF_MEM_PROGS; i++) {
-        if (pi != 0 && m->p[i].pi == pi) {
+    for (unsigned i = 0; code != 0 && i < AF_MEM_SLOTS; i++) {
+        if (m->s[i].pi != 0 && m->s[i].code == code) {
             return (int)i;
         }
     }
     return -1;
-}
-
-static int code_find(const af_mem_prog_t *p, uint8_t code)
-{
-    for (unsigned i = 0; i < p->n; i++) {
-        if (p->code[i] == code) {
-            return (int)i;
-        }
-    }
-    return -1;
-}
-
-/* Index of code in p, added if there is room; -1 if it is not there and the list is full. */
-static int code_add(af_mem_prog_t *p, uint8_t code, bool *changed)
-{
-    const int i = code_find(p, code);
-    if (i >= 0 || p->n >= AF_MEM_CODES) {
-        return i;
-    }
-    p->code[p->n] = code;
-    *changed = true;
-    return p->n++;
 }
 
 /* Recency of a against b on the wrapping use clock. */
@@ -47,129 +25,132 @@ void af_mem_init(af_mem_t *m)
     memset(m, 0, sizeof(*m));
 }
 
-bool af_mem_prog_valid(const af_mem_prog_t *p)
+bool af_mem_slot_valid(const af_mem_slot_t *p)
 {
-    if (p->pi == 0 || p->n > AF_MEM_CODES || (p->heard >> p->n) != 0) {
+    if (p->pi == 0 || af_code_khz(p->code) == 0 || p->n > AF_MEM_CODES) {
         return false;
     }
     for (unsigned k = 0; k < p->n; k++) {
-        if (af_code_khz(p->code[k]) == 0) {
+        if (af_code_khz(p->codes[k]) == 0 || p->codes[k] == p->code) {
             return false;
         }
     }
     return true;
 }
 
-bool af_mem_load(af_mem_t *m, unsigned slot, const af_mem_prog_t *p)
+bool af_mem_load(af_mem_t *m, unsigned slot, const af_mem_slot_t *p)
 {
-    if (slot >= AF_MEM_PROGS || !af_mem_prog_valid(p)) {
+    if (slot >= AF_MEM_SLOTS || !af_mem_slot_valid(p)) {
         return false;
     }
-    const int other = prog_find(m, p->pi);
+    const int other = chan_find(m, p->code);
     if (other >= 0 && (unsigned)other != slot) {
         return false;
     }
-    m->p[slot] = *p;
-    memset(&m->p[slot].code[p->n], 0, AF_MEM_CODES - p->n);
+    m->s[slot] = *p;
+    memset(&m->s[slot].codes[p->n], 0, AF_MEM_CODES - p->n);
     if (newer(p->used, m->clock)) {
         m->clock = p->used;
     }
     return true;
 }
 
-bool af_mem_prog_same(const af_mem_prog_t *a, const af_mem_prog_t *b)
+bool af_mem_slot_same(const af_mem_slot_t *a, const af_mem_slot_t *b)
 {
-    return a->pi == b->pi && a->n == b->n && a->heard == b->heard &&
-           memcmp(a->code, b->code, a->n) == 0;
+    return a->pi == b->pi && a->code == b->code && a->n == b->n &&
+           memcmp(a->codes, b->codes, a->n) == 0;
 }
 
 int af_mem_learn(af_mem_t *m, uint16_t pi, uint32_t tuned_khz, const uint8_t *codes, uint8_t n)
 {
-    if (pi == 0) {
+    const uint8_t chan = af_khz_code(tuned_khz);
+    if (pi == 0 || chan == 0) {
         return -1;
     }
     bool changed = false;
-    int i = prog_find(m, pi);
+    int i = chan_find(m, chan);
     if (i < 0) {
         i = 0; /* an empty slot, else the least recently used */
-        for (unsigned k = 0; k < AF_MEM_PROGS; k++) {
-            if (m->p[k].pi == 0) {
+        for (unsigned k = 0; k < AF_MEM_SLOTS; k++) {
+            if (m->s[k].pi == 0) {
                 i = (int)k;
                 break;
             }
-            if (newer(m->p[i].used, m->p[k].used)) {
+            if (newer(m->s[i].used, m->s[k].used)) {
                 i = (int)k;
             }
         }
-        m->p[i] = (af_mem_prog_t){.pi = pi};
+    }
+    if (m->s[i].pi != pi || m->s[i].code != chan) {
+        m->s[i] = (af_mem_slot_t){.pi = pi, .code = chan};
         changed = true;
     }
-    af_mem_prog_t *p = &m->p[i];
+    af_mem_slot_t *p = &m->s[i];
     p->used = ++m->clock;
-    for (unsigned k = 0; k < n; k++) {
-        if (af_code_khz(codes[k]) != 0) {
-            code_add(p, codes[k], &changed);
+
+    bool fits = true;
+    for (unsigned k = 0; k < n && fits; k++) {
+        const uint8_t c = codes[k];
+        if (af_code_khz(c) == 0 || c == chan || memchr(p->codes, c, p->n) != NULL) {
+            continue;
+        }
+        if (p->n < AF_MEM_CODES) {
+            p->codes[p->n++] = c;
+            changed = true;
+        } else {
+            fits = false;
         }
     }
-    const uint8_t tuned = af_khz_code(tuned_khz);
-    if (tuned != 0) {
-        const int k = code_add(p, tuned, &changed);
-        if (k >= 0 && !(p->heard & (1u << k))) {
-            p->heard |= 1u << k;
-            changed = true;
+    if (!fits) { /* the transmitter's current list replaces the stored one */
+        af_mem_slot_t r = {.pi = pi, .code = chan, .used = p->used};
+        for (unsigned k = 0; k < n && r.n < AF_MEM_CODES; k++) {
+            const uint8_t c = codes[k];
+            if (af_code_khz(c) != 0 && c != chan && memchr(r.codes, c, r.n) == NULL) {
+                r.codes[r.n++] = c;
+            }
         }
+        changed |= !af_mem_slot_same(&r, p);
+        *p = r;
     }
     return changed ? i : -1;
 }
 
+int af_mem_forget(af_mem_t *m, uint16_t pi, uint32_t khz)
+{
+    const int i = chan_find(m, af_khz_code(khz));
+    if (i < 0 || m->s[i].pi != pi) {
+        return -1;
+    }
+    memset(&m->s[i], 0, sizeof(m->s[i]));
+    return i;
+}
+
 bool af_mem_lookup(const af_mem_t *m, uint32_t khz, uint16_t *pi)
 {
-    const uint8_t code = af_khz_code(khz);
-    if (code == 0) {
+    const int i = chan_find(m, af_khz_code(khz));
+    if (i < 0) {
         return false;
     }
-    int best = -1;
-    bool best_heard = false;
-    for (unsigned i = 0; i < AF_MEM_PROGS; i++) {
-        const af_mem_prog_t *p = &m->p[i];
-        const int k = p->pi != 0 ? code_find(p, code) : -1;
-        if (k < 0) {
-            continue;
-        }
-        const bool heard = (p->heard & (1u << k)) != 0;
-        if (best < 0 || (heard && !best_heard) ||
-            (heard == best_heard && newer(p->used, m->p[best].used))) {
-            best = (int)i;
-            best_heard = heard;
-        }
-    }
-    if (best < 0) {
-        return false;
-    }
-    *pi = m->p[best].pi;
+    *pi = m->s[i].pi;
     return true;
 }
 
-uint8_t af_mem_codes(const af_mem_t *m, uint16_t pi, uint8_t *codes)
+uint8_t af_mem_list(const af_mem_t *m, uint32_t khz, uint16_t pi, uint8_t *codes)
 {
-    const int i = prog_find(m, pi);
-    if (i < 0) {
+    const int i = chan_find(m, af_khz_code(khz));
+    if (i < 0 || m->s[i].pi != pi) {
         return 0;
     }
-    memcpy(codes, m->p[i].code, m->p[i].n);
-    return m->p[i].n;
+    memcpy(codes, m->s[i].codes, m->s[i].n);
+    return m->s[i].n;
 }
 
 uint8_t af_mem_heard(const af_mem_t *m, uint16_t pi, uint8_t *codes)
 {
-    const int i = prog_find(m, pi);
-    if (i < 0) {
-        return 0;
-    }
     uint8_t n = 0;
-    for (unsigned k = 0; k < m->p[i].n; k++) {
-        if (m->p[i].heard & (1u << k)) {
-            codes[n++] = m->p[i].code[k];
+    for (unsigned i = 0; pi != 0 && i < AF_MEM_SLOTS; i++) {
+        if (m->s[i].pi == pi) {
+            codes[n++] = m->s[i].code;
         }
     }
     return n;
@@ -178,8 +159,8 @@ uint8_t af_mem_heard(const af_mem_t *m, uint16_t pi, uint8_t *codes)
 unsigned af_mem_count(const af_mem_t *m)
 {
     unsigned n = 0;
-    for (unsigned i = 0; i < AF_MEM_PROGS; i++) {
-        n += m->p[i].pi != 0;
+    for (unsigned i = 0; i < AF_MEM_SLOTS; i++) {
+        n += m->s[i].pi != 0;
     }
     return n;
 }

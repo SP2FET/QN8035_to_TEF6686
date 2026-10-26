@@ -8,7 +8,7 @@
 static af_state_t s;
 static const af_params_t P = {.enable = true, .reg = true, .trigger = 300, .window = 60,
                               .min_level = 0, .gain = 30, .interval_ms = 500, .trial_ms = 1500,
-                              .dwell_ms = 15000, .retry_ms = 30000,
+                              .dwell_ms = 15000, .retry_ms = 30000, .ban_ms = 1000,
                               .check_usn = 250};
 
 void setUp(void)
@@ -18,21 +18,45 @@ void setUp(void)
 
 void tearDown(void) {}
 
+static af_params_t fast_params(void)
+{
+    af_params_t p = P;
+    p.fast = true;
+    p.dwell_ms = 3000;
+    p.retry_ms = 5000;
+    return p;
+}
+
 /* An AF_Update result on frequency; its score only has to be one. */
 static void meas(uint32_t khz, int16_t level, uint32_t t)
 {
     af_measured(&s, &P, khz, -100, level, 50, t);
 }
 
-static const af_entry_t *entry(uint32_t khz)
+static uint32_t ban(uint32_t khz, uint32_t now, uint32_t base, bool other_pi)
+{
+    af_params_t p = P;
+    p.ban_ms = base;
+    return af_ban(&s, &p, khz, now, other_pi);
+}
+
+static int index_of(uint32_t khz)
 {
     for (unsigned i = 0; i < s.n; i++) {
         if (s.e[i].khz == khz) {
-            return &s.e[i];
+            return (int)i;
         }
     }
-    TEST_FAIL_MESSAGE("not listed");
-    return NULL;
+    return -1;
+}
+
+static const af_entry_t *entry(uint32_t khz)
+{
+    const int i = index_of(khz);
+    if (i < 0) {
+        TEST_FAIL_MESSAGE("not listed");
+    }
+    return &s.e[i];
 }
 
 /* Three synced entries (codes 1..3 = 87600, 87700, 87800 kHz) and a poor tuned station: score
@@ -79,25 +103,43 @@ static void test_sync(void)
     TEST_ASSERT_EQUAL_UINT8(3, s.n);
     TEST_ASSERT_EQUAL_INT16(AF_SCORE_NONE, s.e[2].level_avg);
     TEST_ASSERT_EQUAL_INT16(AF_SCORE_NONE, s.e[2].trial_score);
+    TEST_ASSERT_FALSE(s.e[2].listed); /* stored, not broadcast */
 }
 
 static void test_current_smoothing(void)
 {
-    TEST_ASSERT_EQUAL_INT16(AF_SCORE_NONE, af_current(&s));
-    TEST_ASSERT_EQUAL_INT16(AF_SCORE_NONE, af_current_level(&s));
+    TEST_ASSERT_EQUAL_INT16(AF_SCORE_NONE, af_current(&s, &P));
+    TEST_ASSERT_EQUAL_INT16(AF_SCORE_NONE, af_current_level(&s, &P));
     af_quality(&s, 300, 400);
-    TEST_ASSERT_EQUAL_INT16(300, af_current(&s));
-    TEST_ASSERT_EQUAL_INT16(400, af_current_level(&s));
+    TEST_ASSERT_EQUAL_INT16(300, af_current(&s, &P));
+    TEST_ASSERT_EQUAL_INT16(400, af_current_level(&s, &P));
     af_quality(&s, 100, 200);
-    TEST_ASSERT_EQUAL_INT16(200, af_current(&s)); /* mean while it fills */
-    TEST_ASSERT_EQUAL_INT16(300, af_current_level(&s));
+    TEST_ASSERT_EQUAL_INT16(200, af_current(&s, &P)); /* mean while it fills */
+    TEST_ASSERT_EQUAL_INT16(300, af_current_level(&s, &P));
     af_quality(&s, AF_SCORE_NONE, 900);
-    TEST_ASSERT_EQUAL_INT16(200, af_current(&s));
-    TEST_ASSERT_EQUAL_INT16(300, af_current_level(&s));
+    TEST_ASSERT_EQUAL_INT16(200, af_current(&s, &P));
+    TEST_ASSERT_EQUAL_INT16(300, af_current_level(&s, &P));
     for (unsigned i = 0; i < 200; i++) {
         af_quality(&s, 100, 200);
     }
-    TEST_ASSERT_INT16_WITHIN(8, 100, af_current(&s));
+    TEST_ASSERT_INT16_WITHIN(8, 100, af_current(&s, &P));
+}
+
+/* Fast mode follows a fade within ~8 samples; normal mode's 32-sample average still sounds
+ * fine. */
+static void test_fast_tracks_a_fade(void)
+{
+    const af_params_t f = fast_params();
+    for (unsigned i = 0; i < 32; i++) {
+        af_quality(&s, 400, 500);
+    }
+    for (unsigned i = 0; i < 8; i++) {
+        af_quality(&s, 100, 200);
+    }
+    TEST_ASSERT_FALSE(af_poor(&s, &P)); /* ~333 */
+    TEST_ASSERT_TRUE(af_poor(&s, &f));  /* ~203 */
+    TEST_ASSERT_INT16_WITHIN(5, 203, af_current(&s, &f));
+    TEST_ASSERT_INT16_WITHIN(5, 303, af_current_level(&s, &f));
 }
 
 static void test_poor(void)
@@ -120,14 +162,17 @@ static void test_need_level(void)
     TEST_ASSERT_EQUAL_INT16(260, af_need_level(&s, &p));
 }
 
-static void test_next_check_round_robin(void)
+static void test_next_check_longest_ago(void)
 {
     three_poor();
     TEST_ASSERT_EQUAL_UINT32(0, af_next_check(&s, &P, AF_HOLD_MS - 1));
     TEST_ASSERT_EQUAL_UINT32(87600, af_next_check(&s, &P, 3000));
+    meas(87600, 100, 3000);
     TEST_ASSERT_EQUAL_UINT32(0, af_next_check(&s, &P, 3499)); /* the interval */
     TEST_ASSERT_EQUAL_UINT32(87700, af_next_check(&s, &P, 3500));
+    meas(87700, 100, 3500);
     TEST_ASSERT_EQUAL_UINT32(87800, af_next_check(&s, &P, 4000));
+    meas(87800, 100, 4000);
     TEST_ASSERT_EQUAL_UINT32(87600, af_next_check(&s, &P, 4500));
 }
 
@@ -137,7 +182,7 @@ static void test_next_check_none(void)
 
     const uint8_t codes[] = {1};
     af_sync(&s, codes, 1);
-    af_quality(&s, 350, 500); /* good enough */
+    af_quality(&s, 350, 500); /* good enough, and no checks while good */
     TEST_ASSERT_EQUAL_UINT32(0, af_next_check(&s, &P, 5000));
 
     af_reset(&s, TUNED, 0);
@@ -151,9 +196,38 @@ static void test_next_check_none(void)
     af_reset(&s, TUNED, 0);
     three_poor();
     for (uint32_t k = 87600; k <= 87800; k += 100) {
-        af_ban(&s, k, 0, 10000, false);
+        ban(k, 0, 10000, false);
     }
     TEST_ASSERT_EQUAL_UINT32(0, af_next_check(&s, &P, 5000));
+}
+
+/* While good, AFs are measured at the slow rate; when it turns poor, the best ranked comes
+ * first and the fast rate counts from the last check. */
+static void test_background_ranking(void)
+{
+    af_params_t p = P;
+    p.bg_interval_ms = 2000;
+    const uint8_t codes[] = {1, 2, 3};
+    af_sync(&s, codes, 3);
+    af_quality(&s, 400, 500); /* good */
+    TEST_ASSERT_EQUAL_UINT32(0, af_next_check(&s, &p, AF_HOLD_MS - 1));
+    TEST_ASSERT_EQUAL_UINT32(87600, af_next_check(&s, &p, 3000));
+    af_measured(&s, &p, 87600, 0, 350, 50, 3000);
+    TEST_ASSERT_EQUAL_UINT32(0, af_next_check(&s, &p, 4999));
+    TEST_ASSERT_EQUAL_UINT32(87700, af_next_check(&s, &p, 5000));
+    af_measured(&s, &p, 87700, 0, 420, 50, 5000); /* below the need of 440 while good */
+    TEST_ASSERT_EQUAL_UINT32(87800, af_next_check(&s, &p, 7000));
+    af_measured(&s, &p, 87800, 0, 200, 50, 7000);
+    TEST_ASSERT_EQUAL_UINT16(420, entry(87700)->level_avg); /* averages survive the slow rate */
+    TEST_ASSERT_EQUAL_UINT32(0, af_pick(&s, &p, 7000)); /* nothing is tried while good */
+
+    af_quality(&s, 100, 300); /* the fade: mean 250, poor */
+    TEST_ASSERT_TRUE(af_poor(&s, &p));
+    TEST_ASSERT_EQUAL_UINT32(0, af_next_check(&s, &p, 7499));
+    /* 87700, the best ranked, is fresh enough to wait; 87600 is not: its rank first */
+    TEST_ASSERT_EQUAL_UINT32(87600, af_next_check(&s, &p, 7500));
+    af_measured(&s, &p, 87600, 0, 150, 50, 7500);
+    TEST_ASSERT_EQUAL_UINT32(87700, af_next_check(&s, &p, 10500)); /* stale now, best first */
 }
 
 static void test_measurement_average(void)
@@ -225,6 +299,27 @@ static void test_single_peak_does_not_switch(void)
     TEST_ASSERT_EQUAL_UINT32(0, af_pick(&s, &P, 4500));
 }
 
+/* Fast mode: one measurement over the need is enough, ranked by the last level. */
+static void test_fast_one_measurement(void)
+{
+    const af_params_t f = fast_params();
+    three_poor();
+    TEST_ASSERT_EQUAL_UINT8(1, af_confirm(&f));
+    TEST_ASSERT_EQUAL_UINT8(AF_CONFIRM, af_confirm(&P));
+    af_measured(&s, &f, 87700, -100, 300, 50, 3000);
+    TEST_ASSERT_EQUAL_UINT32(0, af_pick(&s, &P, 3000));
+    TEST_ASSERT_EQUAL_UINT32(87700, af_pick(&s, &f, 3000));
+
+    /* 87600 averages higher, but its last measurement is lower: the last one decides */
+    af_measured(&s, &f, 87600, -100, 500, 50, 3100);
+    af_measured(&s, &f, 87600, -100, 280, 50, 3200);
+    TEST_ASSERT_EQUAL_INT16(390, entry(87600)->level_avg);
+    TEST_ASSERT_EQUAL_INT16(280, af_pick_level(entry(87600), &f));
+    TEST_ASSERT_EQUAL_UINT32(87700, af_pick(&s, &f, 3200));
+    af_measured(&s, &f, 87700, -100, 200, 50, 3300); /* faded below the need */
+    TEST_ASSERT_EQUAL_UINT32(87600, af_pick(&s, &f, 3300));
+}
+
 static void test_pick_min_level(void)
 {
     af_params_t p = P;
@@ -246,7 +341,7 @@ static void test_pick_best_and_bans(void)
         meas(87800, 250, 3200 + i);
     }
     TEST_ASSERT_EQUAL_UINT32(87700, af_pick(&s, &P, 3500)); /* best average level */
-    af_ban(&s, 87700, 3500, 10000, false);
+    ban(87700, 3500, 10000, false);
     TEST_ASSERT_EQUAL_UINT32(87600, af_pick(&s, &P, 3500));
 }
 
@@ -295,7 +390,7 @@ static void test_trial_won(void)
     for (unsigned i = 0; i < 5; i++) {
         af_quality(&s, 240, 320); /* the candidate's samples, not the tuned station's */
     }
-    TEST_ASSERT_EQUAL_INT16(200, af_current(&s));
+    TEST_ASSERT_EQUAL_INT16(200, af_current(&s, &P));
     TEST_ASSERT_EQUAL_INT16(240, af_trial_mean(&s));
     TEST_ASSERT_FALSE(af_trial_due(&s, &P, 5499));
     TEST_ASSERT_TRUE(af_trial_due(&s, &P, 5500));
@@ -310,8 +405,11 @@ static void test_trial_won(void)
     TEST_ASSERT_FALSE(s.trial);
     TEST_ASSERT_EQUAL_UINT32(k, s.tuned.khz);
     TEST_ASSERT_TRUE(af_trusted(&s, TUNED, 5500)); /* back as a candidate */
-    TEST_ASSERT_EQUAL_INT16(240, af_current(&s)); /* starts from the trial */
-    TEST_ASSERT_EQUAL_INT16(320, af_current_level(&s));
+    TEST_ASSERT_EQUAL_INT16(240, af_current(&s, &P)); /* starts from the trial */
+    TEST_ASSERT_EQUAL_INT16(320, af_current_level(&s, &P));
+    const af_params_t f = fast_params();
+    TEST_ASSERT_EQUAL_INT16(240, af_current(&s, &f)); /* both spans */
+    TEST_ASSERT_EQUAL_INT16(320, af_current_level(&s, &f));
     TEST_ASSERT_EQUAL_INT16(240, s.tuned.trial_score);
     TEST_ASSERT_EQUAL_UINT32(15000, af_dwell_left(&s, 5500));
 }
@@ -331,20 +429,23 @@ static void test_trial_lost(void)
     TEST_ASSERT_FALSE(r.won);
     TEST_ASSERT_EQUAL_UINT32(30000, r.retry_ms);
     TEST_ASSERT_EQUAL_UINT32(TUNED, s.tuned.khz);
-    TEST_ASSERT_EQUAL_INT16(200, af_current(&s)); /* the trial's samples were not its */
+    TEST_ASSERT_EQUAL_INT16(200, af_current(&s, &P)); /* the trial's samples were not its */
     TEST_ASSERT_EQUAL_UINT8(1, entry(k)->losses);
     TEST_ASSERT_EQUAL_INT16(220, entry(k)->trial_score);
     TEST_ASSERT_EQUAL_UINT8(0, entry(k)->streak);
 
     /* checks hold off while the tuned station settles again */
     TEST_ASSERT_EQUAL_UINT32(0, af_next_check(&s, &P, 5500 + AF_HOLD_MS - 1));
-    TEST_ASSERT_EQUAL_UINT32(87600, af_next_check(&s, &P, 5500 + AF_HOLD_MS));
-    meas(k, 300, 8500);
-    TEST_ASSERT_EQUAL_UINT32(k, af_next_check(&s, &P, 9000)); /* round robin */
-    meas(k, 300, 9000);
-    TEST_ASSERT_EQUAL_UINT32(87800, af_next_check(&s, &P, 9500)); /* waiting: no priority */
+    TEST_ASSERT_EQUAL_UINT32(87600, af_next_check(&s, &P, 5500 + AF_HOLD_MS)); /* never measured */
+    meas(87600, 100, 8500);
+    TEST_ASSERT_EQUAL_UINT32(87800, af_next_check(&s, &P, 9000));
+    meas(87800, 100, 9000);
+    TEST_ASSERT_EQUAL_UINT32(k, af_next_check(&s, &P, 9500)); /* measured longest ago */
     meas(k, 300, 9500);
-    TEST_ASSERT_EQUAL_UINT32(0, af_pick(&s, &P, 9500)); /* until 5.5 s + 30 s */
+    TEST_ASSERT_EQUAL_UINT32(87600, af_next_check(&s, &P, 10000)); /* waiting: no confirming */
+    meas(k, 300, 10000);
+    meas(k, 300, 10500);
+    TEST_ASSERT_EQUAL_UINT32(0, af_pick(&s, &P, 10500)); /* until 5.5 s + 30 s */
     for (unsigned i = 0; i < 3; i++) {
         meas(k, 300, 34500 + 500 * i);
     }
@@ -372,6 +473,38 @@ static void test_trial_retry_escalation(void)
     }
     TEST_ASSERT_TRUE(af_trial_end(&s, &P, t + 1500).won);
     TEST_ASSERT_EQUAL_UINT8(0, s.tuned.losses);
+}
+
+/* Fast mode: the retry, dwell and ban times stay fixed, and checks resume soon. */
+static void test_fast_waits_fixed(void)
+{
+    const af_params_t f = fast_params();
+    three_poor();
+    const uint32_t k = 87700;
+    uint32_t t = 4000;
+    for (unsigned i = 0; i < 4; i++) {
+        af_trial_begin(&s, &f, k, t);
+        for (unsigned n = 0; n < 5; n++) {
+            af_quality(&s, 210, 300);
+        }
+        TEST_ASSERT_EQUAL_UINT32(5000, af_trial_end(&s, &f, t + 1500).retry_ms);
+        t += 10000;
+    }
+    TEST_ASSERT_EQUAL_UINT8(4, entry(k)->losses);
+    TEST_ASSERT_EQUAL_UINT32(0, af_next_check(&s, &f, t - 10000 + 1500 + AF_HOLD_FAST_MS - 1));
+    TEST_ASSERT_NOT_EQUAL(0, af_next_check(&s, &f, t - 10000 + 1500 + AF_HOLD_FAST_MS));
+
+    for (unsigned i = 0; i < 3; i++) {
+        TEST_ASSERT_EQUAL_UINT32(1000, af_ban(&s, &f, 87600, 0, false));
+    }
+    TEST_ASSERT_EQUAL_UINT32(4000, af_ban(&s, &f, 87600, 0, true)); /* another PI: still 4x */
+
+    const uint32_t a = 95000, b = 96000;
+    af_reset(&s, a, 0);
+    for (unsigned i = 0; i < 4; i++) {
+        af_switched(&s, &f, i % 2 ? b : a, i % 2 ? a : b, 1000 * i);
+        TEST_ASSERT_EQUAL_UINT32(3000, af_dwell_left(&s, 1000 * i));
+    }
 }
 
 static void test_trial_due_needs_samples(void)
@@ -404,12 +537,19 @@ static void test_trial_ref_is_recent_mean(void)
     for (unsigned i = 0; i < AF_REF_N; i++) {
         af_quality(&s, 100, 300);
     }
-    for (unsigned i = 0; i < AF_REF_N; i++) {
-        af_quality(&s, 300, 300);
+    for (unsigned i = 0; i < AF_REF_N - AF_REF_FAST_N; i++) {
+        af_quality(&s, 200, 300);
+    }
+    for (unsigned i = 0; i < AF_REF_FAST_N; i++) {
+        af_quality(&s, 400, 300);
     }
     af_trial_begin(&s, &P, 87600, 0);
-    TEST_ASSERT_EQUAL_INT16(300, s.trial_ref);
-    TEST_ASSERT_INT16_WITHIN(2, 200, af_current(&s)); /* the 32-sample mean lags */
+    TEST_ASSERT_EQUAL_INT16(300, s.trial_ref); /* the last 16 */
+    TEST_ASSERT_INT16_WITHIN(2, 200, af_current(&s, &P)); /* the 32-sample mean lags */
+    af_trial_abort(&s, &P, 0);
+    const af_params_t f = fast_params();
+    af_trial_begin(&s, &f, 87600, 0);
+    TEST_ASSERT_EQUAL_INT16(400, s.trial_ref); /* the last 8 */
 }
 
 static void test_trial_abort(void)
@@ -419,22 +559,24 @@ static void test_trial_abort(void)
     for (unsigned i = 0; i < 3; i++) {
         af_quality(&s, 500, 600);
     }
-    af_trial_abort(&s, 2000);
+    af_trial_abort(&s, &P, 2000);
     TEST_ASSERT_FALSE(s.trial);
     TEST_ASSERT_EQUAL_UINT32(TUNED, s.tuned.khz);
     TEST_ASSERT_EQUAL_UINT8(0, entry(87600)->losses);
     TEST_ASSERT_EQUAL_UINT32(0, af_next_check(&s, &P, 2000 + AF_HOLD_MS - 1));
     af_quality(&s, 100, 300); /* the tuned station's again */
-    TEST_ASSERT_EQUAL_INT16(150, af_current(&s));
+    TEST_ASSERT_EQUAL_INT16(150, af_current(&s, &P));
 }
 
 static void test_ban(void)
 {
     three_poor();
-    TEST_ASSERT_EQUAL_UINT32(0, af_ban(&s, 99900, 0, 1000, false)); /* not listed */
-    TEST_ASSERT_EQUAL_UINT32(1000, af_ban(&s, 87600, 3000, 1000, false));
+    TEST_ASSERT_EQUAL_UINT32(0, ban(99900, 0, 1000, false)); /* not listed */
+    TEST_ASSERT_EQUAL_UINT32(1000, ban(87600, 3000, 1000, false));
     TEST_ASSERT_EQUAL_UINT32(87700, af_next_check(&s, &P, 3000)); /* skipped while banned */
+    meas(87700, 100, 3000);
     TEST_ASSERT_EQUAL_UINT32(87800, af_next_check(&s, &P, 3500));
+    meas(87800, 100, 3500);
     TEST_ASSERT_EQUAL_UINT32(87600, af_next_check(&s, &P, 4000)); /* the ban is over */
 }
 
@@ -443,11 +585,11 @@ static void test_ban_escalation(void)
     three_poor();
     static const uint32_t want[] = {1000, 2000, 4000, 8000, 16000, 32000, 32000};
     for (unsigned i = 0; i < sizeof(want) / sizeof(want[0]); i++) {
-        TEST_ASSERT_EQUAL_UINT32(want[i], af_ban(&s, 87600, 0, 1000, false));
+        TEST_ASSERT_EQUAL_UINT32(want[i], ban(87600, 0, 1000, false));
     }
     /* another PI is proof: from 4x */
-    TEST_ASSERT_EQUAL_UINT32(4000, af_ban(&s, 87700, 0, 1000, true));
-    TEST_ASSERT_EQUAL_UINT32(8000, af_ban(&s, 87700, 0, 1000, true));
+    TEST_ASSERT_EQUAL_UINT32(4000, ban(87700, 0, 1000, true));
+    TEST_ASSERT_EQUAL_UINT32(8000, ban(87700, 0, 1000, true));
 }
 
 static void test_switched(void)
@@ -466,8 +608,8 @@ static void test_switched(void)
     af_switched(&s, &p, TUNED, to, 5000);
 
     TEST_ASSERT_EQUAL_UINT32(to, s.tuned.khz);
-    TEST_ASSERT_EQUAL_INT16(AF_SCORE_NONE, af_current(&s));
-    TEST_ASSERT_EQUAL_INT16(AF_SCORE_NONE, af_current_level(&s));
+    TEST_ASSERT_EQUAL_INT16(AF_SCORE_NONE, af_current(&s, &p));
+    TEST_ASSERT_EQUAL_INT16(AF_SCORE_NONE, af_current_level(&s, &p));
     TEST_ASSERT_EQUAL_UINT8(0, s.ref_n);
     bool has_from = false;
     for (unsigned i = 0; i < s.n; i++) {
@@ -486,6 +628,38 @@ static void test_switched(void)
     TEST_ASSERT_EQUAL_UINT32(15000, af_dwell_left(&s, 5000));
     TEST_ASSERT_EQUAL_UINT32(1, af_dwell_left(&s, 5000 + 14999));
     TEST_ASSERT_EQUAL_UINT32(0, af_dwell_left(&s, 5000 + 15000));
+}
+
+/* A full table still takes the station switched from back. */
+static void test_switched_full_table(void)
+{
+    uint8_t codes[AF_MAX];
+    for (unsigned i = 0; i < AF_MAX; i++) {
+        codes[i] = (uint8_t)(1 + i); /* 87.6 .. 90.0 MHz */
+    }
+    af_sync(&s, codes, AF_MAX);
+    TEST_ASSERT_EQUAL_UINT8(AF_MAX, s.n);
+    af_switched(&s, &P, TUNED, 99000, 1000); /* not in the table */
+    TEST_ASSERT_EQUAL_UINT8(AF_MAX, s.n);
+    TEST_ASSERT_TRUE(index_of(TUNED) >= 0);
+    TEST_ASSERT_TRUE(af_trusted(&s, TUNED, 1000));
+}
+
+/* Another PI turned up after a won switch: back, with no dwell holding the next try. */
+static void test_returned(void)
+{
+    const uint8_t codes[] = {1, 2};
+    af_sync(&s, codes, 2);
+    af_switched(&s, &P, TUNED, 87600, 1000);
+    TEST_ASSERT_EQUAL_UINT32(15000, af_dwell_left(&s, 1000));
+    af_returned(&s, &P, 87600, TUNED, 3000);
+    TEST_ASSERT_EQUAL_UINT32(TUNED, s.tuned.khz);
+    TEST_ASSERT_TRUE(index_of(87600) >= 0);
+    TEST_ASSERT_EQUAL_UINT32(0, af_dwell_left(&s, 3000));
+    TEST_ASSERT_EQUAL_UINT32(0, af_next_check(&s, &P, 3000 + AF_HOLD_MS - 1));
+    /* the next switch is not a quick repeat */
+    af_switched(&s, &P, TUNED, 87700, 5000);
+    TEST_ASSERT_EQUAL_UINT32(15000, af_dwell_left(&s, 5000));
 }
 
 static void test_dwell_blocks_pick(void)
@@ -524,6 +698,73 @@ static void test_dwell_escalation(void)
     TEST_ASSERT_EQUAL_UINT32(15000, s.dwell_ms);
 }
 
+/* A transmitter's list comes in even into a full table: the entries no transmitter listed for
+ * longest make room, never one of the list being added. */
+static void test_listed_makes_room(void)
+{
+    uint8_t stored[AF_MAX];
+    for (unsigned i = 0; i < AF_MAX; i++) {
+        stored[i] = (uint8_t)(1 + i); /* the AF memory's 25 */
+    }
+    af_sync(&s, stored, AF_MAX);
+    const uint8_t local[] = {2, 100, 101};
+    af_listed(&s, local, 3, 1000);
+    TEST_ASSERT_EQUAL_UINT8(AF_MAX, s.n);
+    TEST_ASSERT_TRUE(index_of(af_code_khz(100)) >= 0);
+    TEST_ASSERT_TRUE(index_of(af_code_khz(101)) >= 0);
+    TEST_ASSERT_TRUE(index_of(af_code_khz(2)) >= 0);  /* listed: stays */
+    TEST_ASSERT_TRUE(index_of(af_code_khz(1)) < 0);   /* never listed: made room */
+    TEST_ASSERT_TRUE(index_of(af_code_khz(3)) < 0);
+    TEST_ASSERT_TRUE(entry(af_code_khz(100))->listed);
+
+    uint8_t whole[AF_MAX];
+    for (unsigned i = 0; i < AF_MAX; i++) {
+        whole[i] = (uint8_t)(150 + i);
+    }
+    af_listed(&s, whole, AF_MAX, 2000); /* a full list of its own replaces everything */
+    TEST_ASSERT_EQUAL_UINT8(AF_MAX, s.n);
+    for (unsigned i = 0; i < AF_MAX; i++) {
+        TEST_ASSERT_TRUE(index_of(af_code_khz(whole[i])) >= 0);
+    }
+}
+
+/* Once the transmitter that plays has sent lists for a minute, what it does not list leaves,
+ * except a frequency that carried the programme lately and the candidate on trial. */
+static void test_unlisted_leave(void)
+{
+    const uint8_t stored[] = {1, 2, 3, 4};
+    af_sync(&s, stored, 4);
+    af_verified(&s, 87700, 500);
+    const uint8_t list[] = {1};
+    af_listed(&s, list, 1, 1000);
+    af_trial_begin(&s, &P, 87900, 50000);
+    af_listed(&s, list, 1, 1000 + AF_UNLISTED_MS - 1);
+    TEST_ASSERT_EQUAL_UINT8(4, s.n);
+    af_listed(&s, list, 1, 1000 + AF_UNLISTED_MS);
+    TEST_ASSERT_EQUAL_UINT8(3, s.n);
+    TEST_ASSERT_TRUE(index_of(87600) >= 0); /* listed */
+    TEST_ASSERT_TRUE(index_of(87700) >= 0); /* verified */
+    TEST_ASSERT_TRUE(index_of(87800) < 0);
+    TEST_ASSERT_TRUE(index_of(87900) >= 0); /* on trial */
+}
+
+/* After a switch the new transmitter's lists count from their own start. */
+static void test_switch_restarts_listing(void)
+{
+    const uint8_t old_list[] = {1, 2};
+    af_listed(&s, old_list, 2, 1000);
+    af_switched(&s, &P, TUNED, 87600, 2000);
+    TEST_ASSERT_FALSE(s.listing);
+    const uint8_t new_list[] = {3};
+    af_listed(&s, new_list, 1, 30000);
+    af_listed(&s, new_list, 1, 30000 + AF_UNLISTED_MS - 1);
+    TEST_ASSERT_TRUE(index_of(87700) >= 0); /* old list, not yet a minute of the new one */
+    af_listed(&s, new_list, 1, 30000 + AF_UNLISTED_MS);
+    TEST_ASSERT_TRUE(index_of(87700) < 0);
+    TEST_ASSERT_TRUE(index_of(87800) >= 0);
+    TEST_ASSERT_TRUE(index_of(TUNED) >= 0); /* switched from: verified */
+}
+
 static void test_trust(void)
 {
     const uint32_t a = 95000, b = 96000;
@@ -538,7 +779,7 @@ static void test_trust(void)
     af_switched(&s, &P, b, a, 2000);
     af_switched(&s, &P, a, b, 3000);
     TEST_ASSERT_TRUE(af_trusted(&s, a, 3000));
-    af_ban(&s, a, 3000, 1000, true);
+    ban(a, 3000, 1000, true);
     TEST_ASSERT_FALSE(af_trusted(&s, a, 3000));
     TEST_ASSERT_FALSE(af_trusted(&s, a, 3000 + 10000)); /* the ban ends, the trust stays gone */
 
@@ -580,7 +821,7 @@ static void test_pick_usn_screen(void)
     TEST_ASSERT_EQUAL_UINT32(0, af_pick(&s, &P, 4000)); /* noise at a passable level */
     meas_usn(87600, 300, 100, 4500);
     TEST_ASSERT_EQUAL_UINT32(87600, af_pick(&s, &P, 4500));
-    for (unsigned i = 0; i < AF_CONFIRM; i++) {
+    for (unsigned i = 0; i < AF_USN_N; i++) {
         meas_usn(87600, 300, 600, 5000 + 500 * i);
     }
     TEST_ASSERT_EQUAL_UINT32(0, af_pick(&s, &P, 6000));
@@ -629,7 +870,7 @@ static void test_heard(void)
     af_listed(&s, heard, 1, 4000 + AF_TRUST_MS);
     TEST_ASSERT_TRUE(af_trusted(&s, 87600, 4000 + AF_TRUST_MS));
     const uint32_t t = 4000 + AF_TRUST_MS;
-    af_ban(&s, 87600, t, 1000, false);
+    ban(87600, t, 1000, false);
     TEST_ASSERT_FALSE(af_trusted(&s, 87600, t + 500));
     TEST_ASSERT_TRUE(af_trusted(&s, 87600, t + 2000)); /* the ban has ended */
     af_set_heard(&s, heard, 0);
@@ -655,6 +896,7 @@ static void test_reset_lists(void)
     TEST_ASSERT_FALSE(af_trusted(&s, 87600, 4000));
     af_reset(&s, TUNED, 5000);
     TEST_ASSERT_FALSE(s.lists);
+    TEST_ASSERT_FALSE(s.listing);
 }
 
 static void test_pi_match(void)
@@ -675,6 +917,8 @@ static void clock_wrap_at(uint32_t t0)
     const uint32_t end = t0 + AF_HOLD_MS; /* modulo 2^32 */
     TEST_ASSERT_EQUAL_UINT32(0, af_next_check(&s, &P, end - 1));
     TEST_ASSERT_EQUAL_UINT32(s.e[0].khz, af_next_check(&s, &P, end));
+    meas(s.e[0].khz, 100, end);
+    TEST_ASSERT_EQUAL_UINT32(0, af_next_check(&s, &P, end + 499));
     TEST_ASSERT_EQUAL_UINT32(s.e[1].khz, af_next_check(&s, &P, end + 500));
     af_trial_begin(&s, &P, s.e[1].khz, end);
     for (unsigned i = 0; i < 5; i++) {
@@ -697,14 +941,17 @@ int main(void)
     RUN_TEST(test_score);
     RUN_TEST(test_sync);
     RUN_TEST(test_current_smoothing);
+    RUN_TEST(test_fast_tracks_a_fade);
     RUN_TEST(test_poor);
     RUN_TEST(test_need_level);
-    RUN_TEST(test_next_check_round_robin);
+    RUN_TEST(test_next_check_longest_ago);
     RUN_TEST(test_next_check_none);
+    RUN_TEST(test_background_ranking);
     RUN_TEST(test_measurement_average);
     RUN_TEST(test_streak_by_level);
     RUN_TEST(test_pick_needs_a_streak);
     RUN_TEST(test_single_peak_does_not_switch);
+    RUN_TEST(test_fast_one_measurement);
     RUN_TEST(test_pick_min_level);
     RUN_TEST(test_pick_best_and_bans);
     RUN_TEST(test_pick_not_while_good);
@@ -712,14 +959,20 @@ int main(void)
     RUN_TEST(test_trial_won);
     RUN_TEST(test_trial_lost);
     RUN_TEST(test_trial_retry_escalation);
+    RUN_TEST(test_fast_waits_fixed);
     RUN_TEST(test_trial_due_needs_samples);
     RUN_TEST(test_trial_ref_is_recent_mean);
     RUN_TEST(test_trial_abort);
     RUN_TEST(test_ban);
     RUN_TEST(test_ban_escalation);
     RUN_TEST(test_switched);
+    RUN_TEST(test_switched_full_table);
+    RUN_TEST(test_returned);
     RUN_TEST(test_dwell_blocks_pick);
     RUN_TEST(test_dwell_escalation);
+    RUN_TEST(test_listed_makes_room);
+    RUN_TEST(test_unlisted_leave);
+    RUN_TEST(test_switch_restarts_listing);
     RUN_TEST(test_trust);
     RUN_TEST(test_usn_min);
     RUN_TEST(test_pick_usn_screen);

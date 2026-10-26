@@ -45,8 +45,10 @@ static void test_ps_assembly(void)
 static void test_pi_change_clears_text(void)
 {
     ps_group(0x3201, 0, 'R', 'A');
-    ps_group(0x3202, 1, 'X', 'Y');
+    const uint16_t once[4] = {0x3202, 0x0001, 0xE0CD, 0x5859};
+    TEST_ASSERT_FALSE(rds_process_group(&s, once, OK)); /* unconfirmed: unused */
     TEST_ASSERT_EQUAL_HEX16(0x3201, s.pi); /* once is not enough */
+    TEST_ASSERT_EQUAL_STRING("RA      ", s.ps);
     ps_group(0x3202, 1, 'X', 'Y');
     TEST_ASSERT_EQUAL_HEX16(0x3202, s.pi);
     TEST_ASSERT_EQUAL_STRING("  XY    ", s.ps);
@@ -191,6 +193,33 @@ static void test_pi_alternating_never_resets(void)
     }
     TEST_ASSERT_EQUAL_HEX16(0xD312, s.pi);
     TEST_ASSERT_EQUAL_UINT8(1, s.af_count);
+}
+
+static void test_pi_foreign_group_unused(void)
+{
+    af_group(0xE350, OK);
+    ps_group(0xD312, 0, 'A', 'B');
+    const uint32_t groups = s.groups;
+    const uint16_t other[4] = {0xD999, 0x0000, 0x2A2B, 0x5858};
+    TEST_ASSERT_FALSE(rds_process_group(&s, other, OK));
+    TEST_ASSERT_EQUAL_UINT8(1, s.af_count);
+    TEST_ASSERT_EQUAL_UINT8(80, s.af[0]);
+    TEST_ASSERT_EQUAL_STRING_LEN("AB", s.ps, 2);
+    TEST_ASSERT_EQUAL_UINT32(groups, s.groups);
+    TEST_ASSERT_EQUAL_UINT32(0, s.rejected);
+    TEST_ASSERT_TRUE(rds_process_group(&s, other, OK)); /* second sighting confirms */
+    TEST_ASSERT_EQUAL_HEX16(0xD999, s.pi);
+    TEST_ASSERT_EQUAL_UINT8(2, s.af_count);
+    TEST_ASSERT_EQUAL_UINT8(42, s.af[0]);
+    TEST_ASSERT_EQUAL_UINT8(43, s.af[1]);
+}
+
+static void test_pi_own_group_after_single_other(void)
+{
+    af_group(0xE350, OK);
+    pi_group(0xD999, OK);
+    af_group(0x2ACD, OK);
+    TEST_ASSERT_EQUAL_UINT8(2, s.af_count);
 }
 
 static void test_pi_process_pi_then_group(void)
@@ -364,6 +393,8 @@ int main(void)
     RUN_TEST(test_af_bad_block_c_and_0b);
     RUN_TEST(test_af_pi_change_clears);
     RUN_TEST(test_pi_single_other_ignored);
+    RUN_TEST(test_pi_foreign_group_unused);
+    RUN_TEST(test_pi_own_group_after_single_other);
     RUN_TEST(test_pi_twice_adopts_and_clears);
     RUN_TEST(test_pi_alternating_never_resets);
     RUN_TEST(test_pi_process_pi_then_group);

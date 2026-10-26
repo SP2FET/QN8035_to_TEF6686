@@ -4,6 +4,52 @@ The firmware uses Semantic Versioning. Development releases use 0.x versions and
 change interfaces between minor versions. Versions and Git tags are recorded here;
 target builds and host tests do not establish hardware compatibility.
 
+## 0.5.0 - 2026-10-26
+
+A review of AF following against a regular car radio found the AF table and AF memory filling
+up for good, another programme's data learned as the followed one's, and a slow reaction to
+fades.
+
+### Added
+
+- Fast AF mode (`af_fast`, off by default), for places where transmitters of the programme take
+  turns being the best: one AF_Update measurement over the need may start a trial, ranked by its
+  last level; the retry (`af_f_retry`, 5 s), dwell (`af_f_dwell`, 3 s) and PI-check ban times do
+  not double; the tuned station's score follows within ~0.8 s (8 samples, trial reference the
+  last 8); checks resume 0.5 s after a try. Normal mode is unchanged apart from the fixes below.
+- AFs are measured while reception is good too (`af_bg_int`, every 2 s, 0 = never; AF_Update is
+  inaudible). When it turns poor, a candidate that already passes is confirmed first, then the
+  best ranked are re-measured first, so a fade needs no full round of checks.
+
+### Changed
+
+- The AF table follows the transmitter that plays: its list always gets in (the entry no
+  transmitter listed for longest makes room), and once it has sent lists for a minute, AFs it
+  has not listed for a minute leave, except one that carried the programme within 10 min and the
+  candidate on trial. Entries were only ever added before, up to 25, so on a long drive new
+  transmitters' AFs were dropped.
+- AF memory is per channel: each frequency the programme was received on keeps its PI and its
+  transmitter's AF list (replaced by the current list when it no longer fits). 16 channels, NVS
+  keys `c0`..`c15` with layout `cver` 2; the per-programme records of 0.4.x are not read (they
+  were unions of every code ever seen, frozen at 25). An AF switched to brings its stored list
+  along. Web: `af.mem.progs` is `af.mem.channels`; `af.confirm` follows the mode, `af.fast` is
+  new.
+
+### Fixed
+
+- During the probation after a jump to an AF, the decoder still holds the old PI, so another
+  programme's first groups were taken as the followed one's: its AFs joined the table and the
+  memory, and the frequency was stored as heard (trusted, unmuted jumps into it again later).
+  Nothing is learned until the programme's PI shows there.
+- The RDS decoder ignores the rest of a group whose block A carries a PI not confirmed yet.
+- A channel found carrying another PI (PI check or probation) is dropped from the AF memory.
+- The muted PI check empties the RDS buffer after the Check tuning: a group the old station
+  completed during the 1 ms mute slope could answer the check with the wanted PI. The TEF
+  buffers up to 22 groups (UM V102 §4.2.3), not one: all flushes read it empty.
+- Another PI read in a PI check counts only from an error-free block or twice; a corrected block
+  can be miscorrected (it banned the AF for 20 min).
+- Undoing a won switch because another PI turned up starts no dwell (it was a doubled one).
+
 ## 0.4.3 - 2026-10-26
 
 ### Changed

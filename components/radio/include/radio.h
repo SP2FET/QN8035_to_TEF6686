@@ -7,9 +7,10 @@
  * polls quality and RDS, runs seeks as a non-blocking state machine, follows
  * RDS alternative frequencies (af.h) and re-boots the tuner if it loses state.
  *
- * AF memory (af_mem.h): the AF lists of the programmes heard. A station heard without RDS takes
- * the PI stored for its frequency, so its AFs are followed too. This service keeps the table in
- * RAM; af_store writes it to flash.
+ * AF memory (af_mem.h): per channel (a frequency a programme was received on), its PI and the
+ * AF list its transmitter broadcasts. A station heard without RDS takes the PI stored for its
+ * frequency, so its AFs are followed too, and an AF switched to brings its stored list along.
+ * This service keeps the table in RAM; af_store writes it to flash.
  *
  * Trace: quality samples, AF_Update measurements and AF events go into a ring of records
  * (radio_get_trace) for a client that records a ride (web UI /api/trace, scripts/ride_log.py).
@@ -102,6 +103,8 @@ typedef struct {
     bool probation;     /**< jumped to a trusted AF: another PI there sends the tuner back */
     bool trial;         /**< a candidate plays on trial (trial_*) */
     bool pi_mem;        /**< pi comes from the AF memory: no RDS PI from the station yet */
+    bool fast;          /**< fast mode (af_params_t.fast) */
+    uint8_t confirm;    /**< AF_Update measurements in a row a candidate needs (af_confirm) */
     uint16_t pi;        /**< the programme followed, valid while active */
     int16_t score;      /**< smoothed score of the tuned station, 0.1 dB, AF_SCORE_NONE if none */
     int16_t level;      /**< smoothed level of the tuned station, 0.1 dBuV, AF_SCORE_NONE if none */
@@ -112,7 +115,7 @@ typedef struct {
     int16_t trial_mean; /**< so far, 0.1 dB, AF_SCORE_NONE without samples */
     int16_t trial_ref;  /**< what it must beat (plus the gain), 0.1 dB */
     uint16_t trial_n;
-    uint8_t mem_progs;  /**< programmes in the AF memory */
+    uint8_t mem_progs;  /**< channels in the AF memory (af_mem_count) */
     /** Since the station was tuned (a tune, seek or PI change resets them and the tries below;
      * an AF switch does not). */
     uint32_t switches;

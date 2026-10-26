@@ -213,12 +213,13 @@ static void jb_af(jbuf_t *j, const radio_af_status_t *a)
     af_store_info_t m;
     af_store_get_info(&m);
     jb_printf(j,
-              ",\"mem\":{\"progs\":%u,\"saving\":%s,\"pending\":%u,\"writes\":%" PRIu32
+              ",\"mem\":{\"channels\":%u,\"saving\":%s,\"pending\":%u,\"writes\":%" PRIu32
               ",\"errors\":%" PRIu32 "}",
               a->mem_progs, b(m.running), m.pending, m.writes, m.errors);
-    jb_printf(j, ",\"dwell_s\":%" PRIu32 ",\"confirm\":%d,\"switches\":%" PRIu32
+    jb_printf(j, ",\"dwell_s\":%" PRIu32 ",\"confirm\":%u,\"fast\":%s,\"switches\":%" PRIu32
                  ",\"pi_fails\":%" PRIu32 ",\"list\":[",
-              (a->dwell_ms + 999) / 1000, AF_CONFIRM, a->switches, a->pi_fails);
+              (a->dwell_ms + 999) / 1000, (unsigned)a->confirm, b(a->fast), a->switches,
+              a->pi_fails);
     for (unsigned i = 0; i < a->n && i < AF_MAX; i++) {
         jb_printf(j, "%s", i ? "," : "");
         jb_af_entry(j, &a->e[i], a->lists, a->now_ms);

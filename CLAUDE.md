@@ -16,8 +16,8 @@ Mini) replaces it with an **NXP TEF6686** tuner module:
 | QN8035 emulation: register model, I2C slave (no clock stretching), bridge | The car build (`sdkconfig.defaults`), first ride 2026-10-25. Model host-tested, replays the captured cold start byte for byte |
 | Radio service, RDS decoder, web UI, watchdog + core dump | Run in the car. Seek not checked |
 | Reception tuning table, Weak signal card | Live changes used in the car. Save and the extended bandwidth words not checked |
-| AF following 0.4.2: AF_Update screens by level (muted PI checks also by USN), a trial on settled quality decides | First ride 2026-10-26: switches, too many muted checks (0.4.2 not yet on air) |
-| AF memory in NVS, ride recording (`/api/trace`, `scripts/ride_log.py`, `scripts/ride_report.py`) | Host-tested, **not yet on the device** |
+| AF following 0.5.0: AF_Update ranks AFs (also while good) by level, muted PI checks also by USN, a trial on settled quality decides; normal and fast mode (`af_fast`) | First ride 2026-10-26 (0.4.0): switches, too many muted checks. 0.5.0 host-tested, **not yet on air** |
+| AF memory per channel in NVS, ride recording (`/api/trace`, `scripts/ride_log.py`, `scripts/ride_report.py`) | Host-tested, **not yet on the device** |
 | Web OTA, reset history, station memory (stand-alone build only) | Build and host tests pass, **not yet on the device** (OTA needs one USB flash first) |
 
 Head-unit protocol: [docs/headunit-mcu-firmware.md](docs/headunit-mcu-firmware.md) (MCU firmware
@@ -112,7 +112,7 @@ python scripts/ride_report.py rides/<dir>           # its HTML report and CSVs
  phone/PC ══Wi-Fi══ net_wifi ── web_ui (httpd: /, /api/*, /ws) ── log_stream (ESP_LOG tee)
                                ├── radio_mem (NVS: settings, memory channels)
                                ├── tuning_store (NVS: reception tuning)
-                               ├── af_store (NVS: AF lists per programme)
+                               ├── af_store (NVS: AF lists per channel)
                                └── sysmon (resets, core dump, RTC snapshot)
 ```
 
@@ -122,7 +122,7 @@ python scripts/ride_report.py rides/<dir>           # its HTML report and CSVs
 | `tef6686` | TEF668x driver: framing, read turnaround, boot, patch selection, typed commands; `patch/` blobs from `regen_patch.py` | esp_driver_i2c | no |
 | `radio` | Command queue; polls quality + DSP status (100 ms), RDS (20 ms), health (2 s); seek; AF following (AF_Update screen, PI check, trials); AF memory in RAM; trace ring; tuning at boot and live; recovery; status snapshot | tef6686, rds, af, tuning, trace | no |
 | `rds` | PI/PS/RT, AF list (0A), PTY/TP/TA, clock time (4A) | – | yes |
-| `af` | `af.h`: AF decisions (level screen, streaks, trials, retry waits, dwell, trust, bans, PI match with REG). `af_mem.h`: AF lists and heard frequencies per PI | – | yes |
+| `af` | `af.h`: AF decisions (level screen, streaks, background ranking, normal/fast mode, trials, retry waits, dwell, trust, bans, the table following the transmitter's list, PI match with REG). `af_mem.h`: per channel (a frequency a PI was received on), its PI and its transmitter's AF list | – | yes |
 | `trace` | Sequence-numbered record ring for "since N" polling | – | yes |
 | `tuning` | Reception tuning table: one row per FM command word (UM V102 range and default) or host value (AF, seek) | – | yes |
 | `presets` | Memory channels: slots, UTF-8 names, versioned image | – | yes |
@@ -130,7 +130,7 @@ python scripts/ride_report.py rides/<dir>           # its HTML report and CSVs
 | `qn8035_slave` | I2C slave v2 port, ISR→task hand-off, INT pulse, bus trace | qn8035_emu | no |
 | `bridge` | QN8035 events ↔ radio commands/events, RSSI/SNR mapping | radio, qn8035_slave | no |
 | `tuning_store` | NVS `tuning`: loads at boot, writes non-default values on Save | tuning | no |
-| `af_store` | NVS `af_mem`: loads the AF memory at boot, writes changed programme slots (rate-limited, below) | af, radio | no |
+| `af_store` | NVS `af_mem` (keys `c0`..`c15`, layout `cver`): loads the AF memory at boot, writes changed channel slots (rate-limited, below) | af, radio | no |
 | `radio_mem` | Stand-alone build only. NVS `radio_mem`: settings restored at boot and saved 2 s after they settle, memory channels | radio, presets | no |
 | `sysmon` | Reset reason, crash count, reset history (NVS), core dump summary, warm-restart snapshot | radio, qn8035_slave | no |
 | `log_stream`, `net_wifi`, `web_ui` | Log tee ring; SoftAP (+ optional STA); page, JSON API, WebSocket log, OTA | | no |
@@ -186,7 +186,7 @@ stamps show uptime until then, the station's local time after.
   byte. Keep writes out of the emulation build (`BRIDGE_MEMORY` depends on
   `!BRIDGE_QN_EMU_ENABLE`), except: the tuning Save button (rare, deliberate); `sysmon`'s reset
   history (at boot, before the slave starts, ≤ 16 per power-on); `af_store` (one 36-byte record
-  per changed programme, stable for 60 s, ≥ 30 s apart, ≤ 64 per power-on, 10 s after the last
+  per changed channel, stable for 60 s, ≥ 30 s apart, ≤ 64 per power-on, 10 s after the last
   head-unit command).
 - **Reception tuning lives in the `tuning` table, not Kconfig**: one row per command word, all
   words of a command covered, UM V102 range and default. Rows are applied at every tuner boot,
@@ -227,8 +227,11 @@ details up there before changing protocol code.
   releases it; Get_Quality_Status (20/80) leaves it frozen. Its USN/WAM swing by tens of dB and
   read ~30 dB worse than settled values (on air, 2026-10-25): compare levels only. Noise never
   reads a low USN, though: the lowest of a few readings tells a clean carrier (2026-10-26).
-- Get_RDS_Data (20/83) **consumes** the buffered group. Status bits [15] data, [14] lost,
-  [13] first-PI, [12] B group, [9] sync; dec_error 2 bits per block (A in [15:14]).
+- Get_RDS_Data (20/83) **consumes** the oldest buffered group; the buffer holds up to 22
+  (§4.2.3), so a flush reads until [15] is 0. Status bits [15] data, [14] lost, [13] first-PI,
+  [12] B group, [9] sync; dec_error 2 bits per block (A in [15:14]). Set_RDS restarts the decoder
+  after Preset/Search/Jump/Check, but a group completed in the 1 ms mute slope before the tuning
+  stays buffered: read it out after the tune.
 - Audio is **muted after boot** (Set_Mute default 1).
 - Get_Processing_Status (20/86): softmute, highcut, stereo, sthiblend in 0.1 % of each control's
   _Min.._Max range.
@@ -263,7 +266,8 @@ details up there before changing protocol code.
 3. Seek thresholds for the car antenna (web UI Seek group); the capture's 26 channels are a
    reference list. Behaviour after a failed scan (we leave CH at CH_STOP).
 4. Audio level match between the TEF DAC and the QN8035 outputs.
-5. AF on air (0.4.2). Record rides (docs/ride-logging.md) and set `af_window` from the report's
+5. AF on air (0.5.0, normal and fast mode, background ranking). Record rides
+   (docs/ride-logging.md) and set `af_window` from the report's
    AF_Update calibration table, `af_gain`/`af_trial` from the trials. Check how a trial and a
    jump back sound (transmitters of one programme are not time-aligned) and how fast a PI
    answers after Check (`af_pi`, 300 ms). Lessons so far: 38 of 47 muted PI checks on the first

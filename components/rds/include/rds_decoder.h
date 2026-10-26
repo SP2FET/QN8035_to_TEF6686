@@ -57,7 +57,7 @@ typedef struct {
     bool tp;
     bool ta;
     rds_ct_t ct;             /**< last clock time; only fully error-free 4A groups count */
-    uint32_t groups;         /**< accepted groups */
+    uint32_t groups;         /**< accepted groups (not those of another PI) */
     uint32_t rejected;       /**< groups dropped because block B was unusable */
 } rds_state_t;
 

@@ -29,7 +29,10 @@ static const char *TAG = "radio";
 
 #define QUALITY_PERIOD_MS   100
 #define QUALITY_SETTLE_MS   5    /* after a tune, until settled: the QN8035 bridge waits on it */
-#define RDS_PERIOD_MS       20   /* a group lasts 87.6 ms; the TEF buffers one */
+/* A group lasts 87.6 ms; the TEF buffers up to RDS_BUFFER_GROUPS (UM V102 §4.2.3), so reading one
+ * every 20 ms keeps the buffer near empty. */
+#define RDS_PERIOD_MS       20
+#define RDS_BUFFER_GROUPS   22
 #define HEALTH_PERIOD_MS    2000
 #define REBOOT_RETRY_MS     5000
 #define MAX_IO_ERRORS       5
@@ -62,7 +65,7 @@ static const char *TAG = "radio";
  * sample time can be set up to 20 ms. */
 #define AF_POLL_MS            2
 #define AF_MEASURE_TIMEOUT_MS 40
-/* After a Jump back: its 1 ms mute slope delays the tuning (UM V102 §3.1). */
+/* After a Jump or Check: their 1 ms mute slope delays the tuning (UM V102 §3.1). */
 #define AF_FLUSH_MS           5
 /* After a jump to an AF (a trial), another PI there still sends the tuner back this long, and at
  * least until the trial ends. The decoder takes a new PI only once it repeats. */
@@ -152,6 +155,8 @@ typedef struct {
     bool verifying;    /* Check-tuned (muted) to cand, waiting for its PI */
     bool probation;    /* on cand after a jump or a check: its PI is still watched */
     bool trial_checked; /* the trial began with a PI check (else a jump to a trusted cand) */
+    bool check_pi_seen; /* the PI check read check_pi from a corrected block: once is not proof */
+    uint16_t check_pi;
     uint32_t cand, origin;
     int16_t cand_score; /* its AF_Update level average, 0.1 dBuV (event log) */
     int16_t cur_score;  /* the tuned station's score at the try, 0.1 dB (event log) */
@@ -248,13 +253,16 @@ static band_range_t band_range(radio_band_t band, uint32_t khz)
     return r;
 }
 
+static af_params_t af_params(void);
+
 static void set_not_ready(const char *why)
 {
     const bool trial = s.af.st.trial;
+    const af_params_t p = af_params();
     s.seek.active = false;
     s.af.verifying = false;
     s.af.probation = false;
-    af_trial_abort(&s.af.st, now_ms());
+    af_trial_abort(&s.af.st, &p, now_ms());
     lock();
     if (trial) {
         s.status.freq_khz = s.af.origin; /* the reboot tunes where the programme played */
@@ -361,24 +369,23 @@ static esp_err_t apply_tuning(void)
 static af_params_t af_params(void)
 {
     const int16_t *v = s.tuning.v;
+    const bool fast = v[TUNING_AF_FAST] != 0;
     return (af_params_t){
         .enable = v[TUNING_AF_ON] != 0,
         .reg = v[TUNING_AF_REG] != 0,
+        .fast = fast,
         .trigger = v[TUNING_AF_TRIGGER],
         .window = v[TUNING_AF_WINDOW],
         .min_level = v[TUNING_AF_MIN_LEVEL],
         .gain = v[TUNING_AF_GAIN],
         .interval_ms = (uint16_t)v[TUNING_AF_INTERVAL],
+        .bg_interval_ms = (uint16_t)v[TUNING_AF_BG_INT],
         .trial_ms = (uint16_t)v[TUNING_AF_TRIAL],
-        .dwell_ms = (uint32_t)v[TUNING_AF_DWELL] * 1000u,
-        .retry_ms = (uint32_t)v[TUNING_AF_RETRY] * 1000u,
+        .dwell_ms = (uint32_t)v[fast ? TUNING_AF_FAST_DWELL : TUNING_AF_DWELL] * 1000u,
+        .retry_ms = (uint32_t)v[fast ? TUNING_AF_FAST_RETRY : TUNING_AF_RETRY] * 1000u,
+        .ban_ms = (uint32_t)v[TUNING_AF_BAN] * 1000u,
         .check_usn = (uint16_t)v[TUNING_AF_CHK_USN],
     };
-}
-
-static uint32_t af_ban_base_ms(void)
-{
-    return (uint32_t)s.tuning.v[TUNING_AF_BAN] * 1000u;
 }
 
 /* ---- AF following -------------------------------------------------------- */
@@ -397,9 +404,11 @@ static void publish_af(void)
     a->probation = s.af.probation;
     a->trial = st->trial;
     a->pi_mem = s.af.pi_mem;
+    a->fast = p.fast;
+    a->confirm = af_confirm(&p);
     a->pi = s.af.pi;
-    a->score = af_current(st);
-    a->level = af_current_level(st);
+    a->score = af_current(st, &p);
+    a->level = af_current_level(st, &p);
     a->need = af_need_level(st, &p);
     a->dwell_ms = af_dwell_left(st, now);
     a->trial_khz = st->trial ? st->trial_khz : 0;
@@ -477,6 +486,25 @@ static void af_trust_heard(void)
     af_set_heard(&s.af.st, codes, n);
 }
 
+/* The AF list stored for channel khz (its transmitter's) joins the candidates. */
+static void af_from_channel(uint32_t khz)
+{
+    uint8_t codes[AF_MEM_CODES];
+    af_sync(&s.af.st, codes, af_mem_list(&s.mem, khz, s.af.pi, codes));
+}
+
+/* khz carries another programme now: the memory no longer offers it for this one. */
+static void af_forget_channel(uint32_t khz)
+{
+    lock();
+    const int slot = af_mem_forget(&s.mem, s.af.pi, khz);
+    unlock();
+    if (slot >= 0) {
+        ESP_LOGI(TAG, "AF memory: %lu kHz dropped for PI %04X", (unsigned long)khz, s.af.pi);
+        af_trust_heard();
+    }
+}
+
 /* No RDS PI yet: take the programme stored for the frequency (AF memory), so a station heard
  * without RDS still has its AFs. A PI from RDS replaces it (af_follow_rds). */
 static void af_from_memory(void)
@@ -487,7 +515,7 @@ static void af_from_memory(void)
         return;
     }
     uint8_t codes[AF_MEM_CODES];
-    const uint8_t n = af_mem_codes(&s.mem, pi, codes);
+    const uint8_t n = af_mem_list(&s.mem, s.status.freq_khz, pi, codes);
     af_sync(&s.af.st, codes, n);
     s.af.pi = pi;
     s.af.pi_known = true;
@@ -516,8 +544,12 @@ static void af_follow_rds(void)
     if (!r->pi_valid) {
         return;
     }
-    if (s.af.probation && !af_pi_match(s.af.pi, r->pi, s.tuning.v[TUNING_AF_REG] != 0)) {
-        af_probation_fail(r->pi); /* the jump landed on another programme */
+    if (s.af.probation) {
+        if (!af_pi_match(s.af.pi, r->pi, s.tuning.v[TUNING_AF_REG] != 0)) {
+            af_probation_fail(r->pi); /* the jump landed on another programme */
+        }
+        /* Until the programme's PI shows on the frequency jumped to (poll_rds ends the
+         * probation), the decoder still holds the old PI: nothing here may be learned as its. */
         return;
     }
     if (s.af.pi_known && r->pi != s.af.pi) {
@@ -531,11 +563,8 @@ static void af_follow_rds(void)
     s.af.pi_known = true;
     s.af.pi_mem = false;
     if (first) { /* the stored AFs: known before the station's 0A groups bring them */
-        uint8_t codes[AF_MEM_CODES];
-        const uint8_t n = af_mem_codes(&s.mem, r->pi, codes);
-        af_sync(&s.af.st, codes, n);
+        af_from_channel(s.status.freq_khz);
     }
-    af_sync(&s.af.st, r->af, r->af_count);
     af_listed(&s.af.st, r->af, r->af_count, now_ms());
     lock();
     const int slot = af_mem_learn(&s.mem, r->pi, s.status.freq_khz, r->af, r->af_count);
@@ -630,19 +659,38 @@ static void af_log_event(radio_af_ev_type_t type, int16_t score, int16_t cur, ui
     unlock();
 }
 
+/* After a Jump or Check: a group the station left completed during the 1 ms mute slope (UM V102
+ * §3.1) can still be in the TEF's buffer. Read it out once the tuning is done, so it never
+ * passes for the new frequency's (its PI would answer a PI check, or count as a station change
+ * after a Jump back). */
+static void rds_flush(void)
+{
+    vTaskDelay(pdMS_TO_TICKS(AF_FLUSH_MS));
+    for (unsigned i = 0; i < RDS_BUFFER_GROUPS; i++) {
+        tef6686_rds_t stale;
+        if (!io_ok(tef6686_fm_get_rds(s.tef, &stale), "af rds flush") ||
+            !(stale.status & TEF6686_RDS_DATA_AVAILABLE)) {
+            return;
+        }
+    }
+}
+
 /* Check tuning: like Jump, but the mute stays on until End (UM V102 §3.1), so a candidate is
  * not heard before its PI is known. */
 static void af_verify_begin(uint32_t khz, int16_t level_avg)
 {
-    poll_rds(); /* the TEF buffers one group: nothing of this station may pass for the AF's */
+    const af_params_t p = af_params();
+    poll_rds(); /* the station's last group still counts as its own */
     if (!s.status.tef_ready || !io_ok(tef_tune(RADIO_BAND_FM, khz, TEF6686_TUNE_CHECK), "af check")) {
         return;
     }
+    rds_flush();
     s.af.verifying = true;
+    s.af.check_pi_seen = false;
     s.af.cand = khz;
     s.af.origin = s.status.freq_khz;
     s.af.cand_score = level_avg;
-    s.af.cur_score = af_current(&s.af.st);
+    s.af.cur_score = af_current(&s.af.st, &p);
     s.af.t_start = xTaskGetTickCount();
     ESP_LOGI(TAG, "AF: checking PI %04X on %lu kHz (AF_Update level %d)", s.af.pi,
              (unsigned long)khz, level_avg);
@@ -655,20 +703,18 @@ static void af_jump_back(void)
 {
     s.af.verifying = false;
     io_ok(tef_tune(RADIO_BAND_FM, s.af.origin, TEF6686_TUNE_JUMP), "af return");
-    /* A group the candidate completed during the Jump's mute slope can still be in the TEF's
-     * buffer. Read it out once the Jump has tuned, so it never reaches the decoder as this
-     * station's (its PI would count as a station change). */
-    vTaskDelay(pdMS_TO_TICKS(AF_FLUSH_MS));
-    tef6686_rds_t stale;
-    io_ok(tef6686_fm_get_rds(s.tef, &stale), "af rds flush");
+    rds_flush();
 }
 
 /* The candidate failed its PI check: back, and skip it for a while. pi: heard (OTHER_PI). */
 static void af_reject(radio_af_ev_type_t why, uint16_t pi)
 {
+    const af_params_t p = af_params();
     af_jump_back();
-    const uint32_t ms =
-        af_ban(&s.af.st, s.af.cand, now_ms(), af_ban_base_ms(), why == RADIO_AF_EV_OTHER_PI);
+    const uint32_t ms = af_ban(&s.af.st, &p, s.af.cand, now_ms(), why == RADIO_AF_EV_OTHER_PI);
+    if (why == RADIO_AF_EV_OTHER_PI) {
+        af_forget_channel(s.af.cand);
+    }
     s.af.pi_fails++;
     ESP_LOGI(TAG, "AF: %lu kHz skipped for %lu s", (unsigned long)s.af.cand,
              (unsigned long)(ms / 1000));
@@ -734,6 +780,8 @@ static void af_trial_finish(void)
     const af_trial_result_t r = af_trial_end(&s.af.st, &p, now_ms());
     if (r.won) {
         prog_add(r.khz);
+        af_from_channel(r.khz); /* its transmitter's list, before its 0A groups bring it */
+        af_trust_heard();
         s.af.switches++;
         ESP_LOGI(TAG, "AF: switched %lu -> %lu kHz (score %d vs %d, %u samples)",
                  (unsigned long)r.from_khz, (unsigned long)r.khz, r.mean, r.ref, r.n);
@@ -754,7 +802,8 @@ static void af_trial_finish(void)
 /* A command came in during a trial: back where the programme played first, no verdict. */
 static void af_trial_cancel(void)
 {
-    af_trial_abort(&s.af.st, now_ms());
+    const af_params_t p = af_params();
+    af_trial_abort(&s.af.st, &p, now_ms());
     af_trial_back();
     af_log_event(RADIO_AF_EV_ABORT, AF_SCORE_NONE, AF_SCORE_NONE, 0, 0);
     publish_af();
@@ -780,10 +829,7 @@ static void af_trial_jump(uint32_t khz, int16_t level_avg)
     if (!io_ok(tef_tune(RADIO_BAND_FM, khz, TEF6686_TUNE_JUMP), "af jump")) {
         return;
     }
-    /* The TEF buffers one group: one from the old frequency must not confirm the new one. */
-    vTaskDelay(pdMS_TO_TICKS(AF_FLUSH_MS));
-    tef6686_rds_t stale;
-    io_ok(tef6686_fm_get_rds(s.tef, &stale), "af rds flush");
+    rds_flush(); /* a group from the old frequency must not confirm the new one */
     af_trial_start(false);
 }
 
@@ -797,12 +843,13 @@ static void af_probation_fail(uint16_t pi)
              (unsigned long)s.af.cand, pi, s.af.pi, (unsigned long)s.af.origin);
     af_jump_back();
     if (s.af.st.trial) {
-        af_trial_abort(&s.af.st, now_ms());
-    } else { /* the trial was won: switch back */
-        af_switched(&s.af.st, &p, s.af.cand, s.af.origin, now_ms());
+        af_trial_abort(&s.af.st, &p, now_ms());
+    } else { /* the trial was won: undo the switch, with no dwell on a station that was poor */
+        af_returned(&s.af.st, &p, s.af.cand, s.af.origin, now_ms());
         prog_remove(s.af.cand);
     }
-    const uint32_t ms = af_ban(&s.af.st, s.af.cand, now_ms(), af_ban_base_ms(), true);
+    const uint32_t ms = af_ban(&s.af.st, &p, s.af.cand, now_ms(), true);
+    af_forget_channel(s.af.cand);
     s.af.pi_fails++;
     lock();
     s.status.freq_khz = s.af.origin;
@@ -836,12 +883,18 @@ static void af_verify_poll(void)
         if (err <= RDS_ERR_SMALL) {
             if (af_pi_match(s.af.pi, pi, s.tuning.v[TUNING_AF_REG] != 0)) {
                 af_accept();
-            } else {
+                return;
+            }
+            /* A corrected block can be a miscorrected one (the decoder takes a new PI only once
+             * it repeats): another PI is proof error-free or twice, else wait for more. */
+            if (err == RDS_ERR_NONE || (s.af.check_pi_seen && s.af.check_pi == pi)) {
                 ESP_LOGI(TAG, "AF: %lu kHz carries PI %04X, not %04X; back to %lu kHz",
                          (unsigned long)s.af.cand, pi, s.af.pi, (unsigned long)s.af.origin);
                 af_reject(RADIO_AF_EV_OTHER_PI, pi);
+                return;
             }
-            return;
+            s.af.check_pi = pi;
+            s.af.check_pi_seen = true;
         }
     }
     const TickType_t limit = pdMS_TO_TICKS(s.tuning.v[TUNING_AF_PI_MS]);
@@ -915,11 +968,11 @@ static void af_tick(void)
         const uint32_t pick = af_pick(&s.af.st, &p, now_ms());
         for (unsigned i = 0; pick && i < s.af.st.n; i++) {
             if (s.af.st.e[i].khz == pick) {
-                const int16_t level_avg = s.af.st.e[i].level_avg;
+                const int16_t level = af_pick_level(&s.af.st.e[i], &p);
                 if (af_trusted(&s.af.st, pick, now_ms())) {
-                    af_trial_jump(pick, level_avg);
+                    af_trial_jump(pick, level);
                 } else {
-                    af_verify_begin(pick, level_avg);
+                    af_verify_begin(pick, level);
                 }
                 break;
             }
