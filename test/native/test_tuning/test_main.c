@@ -119,7 +119,16 @@ static void test_default_frames(void)
     check_frame(&t, 20, (const uint16_t[]){1}, 1);
     check_frame(&t, 22, (const uint16_t[]){1}, 1);
     check_frame(&t, 45, (const uint16_t[]){1, 200}, 2);
-    check_frame(&t, 40, (const uint16_t[]){120, 500, 20, 20}, 4);
+    /* UM V102 "suggested for improved field performance" values where it gives them */
+    check_frame(&t, 40, (const uint16_t[]){120, 500, 10, 20}, 4);
+    check_frame(&t, 50, (const uint16_t[]){200, 2000, 10, 80}, 4);
+    check_frame(&t, 53, (const uint16_t[]){3, 150, 200}, 3);
+    check_frame(&t, 54, (const uint16_t[]){3, 120, 160}, 3);
+    check_frame(&t, 60, (const uint16_t[]){200, 4000, 20, 80}, 4);
+    check_frame(&t, 63, (const uint16_t[]){3, 120, 160}, 3);
+    check_frame(&t, 64, (const uint16_t[]){3, 100, 150}, 3);
+    check_frame(&t, 73, (const uint16_t[]){3, 80, 140}, 3);
+    check_frame(&t, 74, (const uint16_t[]){3, 80, 140}, 3);
     t.v[TUNING_SM_LEVEL_START] = 200;
     check_frame(&t, 42, (const uint16_t[]){2, 200, 220}, 3);
 }

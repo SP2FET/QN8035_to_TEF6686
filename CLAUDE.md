@@ -279,9 +279,13 @@ details up there before changing protocol code.
    PI check only while a transmitter of the programme lists them (within 10 min), or while no AF
    list arrived from RDS at all (then a far-away frequency carrying a local programme shows only
    by its PI during the trial).
-7. Weak-signal defaults are the UM V102 power-up values; confirm patch p2.24 expects no others
-   (PE5PVB differs, e.g. Stereo_Time). "Mono sooner" works well in weak coverage. Check that the
-   extended Set_Bandwidth words (Auto narrow) narrow the filter without side effects.
+7. Weak-signal defaults are the UM V102 power-up values, except its "field performance"
+   suggestions since 0.4.3 (high cut, stereo and high blend noise/multipath triggers and timers,
+   soft mute fast attack). Compare rated rides before (2026-10-26: power-up values) and after;
+   confirm patch p2.24 expects no others (PE5PVB differs, e.g. Stereo_Time). "Mono sooner" works
+   well in weak coverage. Check that the extended Set_Bandwidth words (Auto narrow) narrow the
+   filter without side effects; on the 2026-10-26 ride a narrower bandwidth went with worse
+   ratings at the same score (cause unclear: adjacent channels narrow it).
 8. The hang of 2026-10-25 (station stuck, head unit ignored, Wi-Fi gone until a power cycle) left
    no core dump. Suspect the supply: with the brown-out level at 2.84 V the board reset on every
    Wi-Fi connect. Brown-out back at 2.44 V and TX power at 8 dBm until the supply is fixed (bulk

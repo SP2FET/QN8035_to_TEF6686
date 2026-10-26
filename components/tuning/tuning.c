@@ -105,7 +105,14 @@ const tuning_param_t tuning_params[TUNING_COUNT] = {
     [TUNING_AGC_EXT] = {.key = "agc_ext", .group = G_RX, .label = "RF AGC extension",
                         .cmd = FM_SET_RFAGC, .param = 1, .div = 1, .hidden = true},
 
-    TIME_ROWS(TUNING_SM, "sm", G_SM, FM_SET_SOFTMUTE_TIME, 120, 500, 20, 20),
+    /* Weak-signal handling: the UM V102 power-up values, except where the manual suggests others
+     * "for improved field performance" (since 0.4.3). With the power-up values high cut ignored
+     * multipath on the ride of 2026-10-26: its noise and multipath triggers start at 36 %, above
+     * 95 % of that ride's USN and WAM readings, while the worst-rated moments had WAM 23-26 %.
+     * Power-up values: soft mute fast attack 2 ms; high cut time 500/2000 ms slow, 2/2 ms fast,
+     * noise and multipath slow timer, 36 % start, 30 % slope; stereo time 1000/4000 ms slow, 8/8
+     * ms fast, noise and multipath 24 %/20 %; high blend noise and multipath start 16 %. */
+    TIME_ROWS(TUNING_SM, "sm", G_SM, FM_SET_SOFTMUTE_TIME, 120, 500, 10, 20),
     LEVEL_ROWS(TUNING_SM, "sm", G_SM, FM_SET_SOFTMUTE_LEVEL, 0, 500, 2, 150, 220),
     NOISE_ROWS(TUNING_SM, "sm", G_SM, FM_SET_SOFTMUTE_NOISE, 0, 500, 1000),
     MPH_ROWS(TUNING_SM, "sm", G_SM, FM_SET_SOFTMUTE_MPH, 0, 500, 1000),
@@ -114,10 +121,10 @@ const tuning_param_t tuning_params[TUNING_COUNT] = {
     [TUNING_SM_MAX] = ROW("sm_max", G_SM, "Maximum attenuation", "dB", NULL, FM_SET_SOFTMUTE_MAX,
                           1, 10, 0, 400, 200),
 
-    TIME_ROWS(TUNING_HC, "hc", G_HC, FM_SET_HIGHCUT_TIME, 500, 2000, 20, 20),
+    TIME_ROWS(TUNING_HC, "hc", G_HC, FM_SET_HIGHCUT_TIME, 200, 2000, 10, 80),
     LEVEL_ROWS(TUNING_HC, "hc", G_HC, FM_SET_HIGHCUT_LEVEL, 200, 600, 3, 360, 300),
-    NOISE_ROWS(TUNING_HC, "hc", G_HC, FM_SET_HIGHCUT_NOISE, 2, 360, 300),
-    MPH_ROWS(TUNING_HC, "hc", G_HC, FM_SET_HIGHCUT_MPH, 2, 360, 300),
+    NOISE_ROWS(TUNING_HC, "hc", G_HC, FM_SET_HIGHCUT_NOISE, 3, 150, 200),
+    MPH_ROWS(TUNING_HC, "hc", G_HC, FM_SET_HIGHCUT_MPH, 3, 120, 160),
     /* Limits for the default IIR filter (Set_Highcut_Options 1, not changed here). */
     [TUNING_HC_MAX_MODE] = ROW("hc_max_on", G_HC, "Strongest cut limit", NULL, ONOFF,
                                FM_SET_HIGHCUT_MAX, 0, 1, 0, 1, 1),
@@ -128,10 +135,10 @@ const tuning_param_t tuning_params[TUNING_COUNT] = {
     [TUNING_HC_MIN] = ROW("hc_min", G_HC, "Weakest cut (corner)", "Hz", NULL, FM_SET_HIGHCUT_MIN,
                           1, 1, 2700, 15000, 10000),
 
-    TIME_ROWS(TUNING_ST, "st", G_ST, FM_SET_STEREO_TIME, 1000, 4000, 80, 80),
+    TIME_ROWS(TUNING_ST, "st", G_ST, FM_SET_STEREO_TIME, 200, 4000, 20, 80),
     LEVEL_ROWS(TUNING_ST, "st", G_ST, FM_SET_STEREO_LEVEL, 300, 600, 3, 460, 240),
-    NOISE_ROWS(TUNING_ST, "st", G_ST, FM_SET_STEREO_NOISE, 3, 240, 200),
-    MPH_ROWS(TUNING_ST, "st", G_ST, FM_SET_STEREO_MPH, 3, 240, 200),
+    NOISE_ROWS(TUNING_ST, "st", G_ST, FM_SET_STEREO_NOISE, 3, 120, 160),
+    MPH_ROWS(TUNING_ST, "st", G_ST, FM_SET_STEREO_MPH, 3, 100, 150),
     [TUNING_ST_MAX_MODE] = ROW("st_max_on", G_ST, "Blend down to mono", NULL, ONOFF,
                                FM_SET_STEREO_MAX, 0, 1, 0, 1, 1),
     [TUNING_ST_MIN_MODE] = ROW("st_min_on", G_ST, "Separation limit", NULL,
@@ -141,8 +148,8 @@ const tuning_param_t tuning_params[TUNING_COUNT] = {
 
     TIME_ROWS(TUNING_HB, "hb", G_HB, FM_SET_STHIBLEND_TIME, 500, 2000, 20, 20),
     LEVEL_ROWS(TUNING_HB, "hb", G_HB, FM_SET_STHIBLEND_LEVEL, 300, 660, 3, 600, 240),
-    NOISE_ROWS(TUNING_HB, "hb", G_HB, FM_SET_STHIBLEND_NOISE, 3, 160, 140),
-    MPH_ROWS(TUNING_HB, "hb", G_HB, FM_SET_STHIBLEND_MPH, 3, 160, 140),
+    NOISE_ROWS(TUNING_HB, "hb", G_HB, FM_SET_STHIBLEND_NOISE, 3, 80, 140),
+    MPH_ROWS(TUNING_HB, "hb", G_HB, FM_SET_STHIBLEND_MPH, 3, 80, 140),
     [TUNING_HB_MAX_MODE] = ROW("hb_max_on", G_HB, "Strongest blend limit", NULL, ONOFF,
                                FM_SET_STHIBLEND_MAX, 0, 1, 0, 1, 1),
     [TUNING_HB_MAX] = ROW("hb_max", G_HB, "Strongest blend (corner)", "Hz", NULL,

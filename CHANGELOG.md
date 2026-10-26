@@ -4,6 +4,23 @@ The firmware uses Semantic Versioning. Development releases use 0.x versions and
 change interfaces between minor versions. Versions and Git tags are recorded here;
 target builds and host tests do not establish hardware compatibility.
 
+## 0.4.3 - 2026-10-26
+
+### Changed
+
+- Weak-signal defaults follow UM V102's "suggested for improved field performance" values where
+  it gives them. On the ride of 2026-10-26 high cut ignored multipath: its noise and multipath
+  triggers started at 36 %, above 95 % of the USN and WAM readings, while the worst-rated
+  moments had WAM 23-26 %.
+  - High cut: noise trigger dual timer, 15 % start, 20 % slope (was slow timer, 36 %, 30 %);
+    multipath trigger dual timer, 12 %, 16 % (was slow timer, 36 %, 30 %); slow attack 200 ms,
+    fast attack 1 ms, fast decay 8 ms (was 500, 2, 2 ms).
+  - Stereo blend: noise trigger 12 % start, 16 % slope (was 24 %, 20 %); multipath trigger
+    10 %, 15 % (was 24 %, 20 %); slow attack 200 ms, fast attack 2 ms (was 1000, 8 ms).
+  - Stereo high blend: noise and multipath triggers start at 8 % (was 16 %).
+  - Soft mute: fast attack 1 ms (was 2 ms).
+- Values saved in the Tuning tab still override the defaults.
+
 ## 0.4.2 - 2026-10-26
 
 ### Changed
