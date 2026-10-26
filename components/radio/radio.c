@@ -378,6 +378,7 @@ static af_params_t af_params(void)
         .window = v[TUNING_AF_WINDOW],
         .min_level = v[TUNING_AF_MIN_LEVEL],
         .gain = v[TUNING_AF_GAIN],
+        .trust_pref = v[TUNING_AF_TRUST_PREF],
         .interval_ms = (uint16_t)v[TUNING_AF_INTERVAL],
         .bg_interval_ms = (uint16_t)v[TUNING_AF_BG_INT],
         .trial_ms = (uint16_t)v[TUNING_AF_TRIAL],

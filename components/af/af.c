@@ -159,6 +159,13 @@ static void tuned_restart(af_state_t *s)
     s->ref_pos = 0;
 }
 
+/* A level as AFs are ranked: a trusted one counts trust_pref more. */
+static int32_t rank(const af_state_t *s, const af_params_t *p, const af_entry_t *e, int16_t level,
+                    uint32_t now_ms)
+{
+    return (int32_t)level + (af_entry_trusted(e, s->lists, now_ms) ? p->trust_pref : 0);
+}
+
 /* Mean of the tuned station's last settled scores; the smoothed score while there are none. */
 static int16_t ref_mean(const af_state_t *s, const af_params_t *p)
 {
@@ -294,13 +301,16 @@ uint32_t af_next_check(af_state_t *s, const af_params_t *p, uint32_t now_ms)
             }
         }
         /* Ranked while good: the best first, so a fade goes to it without a full round. */
+        int32_t best = INT32_MIN;
         for (unsigned i = 0; i < s->n; i++) {
             const af_entry_t *e = &s->e[i];
             if (e->banned || waiting(e, now_ms) || e->level_avg == AF_SCORE_NONE ||
                 fresh(e, limit, now_ms)) {
                 continue;
             }
-            if (pick < 0 || e->level_avg > s->e[pick].level_avg) {
+            const int32_t r = rank(s, p, e, e->level_avg, now_ms);
+            if (pick < 0 || r > best) {
+                best = r;
                 pick = (int)i;
             }
         }
@@ -395,7 +405,7 @@ uint32_t af_pick(const af_state_t *s, const af_params_t *p, uint32_t now_ms)
     }
     const int16_t need = af_need_level(s, p);
     const uint32_t limit = fresh_ms(s, p);
-    int16_t best = need;
+    int32_t best = INT32_MIN;
     uint32_t khz = 0;
     for (unsigned i = 0; i < s->n; i++) {
         const af_entry_t *e = &s->e[i];
@@ -407,8 +417,12 @@ uint32_t af_pick(const af_state_t *s, const af_params_t *p, uint32_t now_ms)
             continue;
         }
         const int16_t level = af_pick_level(e, p);
-        if (level > best || (khz == 0 && level == best)) {
-            best = level;
+        if (level < need) {
+            continue;
+        }
+        const int32_t r = rank(s, p, e, level, now_ms);
+        if (khz == 0 || r > best) {
+            best = r;
             khz = e->khz;
         }
     }

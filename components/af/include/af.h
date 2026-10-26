@@ -93,6 +93,10 @@ typedef struct {
     int16_t window;       /**< 0.1 dB: tried down to the tuned station's level minus this */
     int16_t min_level;    /**< 0.1 dBuV: and never below this AF_Update level */
     int16_t gain;         /**< 0.1 dB: a trial must beat the tuned station's mean score by this */
+    /** 0.1 dB: an af_trusted AF ranks this much stronger (af_next_check, af_pick): it is tried
+     * by a Jump, with no muted PI check and no risk of another programme. It still has to reach
+     * af_need_level itself. */
+    int16_t trust_pref;
     /** 0.1 %: an AF that needs a muted PI check (not af_trusted) is tried only if one of its last
      * AF_USN_N AF_Update USN readings is at most this. Noise never reads a low USN: on the ride
      * of 2026-10-26 every AF that answered with a PI read <= 10 % at least once, and the 38
@@ -228,8 +232,9 @@ int16_t af_need_level(const af_state_t *s, const af_params_t *p);
  * The next AF to measure now, or 0. Nothing during a trial or the hold; every interval_ms while
  * the tuned station is poor, every bg_interval_ms (0: never) while it is good. While poor, a
  * candidate with a streak shorter than af_confirm comes first, then the not waiting AF with the
- * best average level among those measured before but not recently (the ranking made while
- * good); else the one measured longest ago. Restarts the interval.
+ * best average level (trusted ones trust_pref stronger) among those measured before but not
+ * recently (the ranking made while good); else the one measured longest ago. Restarts the
+ * interval.
  */
 uint32_t af_next_check(af_state_t *s, const af_params_t *p, uint32_t now_ms);
 /** An AF_Update result of khz (usn in 0.1 %); its streak is judged against af_need_level now. */
@@ -242,9 +247,9 @@ int16_t af_pick_level(const af_entry_t *e, const af_params_t *p);
 
 /**
  * The AF to try now, or 0: while the tuned station is poor, the not banned, not waiting AF with
- * the best af_pick_level among those whose last af_confirm measurements and af_pick_level all
- * reach af_need_level. An AF that is not af_trusted also needs a USN reading of at most check_usn
- * among its last AF_USN_N.
+ * the best af_pick_level (trusted ones trust_pref stronger) among those whose last af_confirm
+ * measurements and af_pick_level all reach af_need_level. An AF that is not af_trusted also needs
+ * a USN reading of at most check_usn among its last AF_USN_N.
  * Nothing during a trial or the dwell after a switch. Measurements count as recent for one round
  * of checks plus three intervals (interval_ms).
  */

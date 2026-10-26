@@ -4,6 +4,16 @@ The firmware uses Semantic Versioning. Development releases use 0.x versions and
 change interfaces between minor versions. Versions and Git tags are recorded here;
 target builds and host tests do not establish hardware compatibility.
 
+## 0.5.1 - 2026-10-26
+
+### Added
+
+- AFs known to carry the programme (af_trusted: PI confirmed within 10 min, or stored and listed)
+  rank `af_trust_pref` (3 dB, both modes; 0 = off) stronger, both for which AF is re-measured
+  first after a fade and for which one is tried. Such an AF is tried by an unmuted Jump; another
+  needs a muted PI check and may carry another programme. It must still reach the needed level
+  itself.
+
 ## 0.5.0 - 2026-10-26
 
 A review of AF following against a regular car radio found the AF table and AF memory filling

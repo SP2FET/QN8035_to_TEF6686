@@ -175,6 +175,11 @@ const tuning_param_t tuning_params[TUNING_COUNT] = {
                              NULL, TUNING_HOST, 0, 10, 0, 300, 60),
     [TUNING_AF_MIN_LEVEL] = ROW("af_min_lvl", G_AF, "Minimum candidate level (AF_Update)",
                                 "dBµV", NULL, TUNING_HOST, 0, 10, -200, 800, 150),
+    /* A known frequency of the programme is tried by an unmuted Jump; another needs a muted PI
+     * check and may carry another programme. */
+    [TUNING_AF_TRUST_PREF] = ROW("af_trust_pref", G_AF, "Prefer AFs known to carry the programme "
+                                 "unless another is stronger by", "dB", NULL, TUNING_HOST, 0, 10,
+                                 0, 200, 30),
     [TUNING_AF_GAIN] = ROW("af_gain", G_AF, "Trial: stay if the score is better by", "dB", NULL,
                            TUNING_HOST, 0, 10, 0, 300, 30),
     /* ~14 settled quality samples at 100 ms: fading in a moving car averages out. */

@@ -345,6 +345,56 @@ static void test_pick_best_and_bans(void)
     TEST_ASSERT_EQUAL_UINT32(87600, af_pick(&s, &P, 3500));
 }
 
+/* A trusted AF (a Jump, no muted check) wins unless another is stronger by trust_pref. */
+static void test_pick_prefers_trusted(void)
+{
+    af_params_t p = P;
+    p.trust_pref = 30;
+    three_poor(); /* need 240 */
+    af_verified(&s, 87700, 2000);
+    for (unsigned i = 0; i < 3; i++) {
+        af_measured(&s, &p, 87600, -100, 320, 50, 3000 + i);
+        af_measured(&s, &p, 87700, -100, 300, 50, 3100 + i);
+    }
+    TEST_ASSERT_EQUAL_UINT32(87600, af_pick(&s, &P, 3200)); /* no preference: the stronger */
+    TEST_ASSERT_EQUAL_UINT32(87700, af_pick(&s, &p, 3200)); /* 300 + 30 > 320 */
+    for (unsigned i = 0; i < 3; i++) {
+        af_measured(&s, &p, 87600, -100, 340, 50, 3300 + i);
+    }
+    TEST_ASSERT_EQUAL_INT16(331, entry(87600)->level_avg);
+    TEST_ASSERT_EQUAL_UINT32(87600, af_pick(&s, &p, 3400)); /* stronger by more than 3 dB */
+
+    /* the preference never lets a trusted AF under the need */
+    af_reset(&s, TUNED, 0);
+    three_poor();
+    af_verified(&s, 87700, 2000);
+    for (unsigned i = 0; i < 3; i++) {
+        af_measured(&s, &p, 87600, -100, 250, 50, 3000 + i);
+        af_measured(&s, &p, 87700, -100, 230, 50, 3100 + i);
+    }
+    TEST_ASSERT_EQUAL_UINT32(87600, af_pick(&s, &p, 3200));
+}
+
+/* After a fade, a trusted AF ranked within trust_pref of the best is measured first. */
+static void test_next_check_trusted_first(void)
+{
+    af_params_t p = P;
+    p.bg_interval_ms = 2000;
+    p.trust_pref = 30;
+    const uint8_t codes[] = {1, 2, 3};
+    af_sync(&s, codes, 3);
+    af_verified(&s, 87800, 0);
+    af_quality(&s, 400, 600); /* good: need 540, nothing passes */
+    af_measured(&s, &p, 87600, 0, 420, 50, 3000);
+    af_measured(&s, &p, 87700, 0, 300, 50, 3000);
+    af_measured(&s, &p, 87800, 0, 400, 50, 3000);
+    af_quality(&s, 100, 300); /* the fade */
+    TEST_ASSERT_TRUE(af_poor(&s, &p));
+    TEST_ASSERT_EQUAL_UINT32(87800, af_next_check(&s, &p, 7000)); /* 400 + 30 > 420 */
+    af_measured(&s, &p, 87800, 0, 350, 50, 7000); /* faded under the need of 390 */
+    TEST_ASSERT_EQUAL_UINT32(87600, af_next_check(&s, &p, 7500)); /* then by level */
+}
+
 static void test_pick_not_while_good(void)
 {
     const uint8_t codes[] = {1};
@@ -954,6 +1004,8 @@ int main(void)
     RUN_TEST(test_fast_one_measurement);
     RUN_TEST(test_pick_min_level);
     RUN_TEST(test_pick_best_and_bans);
+    RUN_TEST(test_pick_prefers_trusted);
+    RUN_TEST(test_next_check_trusted_first);
     RUN_TEST(test_pick_not_while_good);
     RUN_TEST(test_confirm_first);
     RUN_TEST(test_trial_won);
