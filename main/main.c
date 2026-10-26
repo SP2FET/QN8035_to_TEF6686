@@ -5,7 +5,9 @@
  * Components never read CONFIG_BRIDGE_* themselves.
  */
 #include <stdbool.h>
+#include <stdlib.h>
 
+#include "af_store.h"
 #include "driver/i2c_master.h"
 #include "esp_app_desc.h"
 #include "esp_check.h"
@@ -80,6 +82,19 @@ static esp_err_t init_power(void)
 #define TEF_PATCH TEF6686_PATCH_V205
 #else
 #define TEF_PATCH TEF6686_PATCH_AUTO
+#endif
+
+#if CONFIG_BRIDGE_QN_EMU_ENABLE
+/* Moves with every head-unit command: AF memory writes wait for a quiet bus (af_store.h). */
+static uint32_t qn_activity(void)
+{
+    qn8035_slave_stats_t st;
+    qn8035_slave_get_stats(&st);
+    return st.writes;
+}
+#define QN_ACTIVITY qn_activity
+#else
+#define QN_ACTIVITY NULL
 #endif
 
 static esp_err_t init_nvs(void)
@@ -206,6 +221,14 @@ void app_main(void)
     if (tuning_store_init(&radio_cfg.tuning) != ESP_OK) {
         ESP_LOGE(TAG, "saved reception tuning not loaded, using the defaults");
     }
+    /* AF lists of the programmes heard. Not fatal: AF then starts from RDS alone. radio_start
+     * copies them; the heap holds them until then (static DRAM is full). */
+    af_mem_t *af_mem = malloc(sizeof(*af_mem));
+    if (af_mem && af_store_init(af_mem) == ESP_OK) {
+        radio_cfg.af_mem = af_mem;
+    } else {
+        ESP_LOGE(TAG, "AF memory not loaded, not saved");
+    }
 
 #if CONFIG_BRIDGE_QN_EMU_ENABLE
     ESP_ERROR_CHECK(qn_bridge_init());
@@ -218,11 +241,16 @@ void app_main(void)
         radio_cfg.initial = warm->radio; /* what played before the reset */
     }
     ESP_ERROR_CHECK(radio_start(&radio_cfg));
+    free(af_mem);
 #if CONFIG_BRIDGE_MEMORY
     if (memory && radio_mem_start() != ESP_OK) {
         ESP_LOGE(TAG, "settings autosave not running");
     }
 #endif
+    const af_store_config_t af_store_cfg = {.activity = QN_ACTIVITY};
+    if (radio_cfg.af_mem && af_store_start(&af_store_cfg) != ESP_OK) {
+        ESP_LOGE(TAG, "AF memory not saved");
+    }
 
 #if CONFIG_BRIDGE_QN_EMU_ENABLE
     /* Before Wi-Fi: the head unit may probe the chip only once at its boot. */

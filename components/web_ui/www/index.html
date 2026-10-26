@@ -220,14 +220,17 @@ nav button{flex:1 1 0;display:flex;align-items:center;justify-content:center;gap
 </section>
 
 <section class="a-af" aria-labelledby="h-af">
-<div class="hd"><h2 id="h-af">AF</h2><span class="meta" id="afh"><span class="badge" id="afa">AF</span><span class="badge warn" id="afc">CHECKING</span><span class="badge warn" id="afp">PI CHECK</span><span class="badge warn" id="afj">PI WATCH</span></span></div>
+<div class="hd"><h2 id="h-af">AF</h2><span class="meta" id="afh"><span class="badge" id="afa">AF</span><span class="badge warn" id="afc">CHECKING</span><span class="badge warn" id="afp">PI CHECK</span><span class="badge warn" id="aftr">TRIAL</span><span class="badge warn" id="afj">PI WATCH</span><span class="badge warn" id="afmm">PI FROM MEMORY</span></span></div>
 <div id="afb">
 <div class="stats">
 <div class="stat"><small>Score</small><b id="afs">—</b></div>
-<div class="stat"><small>AF needs</small><b id="afn">—</b></div>
+<div class="stat"><small>Level</small><b id="afl">—</b></div>
+<div class="stat"><small>AF needs level</small><b id="afn">—</b></div>
+<div class="stat"><small>Trial</small><b id="aftv">—</b></div>
 <div class="stat"><small>Dwell</small><b id="afd">—</b></div>
 <div class="stat"><small>Switches</small><b id="afw">—</b></div>
 <div class="stat"><small>PI fails</small><b id="afpf">—</b></div>
+<div class="stat"><small>Stored lists</small><b id="afmem">—</b></div>
 </div>
 <div id="aft" style="overflow-x:auto"></div>
 <div class="sub">Recent tries</div>
@@ -471,8 +474,14 @@ function renderAf(a,am){
   $('afb').hidden=am;$('afm').hidden=!am;$('afh').hidden=am;
   if(am)return;
   renderAfEv(a.events||[]);
-  on('afa',a.active);on('afc',a.poor);on('afp',a.checking_pi);on('afj',a.probation);
-  $('afs').textContent=num(a.score,1,' dB');$('afn').textContent=num(a.need,1,' dB');
+  on('afa',a.active);on('afc',a.poor);on('afp',a.checking_pi);on('aftr',!!a.trial);on('afj',a.probation);on('afmm',a.pi_mem);
+  $('afa').textContent=a.active&&a.pi?'AF '+a.pi:'AF';
+  $('afs').textContent=num(a.score,1,' dB');$('afl').textContent=num(a.level,1,' dBµV');
+  $('afn').textContent=num(a.need,1,' dBµV');
+  const tr=a.trial;
+  $('aftv').textContent=tr?(tr.khz/1000).toFixed(2)+': '+num(tr.mean,1)+' vs '+num(tr.ref,1)+' dB ('+tr.n+')':'—';
+  const m=a.mem;
+  $('afmem').textContent=m?m.progs+(m.pending?' ('+m.pending+' to save)':'')+(m.errors?' · '+m.errors+' errors':''):'—';
   $('afd').textContent=a.dwell_s?fmtDur(a.dwell_s):'—';
   $('afw').textContent=a.switches||0;$('afpf').textContent=a.pi_fails||0;
   const t=$('aft'),l=a.list||[],cf=a.confirm||3;
@@ -487,13 +496,15 @@ function renderAf(a,am){
     tb.appendChild(r);return r;
   };
   tb.className='aft';
-  row('th',['MHz','Avg','Last','Level','Age','']);
-  // Avg and Last are AF_Update scores; they read lower than the tuned station's Score
+  row('th',['MHz','Level','Last','Score','Trial','Age','']);
+  // Level and Score are AF_Update averages: 2 ms samples, so the screen uses the level only and
+  // a trial on settled quality decides (Trial: its mean score, comparable with Score above)
   const add=e=>{
-    const r=row('td',[(e.khz/1000).toFixed(2),num(e.score,1),num(e.last,1),num(e.level,1),typeof e.age_s==='number'?e.age_s+' s':'—','']);
+    const r=row('td',[(e.khz/1000).toFixed(2),num(e.lavg,1),num(e.level,1),num(e.score,1),num(e.trial,1),typeof e.age_s==='number'?e.age_s+' s':'—','']);
     const bd=(c,x)=>{const b=document.createElement('span');b.className='badge'+(c?' '+c:'');b.textContent=x;r.lastChild.appendChild(b)};
     if(e.trusted)bd('','trusted');
     if(e.streak)bd('warn on',Math.min(e.streak,cf)+'/'+cf);
+    if(e.retry_s)bd('warn','retry '+fmtDur(e.retry_s));
     if(e.banned){r.className='ban';bd('er on','banned '+fmtDur(e.ban_s))}
   };
   for(const e of l)add(e);
@@ -511,12 +522,15 @@ function renderAfEv(l){
   if(!l.length){const p=document.createElement('div');p.className='hs';p.textContent='No AF tries yet';t.appendChild(p);return}
   const mk=(c,x)=>{const e=document.createElement('span');if(c)e.className=c;e.textContent=x;return e};
   for(const e of l){
-    const r=document.createElement('div'),ok=e.type==='switched'||e.type==='jumped';
+    const ty=e.type,r=document.createElement('div'),ok=ty==='switched'||ty==='jumped';
+    const step=ty==='check'||ty==='trial',bad=ty==='other_pi'||ty==='no_pi';
     r.className='afe';
     r.append(mk('hs',fmtAge(e.age_s)),mk(null,(e.from/1000).toFixed(2)+' → '+(e.to/1000).toFixed(2)+' MHz'),
-      mk(ok?'badge on':e.type==='other_pi'?'badge er on':'badge warn on',ok?e.type:e.type==='other_pi'?'PI '+(e.pi||'?'):'no PI'),
-      mk('hs','score '+num(e.score,1)+' vs '+num(e.cur,1)+' dB'));
-    if(!ok&&e.ban_s)r.appendChild(mk('hs','skip '+fmtDur(e.ban_s)));
+      mk(ok?'badge on':bad?'badge er on':step?'badge':'badge warn on',ty==='other_pi'?'PI '+(e.pi||'?'):ty==='no_pi'?'no PI':ty));
+    // check/trial: the candidate's AF_Update level; results: trial mean vs the tuned station's
+    if(step)r.appendChild(mk('hs','level '+num(e.score,1)+' dBµV'));
+    else if(ok||ty==='worse')r.appendChild(mk('hs','score '+num(e.score,1)+' vs '+num(e.cur,1)+' dB'));
+    if(e.ban_s)r.appendChild(mk('hs',(ty==='worse'?'retry ':'skip ')+fmtDur(e.ban_s)));
     t.appendChild(r);
   }
 }

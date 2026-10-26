@@ -13,3 +13,5 @@ docs/doxygen/
 
 # Logic-analyser CSV exports are large; the .sal captures are the source
 captures/*.csv
+# Ride recordings (scripts/ride_log.py)
+rides/

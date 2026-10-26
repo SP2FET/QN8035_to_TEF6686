@@ -7,6 +7,13 @@
  * polls quality and RDS, runs seeks as a non-blocking state machine, follows
  * RDS alternative frequencies (af.h) and re-boots the tuner if it loses state.
  *
+ * AF memory (af_mem.h): the AF lists of the programmes heard. A station heard without RDS takes
+ * the PI stored for its frequency, so its AFs are followed too. This service keeps the table in
+ * RAM; af_store writes it to flash.
+ *
+ * Trace: quality samples, AF_Update measurements and AF events go into a ring of records
+ * (radio_get_trace) for a client that records a ride (web UI /api/trace, scripts/ride_log.py).
+ *
  * Reception tuning (tuning.h: weak-signal DSP, AF and seek thresholds) is applied
  * at every tuner boot and live on change. This service does not store it.
  *
@@ -16,9 +23,11 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "af.h"
+#include "af_mem.h"
 #include "esp_err.h"
 #include "rds_decoder.h"
 #include "tef6686.h"
@@ -57,24 +66,30 @@ typedef struct {
     uint16_t sthiblend;
 } radio_quality_t;
 
-/** What an AF try ended with (radio_af_event_t). */
+/** A step of an AF try (radio_af_event_t). score and cur in 0.1 dB unless noted. */
 typedef enum {
-    RADIO_AF_EV_SWITCHED = 0, /**< PI confirmed: to_khz plays now */
-    RADIO_AF_EV_OTHER_PI,     /**< to_khz carries another programme (pi); after a jump: back */
-    RADIO_AF_EV_NO_PI,        /**< no PI from to_khz within the PI check timeout */
-    RADIO_AF_EV_JUMPED,       /**< to_khz plays now, no muted PI check: it is trusted (af.h) */
+    RADIO_AF_EV_SWITCHED = 0, /**< trial won after a PI check: to_khz plays on (score: trial
+                               *   mean, cur: the tuned station's mean before) */
+    RADIO_AF_EV_OTHER_PI,     /**< to_khz carries another programme (pi); back */
+    RADIO_AF_EV_NO_PI,        /**< no PI from to_khz within the PI check timeout; back */
+    RADIO_AF_EV_JUMPED,       /**< trial won on a trusted frequency (no PI check); as SWITCHED */
+    RADIO_AF_EV_CHECK,        /**< muted PI check of to_khz begins (score: its AF_Update level
+                               *   average, 0.1 dBuV) */
+    RADIO_AF_EV_TRIAL,        /**< to_khz plays on trial (score as CHECK) */
+    RADIO_AF_EV_WORSE,        /**< trial lost: back to from_khz (score, cur as SWITCHED) */
+    RADIO_AF_EV_ABORT,        /**< a command ended a check or trial; back */
 } radio_af_ev_type_t;
 
-/** One AF try, for the web UI. */
+/** One AF step, for the web UI and the trace. */
 typedef struct {
     uint32_t t_ms;     /**< on the clock of radio_af_status_t.now_ms */
     uint8_t type;      /**< radio_af_ev_type_t */
     uint32_t from_khz; /**< the tuned station */
     uint32_t to_khz;   /**< the candidate */
-    int16_t score;     /**< the candidate's average score, 0.1 dB */
-    int16_t cur;       /**< the tuned station's smoothed score at the try, 0.1 dB */
+    int16_t score;     /**< see radio_af_ev_type_t, AF_SCORE_NONE if none */
+    int16_t cur;       /**< see radio_af_ev_type_t, AF_SCORE_NONE if none */
     uint16_t pi;       /**< heard on the candidate (OTHER_PI) */
-    uint32_t ban_s;    /**< skip time given (OTHER_PI, NO_PI) */
+    uint32_t ban_s;    /**< skip time given (OTHER_PI, NO_PI); retry wait (WORSE) */
 } radio_af_event_t;
 
 #define RADIO_AF_EVENTS 10
@@ -85,9 +100,19 @@ typedef struct {
     bool poor;          /**< smoothed score below the trigger: AFs are being measured */
     bool checking_pi;   /**< sitting (muted) on a candidate until its PI answers */
     bool probation;     /**< jumped to a trusted AF: another PI there sends the tuner back */
+    bool trial;         /**< a candidate plays on trial (trial_*) */
+    bool pi_mem;        /**< pi comes from the AF memory: no RDS PI from the station yet */
+    uint16_t pi;        /**< the programme followed, valid while active */
     int16_t score;      /**< smoothed score of the tuned station, 0.1 dB, AF_SCORE_NONE if none */
-    int16_t need;       /**< af_threshold: what a candidate's measurements must reach */
+    int16_t level;      /**< smoothed level of the tuned station, 0.1 dBuV, AF_SCORE_NONE if none */
+    int16_t need;       /**< af_need_level: what a candidate's AF_Update levels must reach */
     uint32_t dwell_ms;  /**< until switching is allowed again */
+    uint32_t trial_khz;
+    uint32_t trial_left_ms;
+    int16_t trial_mean; /**< so far, 0.1 dB, AF_SCORE_NONE without samples */
+    int16_t trial_ref;  /**< what it must beat (plus the gain), 0.1 dB */
+    uint16_t trial_n;
+    uint8_t mem_progs;  /**< programmes in the AF memory */
     /** Since the station was tuned (a tune, seek or PI change resets them and the tries below;
      * an AF switch does not). */
     uint32_t switches;
@@ -166,6 +191,55 @@ typedef struct {
     uint16_t bw;     /**< 0.1 kHz, used when !bw_auto */
 } radio_settings_t;
 
+/** Kinds of radio_trace_t. */
+typedef enum {
+    RADIO_TRACE_QUALITY = 0, /**< every quality sample of what plays (~100 ms) */
+    RADIO_TRACE_AF_MEASURE,  /**< every AF_Update measurement */
+    RADIO_TRACE_AF_EVENT,    /**< every AF step (radio_af_event_t) */
+} radio_trace_kind_t;
+
+/** AF state bits of a quality record. */
+#define RADIO_TRACE_AF_ACTIVE    (1u << 0)
+#define RADIO_TRACE_AF_POOR      (1u << 1)
+#define RADIO_TRACE_AF_CHECKING  (1u << 2) /**< muted PI check */
+#define RADIO_TRACE_AF_TRIAL     (1u << 3) /**< the sample is the candidate's on trial */
+#define RADIO_TRACE_AF_PROBATION (1u << 4)
+#define RADIO_TRACE_AF_PI_MEM    (1u << 5) /**< the PI comes from the AF memory */
+
+/** One trace record. TEF units: 0.1 dBuV, 0.1 %, 0.1 kHz; scores 0.1 dB. */
+typedef struct {
+    uint32_t t_ms; /**< radio clock (radio_af_status_t.now_ms) */
+    uint32_t khz;  /**< what plays (QUALITY), the measured AF (AF_MEASURE) */
+    uint8_t kind;  /**< radio_trace_kind_t */
+    union {
+        struct {
+            uint16_t age; /**< radio_quality_t.age */
+            int16_t level;
+            uint16_t usn, wam;
+            int16_t offset;
+            uint16_t bandwidth, modulation;
+            uint16_t softmute, highcut, stblend, sthiblend;
+            int16_t cur;  /**< the tuned station's smoothed score, AF_SCORE_NONE if none */
+            int16_t need; /**< af_need_level, AF_SCORE_NONE if none */
+            uint32_t rds_groups, rds_rejected; /**< since the tune (rds_state_t) */
+            uint8_t af;   /**< RADIO_TRACE_AF_* */
+            bool stereo;
+            bool rds_sync;
+        } q;
+        struct {
+            int16_t level;
+            uint16_t usn, wam;
+            int16_t offset;
+            int16_t score;     /**< AF_SCORE_NONE: off frequency */
+            int16_t avg;       /**< af_entry_t.score */
+            int16_t level_avg; /**< af_entry_t.level_avg */
+            int16_t need;      /**< af_need_level */
+            uint8_t streak;
+        } a;
+        radio_af_event_t e;
+    };
+} radio_trace_t;
+
 typedef struct {
     tef6686_config_t tef;
     uint32_t fm_min_khz;
@@ -175,6 +249,7 @@ typedef struct {
     radio_settings_t initial; /**< must pass radio_settings_valid() */
     uint16_t fm_deemphasis; /**< 500 or 750 */
     tuning_t tuning;        /**< must pass tuning_valid() */
+    const af_mem_t *af_mem; /**< AF memory to start from (copied), NULL for none */
 } radio_config_t;
 
 /** Within what the API accepts (radio_tune, radio_set_volume, radio_set_bandwidth). Usable
@@ -216,6 +291,17 @@ void radio_get_status(radio_status_t *out);
 /** The settings part of the status. false while a seek runs (khz is moving) or before
  * radio_start(). */
 bool radio_get_settings(radio_settings_t *out);
+
+/**
+ * Trace records from sequence number since on (trace.h): copies up to max into out, oldest
+ * first, and returns the count. *first is the sequence number of out[0], *next the one after the
+ * newest record, *now_ms the radio clock. 0 before radio_start().
+ */
+size_t radio_get_trace(uint32_t since, radio_trace_t *out, size_t max, uint32_t *first,
+                       uint32_t *next, uint32_t *now_ms);
+
+/** A copy of the AF memory (the store task saves what changed). */
+void radio_get_af_mem(af_mem_t *out);
 
 #ifdef __cplusplus
 }

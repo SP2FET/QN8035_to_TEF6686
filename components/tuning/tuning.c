@@ -148,28 +148,42 @@ const tuning_param_t tuning_params[TUNING_COUNT] = {
     [TUNING_HB_MAX] = ROW("hb_max", G_HB, "Strongest blend (corner)", "Hz", NULL,
                           FM_SET_STHIBLEND_MAX, 1, 1, 2700, 7000, 4000),
 
-    /* AF thresholds are scores (af.h): level minus USN minus WAM, 0.1 dB. The trigger and
-     * margin start from PE5PVB/TEF6686_ESP32 (score difference 70). AF_Update measurements of the
-     * candidates read lower than the tuned station's quality, so switching errs towards staying. */
+    /* AF (af.h). Scores are level minus USN minus WAM, 0.1 dB, as in PE5PVB/TEF6686_ESP32.
+     * AF_Update measurements screen the candidates by level only (their 2 ms USN/WAM samples
+     * are noise); a trial on settled quality decides. Keys of the earlier scheme (af_margin,
+     * af_min: AF_Update scores) are gone, so values saved for them no longer apply. */
     [TUNING_AF_ON] = ROW("af", G_AF, "AF following", NULL, ONOFF, TUNING_HOST, 0, 1, 0, 1, 1),
     [TUNING_AF_REG] = ROW("af_reg", G_AF, "REG (regional variants are other programmes)", NULL,
                           ONOFF, TUNING_HOST, 0, 1, 0, 1, 1),
     [TUNING_AF_TRIGGER] = ROW("af_trig", G_AF, "Check AFs below score", "dB", NULL, TUNING_HOST,
                               0, 10, -200, 800, 300),
-    [TUNING_AF_MARGIN] = ROW("af_margin", G_AF, "Switch margin (3 measurements in a row)", "dB",
-                             NULL, TUNING_HOST, 0, 10, 0, 300, 70),
+    /* Wide: a candidate a little weaker can still sound cleaner (less multipath), and a trial
+     * that loses costs a short stretch of the other transmitter. */
+    [TUNING_AF_WINDOW] = ROW("af_window", G_AF, "Try AFs down to the tuned level minus", "dB",
+                             NULL, TUNING_HOST, 0, 10, 0, 300, 60),
+    [TUNING_AF_MIN_LEVEL] = ROW("af_min_lvl", G_AF, "Minimum candidate level (AF_Update)",
+                                "dBµV", NULL, TUNING_HOST, 0, 10, -200, 800, 150),
+    [TUNING_AF_GAIN] = ROW("af_gain", G_AF, "Trial: stay if the score is better by", "dB", NULL,
+                           TUNING_HOST, 0, 10, 0, 300, 30),
+    /* ~14 settled quality samples at 100 ms: fading in a moving car averages out. */
+    [TUNING_AF_TRIAL] = ROW("af_trial", G_AF, "Trial length", "ms", NULL, TUNING_HOST, 0, 1, 500,
+                            10000, 1500),
+    [TUNING_AF_RETRY] = ROW("af_retry", G_AF, "Retry an AF that lost a trial after (doubles)",
+                            "s", NULL, TUNING_HOST, 0, 1, 5, 600, 30),
     [TUNING_AF_INTERVAL] = ROW("af_int", G_AF, "Check interval", "ms", NULL, TUNING_HOST, 0, 1,
                                100, 10000, 500),
     [TUNING_AF_PI_MS] = ROW("af_pi", G_AF, "PI check timeout", "ms", NULL, TUNING_HOST, 0, 1,
                             100, 2000, 300),
-    /* Each PI check mutes the audio: a candidate that is itself weak rarely answers in time. */
-    [TUNING_AF_MIN] = ROW("af_min", G_AF, "Minimum candidate score", "dB", NULL, TUNING_HOST, 0,
-                          10, -200, 800, 200),
     /* A frequency that failed once fails again from the same place, and every try mutes. */
     [TUNING_AF_BAN] = ROW("af_ban", G_AF, "Skip after a failed PI check (doubles; another PI 4x)",
                           "s", NULL, TUNING_HOST, 0, 1, 10, 3600, 300),
     [TUNING_AF_DWELL] = ROW("af_dwell", G_AF, "Stay after a switch (doubles if repeated soon)",
                             "s", NULL, TUNING_HOST, 0, 1, 0, 300, 15),
+    /* The PI stored for the frequency may be another region's programme: a PI from RDS replaces
+     * it at once, but a switch made before that plays the stored programme. */
+    [TUNING_AF_MEM] = ROW("af_mem", G_AF,
+                          "No RDS PI: follow the programme stored for the frequency", NULL, ONOFF,
+                          TUNING_HOST, 0, 1, 0, 1, 1),
     [TUNING_AFU_BW_MODE] = ROW("afu_bw_auto", G_AF, "AF_Update bandwidth", NULL,
                                "0=fixed,1=automatic", FM_SET_TUNE_OPTIONS, 0, 1, 0, 1, 0),
     [TUNING_AFU_BW] = ROW("afu_bw", G_AF, "AF_Update fixed bandwidth", "kHz", NULL,

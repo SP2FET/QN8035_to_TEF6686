@@ -14,6 +14,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
+#include "trace.h"
 #if CONFIG_ESP_TASK_WDT_EN
 #include "esp_task_wdt.h"
 #endif
@@ -63,9 +64,13 @@ static const char *TAG = "radio";
 #define AF_MEASURE_TIMEOUT_MS 40
 /* After a Jump back: its 1 ms mute slope delays the tuning (UM V102 §3.1). */
 #define AF_FLUSH_MS           5
-/* After a jump to a trusted AF (no muted PI check), another PI there still sends the tuner back
- * this long. The decoder takes a new PI only once it repeats. */
+/* After a jump to an AF (a trial), another PI there still sends the tuner back this long, and at
+ * least until the trial ends. The decoder takes a new PI only once it repeats. */
 #define AF_PROBATION_MS       10000
+
+/* Trace ring (radio_get_trace): ~10 s of quality samples at 100 ms plus the AF records between,
+ * so a client polling every 0.5 s keeps up through Wi-Fi gaps of several seconds. */
+#define TRACE_LEN 128
 
 /* TEF tuning ranges (UM V102 §3.1). */
 #define FM_ABS_MIN_KHZ 65000
@@ -143,10 +148,13 @@ typedef struct {
     af_state_t st;
     bool pi_known;     /* pi is the tuned station's */
     uint16_t pi;
+    bool pi_mem;       /* pi comes from the AF memory, not from the station's RDS */
     bool verifying;    /* Check-tuned (muted) to cand, waiting for its PI */
-    bool probation;    /* jumped to a trusted cand: its PI is still watched */
+    bool probation;    /* on cand after a jump or a check: its PI is still watched */
+    bool trial_checked; /* the trial began with a PI check (else a jump to a trusted cand) */
     uint32_t cand, origin;
-    int16_t cand_score, cur_score; /* 0.1 dB, at the try (event log) */
+    int16_t cand_score; /* its AF_Update level average, 0.1 dBuV (event log) */
+    int16_t cur_score;  /* the tuned station's score at the try, 0.1 dB (event log) */
     TickType_t t_start;
     uint32_t switches, pi_fails;
     /* Frequencies known to carry the programme that plays: the tuned one and each AF switched
@@ -175,6 +183,8 @@ static struct {
     size_t n_listeners;
     seek_t seek;
     af_run_t af;
+    af_mem_t mem;           /* written by the radio task under the lock; af_store copies it */
+    trace_ring_t trace;     /* under the lock */
     uint32_t ct_seen;   /* rds.ct.count last applied to the clock */
     int8_t ct_offset;   /* half hours, of the last clock set */
     unsigned io_errors;
@@ -240,10 +250,16 @@ static band_range_t band_range(radio_band_t band, uint32_t khz)
 
 static void set_not_ready(const char *why)
 {
+    const bool trial = s.af.st.trial;
     s.seek.active = false;
     s.af.verifying = false;
     s.af.probation = false;
+    af_trial_abort(&s.af.st, now_ms());
     lock();
+    if (trial) {
+        s.status.freq_khz = s.af.origin; /* the reboot tunes where the programme played */
+    }
+    s.status.af.trial = false;
     s.status.tef_ready = false;
     s.status.seeking = false;
     s.status.q.valid = false;
@@ -349,10 +365,13 @@ static af_params_t af_params(void)
         .enable = v[TUNING_AF_ON] != 0,
         .reg = v[TUNING_AF_REG] != 0,
         .trigger = v[TUNING_AF_TRIGGER],
-        .margin = v[TUNING_AF_MARGIN],
-        .min_score = v[TUNING_AF_MIN],
+        .window = v[TUNING_AF_WINDOW],
+        .min_level = v[TUNING_AF_MIN_LEVEL],
+        .gain = v[TUNING_AF_GAIN],
         .interval_ms = (uint16_t)v[TUNING_AF_INTERVAL],
+        .trial_ms = (uint16_t)v[TUNING_AF_TRIAL],
         .dwell_ms = (uint32_t)v[TUNING_AF_DWELL] * 1000u,
+        .retry_ms = (uint32_t)v[TUNING_AF_RETRY] * 1000u,
     };
 }
 
@@ -368,15 +387,27 @@ static void publish_af(void)
 {
     const af_params_t p = af_params();
     const uint32_t now = now_ms();
+    const af_state_t *st = &s.af.st;
     lock();
     radio_af_status_t *a = &s.status.af;
     a->active = p.enable && s.status.band == RADIO_BAND_FM && s.af.pi_known;
-    a->poor = af_poor(&s.af.st, &p);
+    a->poor = af_poor(st, &p);
     a->checking_pi = s.af.verifying;
     a->probation = s.af.probation;
-    a->score = af_current(&s.af.st);
-    a->need = af_threshold(&s.af.st, &p);
-    a->dwell_ms = af_dwell_left(&s.af.st, now);
+    a->trial = st->trial;
+    a->pi_mem = s.af.pi_mem;
+    a->pi = s.af.pi;
+    a->score = af_current(st);
+    a->level = af_current_level(st);
+    a->need = af_need_level(st, &p);
+    a->dwell_ms = af_dwell_left(st, now);
+    a->trial_khz = st->trial ? st->trial_khz : 0;
+    a->trial_left_ms =
+        st->trial && (int32_t)(st->trial_end_ms - now) > 0 ? st->trial_end_ms - now : 0;
+    a->trial_mean = af_trial_mean(st);
+    a->trial_ref = st->trial_ref;
+    a->trial_n = st->trial_n;
+    a->mem_progs = (uint8_t)af_mem_count(&s.mem);
     a->switches = s.af.switches;
     a->pi_fails = s.af.pi_fails;
     a->now_ms = now;
@@ -434,12 +465,32 @@ static void af_new_station(void)
     unlock();
 }
 
+/* No RDS PI yet: take the programme stored for the frequency (AF memory), so a station heard
+ * without RDS still has its AFs. A PI from RDS replaces it (af_follow_rds). */
+static void af_from_memory(void)
+{
+    uint16_t pi;
+    if (!s.tuning.v[TUNING_AF_MEM] || s.status.band != RADIO_BAND_FM ||
+        !af_mem_lookup(&s.mem, s.status.freq_khz, &pi)) {
+        return;
+    }
+    uint8_t codes[AF_MEM_CODES];
+    const uint8_t n = af_mem_codes(&s.mem, pi, codes);
+    af_sync(&s.af.st, codes, n);
+    s.af.pi = pi;
+    s.af.pi_known = true;
+    s.af.pi_mem = true;
+    ESP_LOGI(TAG, "AF: following PI %04X from memory (%u AFs) until RDS sends one", pi, n);
+}
+
 /* Tuned: forget the AF state and the PI. */
 static void af_restart(void)
 {
     af_new_station();
     s.af.pi_known = false;
+    s.af.pi_mem = false;
     s.af.verifying = false;
+    af_from_memory();
     publish_af();
 }
 
@@ -457,11 +508,27 @@ static void af_follow_rds(void)
         return;
     }
     if (s.af.pi_known && r->pi != s.af.pi) {
+        if (s.af.pi_mem) {
+            ESP_LOGI(TAG, "AF: the station sends PI %04X, not %04X from memory", r->pi, s.af.pi);
+        }
         af_new_station(); /* the decoder confirmed another PI */
     }
+    const bool first = !s.af.pi_known || s.af.pi_mem; /* the station's own PI, newly */
     s.af.pi = r->pi;
     s.af.pi_known = true;
+    s.af.pi_mem = false;
+    if (first) { /* the stored AFs: known before the station's 0A groups bring them */
+        uint8_t codes[AF_MEM_CODES];
+        const uint8_t n = af_mem_codes(&s.mem, r->pi, codes);
+        af_sync(&s.af.st, codes, n);
+    }
     af_sync(&s.af.st, r->af, r->af_count);
+    lock();
+    const int slot = af_mem_learn(&s.mem, r->pi, s.status.freq_khz, r->af, r->af_count);
+    unlock();
+    if (slot >= 0) {
+        ESP_LOGD(TAG, "AF memory: PI %04X changed (slot %d)", r->pi, slot);
+    }
 }
 
 /* A new RDS clock time: the system clock takes UTC, TZ the station's offset, so localtime() and
@@ -520,9 +587,37 @@ static bool af_measure(uint32_t khz, tef6686_quality_t *q)
 
 static void poll_rds(void);
 
+/* Newest first into the status snapshot (web UI), and into the trace. score and cur: see
+ * radio_af_ev_type_t. */
+static void af_log_event(radio_af_ev_type_t type, int16_t score, int16_t cur, uint16_t pi,
+                         uint32_t ban_s)
+{
+    const radio_af_event_t ev = {
+        .t_ms = now_ms(),
+        .type = (uint8_t)type,
+        .from_khz = s.af.origin,
+        .to_khz = s.af.cand,
+        .score = score,
+        .cur = cur,
+        .pi = pi,
+        .ban_s = ban_s,
+    };
+    const radio_trace_t t = {
+        .t_ms = ev.t_ms, .khz = ev.to_khz, .kind = RADIO_TRACE_AF_EVENT, .e = ev};
+    lock();
+    radio_af_status_t *a = &s.status.af;
+    memmove(&a->ev[1], &a->ev[0], (RADIO_AF_EVENTS - 1) * sizeof(a->ev[0]));
+    a->ev[0] = ev;
+    if (a->ev_n < RADIO_AF_EVENTS) {
+        a->ev_n++;
+    }
+    trace_push(&s.trace, &t);
+    unlock();
+}
+
 /* Check tuning: like Jump, but the mute stays on until End (UM V102 §3.1), so a candidate is
  * not heard before its PI is known. */
-static void af_verify_begin(uint32_t khz, int16_t score)
+static void af_verify_begin(uint32_t khz, int16_t level_avg)
 {
     poll_rds(); /* the TEF buffers one group: nothing of this station may pass for the AF's */
     if (!s.status.tef_ready || !io_ok(tef_tune(RADIO_BAND_FM, khz, TEF6686_TUNE_CHECK), "af check")) {
@@ -531,35 +626,13 @@ static void af_verify_begin(uint32_t khz, int16_t score)
     s.af.verifying = true;
     s.af.cand = khz;
     s.af.origin = s.status.freq_khz;
-    s.af.cand_score = score;
+    s.af.cand_score = level_avg;
     s.af.cur_score = af_current(&s.af.st);
     s.af.t_start = xTaskGetTickCount();
-    ESP_LOGI(TAG, "AF: trying %lu kHz (score %d vs %d), checking PI %04X", (unsigned long)khz,
-             score, s.af.cur_score, s.af.pi);
+    ESP_LOGI(TAG, "AF: checking PI %04X on %lu kHz (AF_Update level %d)", s.af.pi,
+             (unsigned long)khz, level_avg);
+    af_log_event(RADIO_AF_EV_CHECK, level_avg, s.af.cur_score, 0, 0);
     publish_af();
-}
-
-/* Newest first into the status snapshot, for the web UI. */
-static void af_log_event(radio_af_ev_type_t type, uint16_t pi, uint32_t ban_s)
-{
-    const radio_af_event_t ev = {
-        .t_ms = now_ms(),
-        .type = (uint8_t)type,
-        .from_khz = s.af.origin,
-        .to_khz = s.af.cand,
-        .score = s.af.cand_score,
-        .cur = s.af.cur_score,
-        .pi = pi,
-        .ban_s = ban_s,
-    };
-    lock();
-    radio_af_status_t *a = &s.status.af;
-    memmove(&a->ev[1], &a->ev[0], (RADIO_AF_EVENTS - 1) * sizeof(a->ev[0]));
-    a->ev[0] = ev;
-    if (a->ev_n < RADIO_AF_EVENTS) {
-        a->ev_n++;
-    }
-    unlock();
 }
 
 /* Back to the tuned station. */
@@ -584,7 +657,7 @@ static void af_reject(radio_af_ev_type_t why, uint16_t pi)
     s.af.pi_fails++;
     ESP_LOGI(TAG, "AF: %lu kHz skipped for %lu s", (unsigned long)s.af.cand,
              (unsigned long)(ms / 1000));
-    af_log_event(why, pi, ms / 1000);
+    af_log_event(why, s.af.cand_score, s.af.cur_score, pi, ms / 1000);
     publish_af();
 }
 
@@ -592,29 +665,82 @@ static void af_reject(radio_af_ev_type_t why, uint16_t pi)
 static void af_abort(void)
 {
     af_jump_back();
+    af_log_event(RADIO_AF_EV_ABORT, AF_SCORE_NONE, AF_SCORE_NONE, 0, 0);
     publish_af();
 }
 
-/* The tuner plays cand now. */
-static void af_switch_done(radio_af_ev_type_t type)
+/* cand plays now, on trial: its settled quality decides (af_trial_finish). Its PI is watched
+ * meanwhile (probation). */
+static void af_trial_start(bool checked)
 {
     const af_params_t p = af_params();
-    af_switched(&s.af.st, &p, s.af.origin, s.af.cand, now_ms());
-    prog_add(s.af.cand);
-    s.af.switches++;
-    af_log_event(type, s.af.pi, 0);
+    af_trial_begin(&s.af.st, &p, s.af.cand, now_ms());
+    s.af.trial_checked = checked;
+    s.af.probation = true;
+    s.af.t_start = xTaskGetTickCount();
+    s.af.cur_score = s.af.st.trial_ref;
     lock();
     s.status.freq_khz = s.af.cand;
     s.status.q.valid = false;
+    s.status.af.trial = true; /* with the frequency: radio_get_settings */
     unlock();
-    ESP_LOGI(TAG, "AF: switched %lu -> %lu kHz%s", (unsigned long)s.af.origin,
-             (unsigned long)s.af.cand,
-             type == RADIO_AF_EV_JUMPED ? " (trusted, no PI check)" : "");
+    ESP_LOGI(TAG, "AF: %lu kHz on trial for %u ms%s; to stay it must beat %d by %d",
+             (unsigned long)s.af.cand, p.trial_ms, checked ? " (PI checked)" : " (trusted)",
+             s.af.cur_score, p.gain);
+    af_log_event(RADIO_AF_EV_TRIAL, s.af.cand_score, s.af.cur_score, 0, 0);
     publish_af();
 
     radio_evt_t evt = {.type = RADIO_EVT_AF_SWITCHED,
                        .af = {.from_khz = s.af.origin, .to_khz = s.af.cand}};
     notify(&evt);
+}
+
+/* Leaves a trial for the station it was compared with. */
+static void af_trial_back(void)
+{
+    s.af.probation = false;
+    af_jump_back();
+    lock();
+    s.status.freq_khz = s.af.origin;
+    s.status.q.valid = false;
+    s.status.af.trial = false;
+    unlock();
+    radio_evt_t evt = {.type = RADIO_EVT_AF_SWITCHED,
+                       .af = {.from_khz = s.af.cand, .to_khz = s.af.origin}};
+    notify(&evt);
+}
+
+/* The trial has run: stay on cand, or back. */
+static void af_trial_finish(void)
+{
+    const af_params_t p = af_params();
+    const af_trial_result_t r = af_trial_end(&s.af.st, &p, now_ms());
+    if (r.won) {
+        prog_add(r.khz);
+        s.af.switches++;
+        ESP_LOGI(TAG, "AF: switched %lu -> %lu kHz (score %d vs %d, %u samples)",
+                 (unsigned long)r.from_khz, (unsigned long)r.khz, r.mean, r.ref, r.n);
+        af_log_event(s.af.trial_checked ? RADIO_AF_EV_SWITCHED : RADIO_AF_EV_JUMPED, r.mean, r.ref,
+                     0, 0);
+        publish_af();
+        return;
+    }
+    ESP_LOGI(TAG, "AF: %lu kHz not better (score %d vs %d, %u samples); back to %lu kHz, "
+                  "next try in %lu s",
+             (unsigned long)r.khz, r.mean, r.ref, r.n, (unsigned long)r.from_khz,
+             (unsigned long)(r.retry_ms / 1000));
+    af_trial_back();
+    af_log_event(RADIO_AF_EV_WORSE, r.mean, r.ref, 0, r.retry_ms / 1000);
+    publish_af();
+}
+
+/* A command came in during a trial: back where the programme played first, no verdict. */
+static void af_trial_cancel(void)
+{
+    af_trial_abort(&s.af.st, now_ms());
+    af_trial_back();
+    af_log_event(RADIO_AF_EV_ABORT, AF_SCORE_NONE, AF_SCORE_NONE, 0, 0);
+    publish_af();
 }
 
 static void af_accept(void)
@@ -623,17 +749,17 @@ static void af_accept(void)
     /* The tuner is on cand whether or not End gets through; a failed End leaves it muted until
      * the next tuning (the I2C recovery re-tunes with Preset). */
     io_ok(tef_tune(RADIO_BAND_FM, 0, TEF6686_TUNE_END), "af end");
-    af_switch_done(RADIO_AF_EV_SWITCHED);
+    af_verified(&s.af.st, s.af.cand, now_ms());
+    af_trial_start(true);
 }
 
 /* A frequency that carried the programme recently: Jump (1 ms mute slope, UM V102 §3.1) instead
- * of the muted Check, so the switch is not heard. Its PI is still watched (AF_PROBATION_MS). */
-static void af_jump(uint32_t khz, int16_t score)
+ * of the muted Check, so the trial begins unheard. */
+static void af_trial_jump(uint32_t khz, int16_t level_avg)
 {
     s.af.cand = khz;
     s.af.origin = s.status.freq_khz;
-    s.af.cand_score = score;
-    s.af.cur_score = af_current(&s.af.st);
+    s.af.cand_score = level_avg;
     if (!io_ok(tef_tune(RADIO_BAND_FM, khz, TEF6686_TUNE_JUMP), "af jump")) {
         return;
     }
@@ -641,12 +767,10 @@ static void af_jump(uint32_t khz, int16_t score)
     vTaskDelay(pdMS_TO_TICKS(AF_FLUSH_MS));
     tef6686_rds_t stale;
     io_ok(tef6686_fm_get_rds(s.tef, &stale), "af rds flush");
-    s.af.probation = true;
-    s.af.t_start = xTaskGetTickCount();
-    af_switch_done(RADIO_AF_EV_JUMPED);
+    af_trial_start(false);
 }
 
-/* After a jump: the trusted frequency carries another programme now. Back, and skip it as after
+/* On cand after a jump or a check: it carries another programme now. Back, and skip it as after
  * a failed PI check. */
 static void af_probation_fail(uint16_t pi)
 {
@@ -655,17 +779,22 @@ static void af_probation_fail(uint16_t pi)
     ESP_LOGI(TAG, "AF: %lu kHz carries PI %04X now, not %04X; back to %lu kHz",
              (unsigned long)s.af.cand, pi, s.af.pi, (unsigned long)s.af.origin);
     af_jump_back();
-    af_switched(&s.af.st, &p, s.af.cand, s.af.origin, now_ms());
-    prog_remove(s.af.cand);
+    if (s.af.st.trial) {
+        af_trial_abort(&s.af.st, now_ms());
+    } else { /* the trial was won: switch back */
+        af_switched(&s.af.st, &p, s.af.cand, s.af.origin, now_ms());
+        prog_remove(s.af.cand);
+    }
     const uint32_t ms = af_ban(&s.af.st, s.af.cand, now_ms(), af_ban_base_ms(), true);
     s.af.pi_fails++;
     lock();
     s.status.freq_khz = s.af.origin;
     s.status.q.valid = false;
+    s.status.af.trial = false;
     s.status.rds_sync = false;
     rds_reset(&s.status.rds); /* holds the other programme's PI and names */
     unlock();
-    af_log_event(RADIO_AF_EV_OTHER_PI, pi, ms / 1000);
+    af_log_event(RADIO_AF_EV_OTHER_PI, AF_SCORE_NONE, AF_SCORE_NONE, pi, ms / 1000);
     publish_af();
 
     radio_evt_t evt = {.type = RADIO_EVT_AF_SWITCHED,
@@ -706,11 +835,40 @@ static void af_verify_poll(void)
     }
 }
 
-/* Measure the next AF if one is due, and try the best one if it is clearly better: trusted ones
- * by a jump, others by a muted PI check. */
+/* One AF_Update measurement into the trace, with the entry's averages after it. */
+static void trace_af_measure(uint32_t khz, const tef6686_quality_t *q, int16_t score)
+{
+    const af_params_t p = af_params();
+    radio_trace_t t = {.t_ms = now_ms(),
+                       .khz = khz,
+                       .kind = RADIO_TRACE_AF_MEASURE,
+                       .a = {.level = q->level,
+                             .usn = q->usn,
+                             .wam = q->wam,
+                             .offset = q->offset,
+                             .score = score,
+                             .avg = AF_SCORE_NONE,
+                             .level_avg = AF_SCORE_NONE,
+                             .need = af_need_level(&s.af.st, &p)}};
+    for (unsigned i = 0; i < s.af.st.n; i++) {
+        const af_entry_t *e = &s.af.st.e[i];
+        if (e->khz == khz) {
+            t.a.avg = e->score;
+            t.a.level_avg = e->level_avg;
+            t.a.streak = e->streak;
+            break;
+        }
+    }
+    lock();
+    trace_push(&s.trace, &t);
+    unlock();
+}
+
+/* Judge a trial that has run; else measure the next AF if one is due, and try the best one if it
+ * passed the screen: trusted ones by a jump, others after a muted PI check. */
 static void af_tick(void)
 {
-    if (s.af.probation &&
+    if (s.af.probation && !s.af.st.trial &&
         reached(xTaskGetTickCount(), s.af.t_start + pdMS_TO_TICKS(AF_PROBATION_MS))) {
         s.af.probation = false; /* no other PI turned up: it stays */
         publish_af();
@@ -719,6 +877,12 @@ static void af_tick(void)
         return;
     }
     const af_params_t p = af_params();
+    if (s.af.st.trial) {
+        if (af_trial_due(&s.af.st, &p, now_ms())) {
+            af_trial_finish();
+        }
+        return;
+    }
     const uint32_t khz = af_next_check(&s.af.st, &p, now_ms());
     if (khz == 0) {
         return;
@@ -727,17 +891,18 @@ static void af_tick(void)
     if (af_measure(khz, &q)) {
         const int16_t score = af_score(q.level, q.usn, q.wam, q.offset);
         af_measured(&s.af.st, &p, khz, score, q.level, now_ms());
-        ESP_LOGD(TAG, "AF %lu kHz: level %d usn %u wam %u offset %d -> score %d (need %d)",
+        trace_af_measure(khz, &q, score);
+        ESP_LOGD(TAG, "AF %lu kHz: level %d usn %u wam %u offset %d -> score %d (need level %d)",
                  (unsigned long)khz, q.level, q.usn, q.wam, q.offset, score,
-                 af_threshold(&s.af.st, &p));
+                 af_need_level(&s.af.st, &p));
         const uint32_t pick = af_pick(&s.af.st, &p, now_ms());
         for (unsigned i = 0; pick && i < s.af.st.n; i++) {
             if (s.af.st.e[i].khz == pick) {
-                const int16_t avg = s.af.st.e[i].score;
+                const int16_t level_avg = s.af.st.e[i].level_avg;
                 if (af_trusted(&s.af.st, pick, now_ms())) {
-                    af_jump(pick, avg);
+                    af_trial_jump(pick, level_avg);
                 } else {
-                    af_verify_begin(pick, avg);
+                    af_verify_begin(pick, level_avg);
                 }
                 break;
             }
@@ -1003,9 +1168,40 @@ static void poll_quality(void)
     s.status.q = evt.quality;
     unlock();
     if (band == RADIO_BAND_FM && settled) { /* the fast samples after a tune are not */
-        af_quality(&s.af.st, af_score(q.level, q.usn, q.wam, 0));
+        af_quality(&s.af.st, af_score(q.level, q.usn, q.wam, 0), q.level);
     }
     publish_af();
+
+    lock();
+    const radio_af_status_t *a = &s.status.af;
+    const radio_trace_t t = {
+        .t_ms = now_ms(),
+        .khz = s.status.freq_khz,
+        .kind = RADIO_TRACE_QUALITY,
+        .q = {.age = age,
+              .level = q.level,
+              .usn = q.usn,
+              .wam = q.wam,
+              .offset = q.offset,
+              .bandwidth = q.bandwidth,
+              .modulation = q.modulation,
+              .softmute = proc.softmute,
+              .highcut = proc.highcut,
+              .stblend = proc.stereo,
+              .sthiblend = proc.sthiblend,
+              .cur = a->score,
+              .need = a->need,
+              .rds_groups = s.status.rds.groups,
+              .rds_rejected = s.status.rds.rejected,
+              .af = (a->active ? RADIO_TRACE_AF_ACTIVE : 0u) | (a->poor ? RADIO_TRACE_AF_POOR : 0u) |
+                    (a->checking_pi ? RADIO_TRACE_AF_CHECKING : 0u) |
+                    (a->trial ? RADIO_TRACE_AF_TRIAL : 0u) |
+                    (a->probation ? RADIO_TRACE_AF_PROBATION : 0u) |
+                    (a->pi_mem ? RADIO_TRACE_AF_PI_MEM : 0u),
+              .stereo = stereo,
+              .rds_sync = s.status.rds_sync}};
+    trace_push(&s.trace, &t);
+    unlock();
     notify(&evt);
 }
 
@@ -1153,10 +1349,18 @@ static void handle_tuning(uint16_t id, int16_t value)
     publish_af();
 }
 
+/* Commands that tune: an AF trial gives way to them. */
+static bool cmd_tunes(cmd_type_t t)
+{
+    return t == CMD_TUNE || t == CMD_STEP || t == CMD_SEEK || t == CMD_SCAN || t == CMD_REINIT;
+}
+
 static void handle_cmd(const radio_cmd_t *c)
 {
     if (s.af.verifying) {
         af_abort(); /* leave the muted candidate before anything else */
+    } else if (s.af.st.trial && cmd_tunes(c->type)) {
+        af_trial_cancel(); /* back where the programme played: a kept tune finds it there */
     }
     const bool ready = s.status.tef_ready;
 
@@ -1399,7 +1603,20 @@ esp_err_t radio_start(const radio_config_t *cfg)
     ESP_RETURN_ON_FALSE(tuning_valid(&cfg->tuning), ESP_ERR_INVALID_ARG, TAG, "bad tuning");
 
     s.cfg = *cfg;
+    s.cfg.af_mem = NULL; /* copied here, not kept */
     s.tuning = cfg->tuning;
+    if (cfg->af_mem) {
+        s.mem = *cfg->af_mem;
+    } else {
+        af_mem_init(&s.mem);
+    }
+    /* Once, from the heap: the S2's static DRAM segment is full. Without it the trace stays
+     * empty; the radio itself does not need it. */
+    radio_trace_t *trace_buf = calloc(TRACE_LEN, sizeof(radio_trace_t));
+    trace_init(&s.trace, trace_buf, sizeof(radio_trace_t), trace_buf ? TRACE_LEN : 0);
+    if (trace_buf == NULL) {
+        ESP_LOGW(TAG, "no memory for the trace: /api/trace stays empty");
+    }
     s.lock = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(s.lock, ESP_ERR_NO_MEM, TAG, "mutex");
     ESP_RETURN_ON_ERROR(tef6686_new(&cfg->tef, &s.tef), TAG, "tef6686_new");
@@ -1579,7 +1796,33 @@ bool radio_get_settings(radio_settings_t *out)
     out->mute = s.status.mute;
     out->bw_auto = s.status.bw_auto;
     out->bw = s.status.bw;
-    const bool seeking = s.status.seeking;
+    const bool moving = s.status.seeking || s.status.af.trial || s.status.af.checking_pi;
     unlock();
-    return !seeking;
+    return !moving;
+}
+
+size_t radio_get_trace(uint32_t since, radio_trace_t *out, size_t max, uint32_t *first,
+                       uint32_t *next, uint32_t *now)
+{
+    *now = now_ms();
+    if (s.lock == NULL) {
+        *first = *next = 0;
+        return 0;
+    }
+    lock();
+    const size_t n = trace_read(&s.trace, since, out, max, first);
+    *next = s.trace.next;
+    unlock();
+    return n;
+}
+
+void radio_get_af_mem(af_mem_t *out)
+{
+    if (s.lock == NULL) {
+        af_mem_init(out);
+        return;
+    }
+    lock();
+    *out = s.mem;
+    unlock();
 }

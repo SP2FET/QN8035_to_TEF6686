@@ -4,6 +4,44 @@ The firmware uses Semantic Versioning. Development releases use 0.x versions and
 change interfaces between minor versions. Versions and Git tags are recorded here;
 target builds and host tests do not establish hardware compatibility.
 
+## 0.4.0 - 2026-10-26
+
+### Added
+
+- Ride recording on a PC: `scripts/ride_log.py` records the trace, `/api/status` and the log
+  over the bridge's Wi-Fi, plus marks and 1-5 audio ratings typed during the drive.
+  `scripts/ride_report.py` turns a ride into an HTML report (charts of frequency, level, USN/WAM,
+  score, DSP and RDS errors, with AF steps and marks) and CSV files, including how AF_Update
+  readings compare with settled ones. Standard library only. See
+  [docs/ride-logging.md](docs/ride-logging.md).
+- `GET /api/trace?since=N`: every quality sample (~100 ms), AF_Update measurement and AF step,
+  from a 128-record ring in the radio service (~6.6 kB, allocated once at start). The device
+  keeps no log of its own; the PC fetches the ring twice a second.
+- AF memory (`af_mem`, `af_store`): the AF lists of up to 16 programmes and the frequencies their
+  PI was heard on are kept in flash. A station heard without RDS takes the PI stored for its
+  frequency, so its AFs are followed; a station with RDS has its stored AFs before its 0A groups
+  bring them. Flash wear: one 36-byte NVS record per programme, written only when its content
+  changes, after a minute of stability, one per 30 s, at most 64 per power-on, and only after
+  10 s without a head-unit command. Tuning row `af_mem` turns the use off.
+
+### Changed
+
+- AF decisions. AF_Update measurements (2 ms samples) only screen the candidates, by level: one
+  whose level reaches the tuned station's minus 6 dB three times in a row is tried. It plays on
+  trial for 1.5 s (a Jump if it carried the programme within 10 min, else after the muted PI
+  check) and stays if its settled score beats the tuned station's recent mean by 3 dB; otherwise
+  the tuner jumps back and the candidate waits 30 s, doubling up to 4 min. 0.3.0 compared
+  AF_Update scores with settled ones; they read ~30 dB low, so it never switched.
+- Tuning rows: `af_margin` and `af_min` (AF_Update score thresholds) are gone and values saved
+  for them are ignored. New: `af_window` (6 dB), `af_min_lvl` (15 dBµV), `af_gain` (3 dB),
+  `af_trial` (1500 ms), `af_retry` (30 s), `af_mem` (on).
+- `/api/status` `af`: `need` is now a level in dBµV; new `pi`, `pi_mem`, `level`, `trial` and
+  `mem`; list entries add `lavg`, `trial`, `losses` and `retry_s`; events add the types `check`,
+  `trial`, `worse` and `abort`, and their `score`/`cur` may be null. The AF card shows the trial,
+  the stored lists and the new columns.
+- `radio_get_settings` reports nothing while an AF check or trial runs, so neither the memory
+  channels nor the warm-restart snapshot keep a candidate's frequency.
+
 ## 0.3.0 - 2026-10-26
 
 ### Added

@@ -14,9 +14,11 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "af_store.h"
 #include "log_stream.h"
 #include "qn8035_slave.h"
 #include "radio.h"
@@ -31,8 +33,12 @@ static const char *TAG = "web";
 extern const char index_html_start[] asm("_binary_index_html_start");
 extern const char index_html_end[] asm("_binary_index_html_end");
 
-/* ~1.8 kB plus up to AF_MAX entries of ~150 bytes and RADIO_AF_EVENTS of ~130. */
-#define STATUS_BUF_SIZE 10240 /* and the reset history, SYSMON_HIST_MAX entries of ~70 */
+/* ~2 kB plus up to AF_MAX entries of ~220 bytes and RADIO_AF_EVENTS of ~130. */
+#define STATUS_BUF_SIZE 12288 /* and the reset history, SYSMON_HIST_MAX entries of ~70 */
+/* /api/trace: records are copied in batches and sent in chunks; one record is < 300 bytes. */
+#define TRACE_BATCH      16
+#define TRACE_CHUNK      1024
+#define TRACE_CHUNK_FILL 640
 #define COREDUMP_CHUNK  1024
 /* /api/tuning goes out in chunks; one parameter is < 300 bytes. */
 #define TUNING_CHUNK      1024
@@ -134,19 +140,38 @@ static void jb_tenths(jbuf_t *j, bool known, int v)
     }
 }
 
-/* One AF as measured by AF_Update. */
+/* 0.1-unit score or level, null for AF_SCORE_NONE. */
+static void jb_score(jbuf_t *j, int16_t v)
+{
+    jb_tenths(j, v != AF_SCORE_NONE, v);
+}
+
+static const char *af_ev_name(uint8_t type)
+{
+    static const char *const names[] = {"switched", "other_pi", "no_pi", "jumped",
+                                        "check",    "trial",    "worse", "abort"};
+    return type < sizeof(names) / sizeof(names[0]) ? names[type] : "?";
+}
+
+/* One AF as measured by AF_Update, and its last trial. */
 static void jb_af_entry(jbuf_t *j, const af_entry_t *e, uint32_t now_ms)
 {
     const bool banned = e->banned && (int32_t)(e->banned_until_ms - now_ms) > 0;
     const bool trusted =
         e->verified && (uint32_t)(now_ms - e->verified_ms) < AF_TRUST_MS && !banned;
+    const bool waiting = e->losses > 0 && (int32_t)(e->retry_until_ms - now_ms) > 0;
     jb_printf(j, "{\"khz\":%" PRIu32 ",\"score\":", e->khz);
-    jb_tenths(j, e->score != AF_SCORE_NONE, e->score);
+    jb_score(j, e->score);
     jb_printf(j, ",\"last\":");
     jb_tenths(j, e->measured && e->last != AF_SCORE_NONE, e->last);
     jb_printf(j, ",\"n\":%u,\"streak\":%u,\"level\":", e->avg.n, e->streak);
     jb_tenths(j, e->measured, e->level);
-    jb_printf(j, ",\"age_s\":");
+    jb_printf(j, ",\"lavg\":");
+    jb_score(j, e->level_avg);
+    jb_printf(j, ",\"trial\":");
+    jb_score(j, e->trial_score);
+    jb_printf(j, ",\"losses\":%u,\"retry_s\":%" PRIu32 ",\"age_s\":", e->losses,
+              waiting ? (e->retry_until_ms - now_ms + 999) / 1000 : 0);
     if (e->measured) {
         jb_printf(j, "%" PRIu32, (now_ms - e->measured_ms) / 1000);
     } else {
@@ -158,11 +183,36 @@ static void jb_af_entry(jbuf_t *j, const af_entry_t *e, uint32_t now_ms)
 
 static void jb_af(jbuf_t *j, const radio_af_status_t *a)
 {
-    jb_printf(j, "\"af\":{\"active\":%s,\"poor\":%s,\"checking_pi\":%s,\"probation\":%s,\"score\":",
+    jb_printf(j, "\"af\":{\"active\":%s,\"poor\":%s,\"checking_pi\":%s,\"probation\":%s,\"pi\":",
               b(a->active), b(a->poor), b(a->checking_pi), b(a->probation));
-    jb_tenths(j, a->score != AF_SCORE_NONE, a->score);
+    if (a->active) {
+        jb_printf(j, "\"%04X\"", a->pi);
+    } else {
+        jb_printf(j, "null");
+    }
+    jb_printf(j, ",\"pi_mem\":%s,\"score\":", b(a->pi_mem));
+    jb_score(j, a->score);
+    jb_printf(j, ",\"level\":");
+    jb_score(j, a->level);
     jb_printf(j, ",\"need\":");
-    jb_tenths(j, a->need != AF_SCORE_NONE, a->need);
+    jb_score(j, a->need);
+    jb_printf(j, ",\"trial\":");
+    if (a->trial) {
+        jb_printf(j, "{\"khz\":%" PRIu32 ",\"left_ms\":%" PRIu32 ",\"n\":%u,\"mean\":",
+                  a->trial_khz, a->trial_left_ms, a->trial_n);
+        jb_score(j, a->trial_mean);
+        jb_printf(j, ",\"ref\":");
+        jb_score(j, a->trial_ref);
+        jb_printf(j, "}");
+    } else {
+        jb_printf(j, "null");
+    }
+    af_store_info_t m;
+    af_store_get_info(&m);
+    jb_printf(j,
+              ",\"mem\":{\"progs\":%u,\"saving\":%s,\"pending\":%u,\"writes\":%" PRIu32
+              ",\"errors\":%" PRIu32 "}",
+              a->mem_progs, b(m.running), m.pending, m.writes, m.errors);
     jb_printf(j, ",\"dwell_s\":%" PRIu32 ",\"confirm\":%d,\"switches\":%" PRIu32
                  ",\"pi_fails\":%" PRIu32 ",\"list\":[",
               (a->dwell_ms + 999) / 1000, AF_CONFIRM, a->switches, a->pi_fails);
@@ -170,16 +220,18 @@ static void jb_af(jbuf_t *j, const radio_af_status_t *a)
         jb_printf(j, "%s", i ? "," : "");
         jb_af_entry(j, &a->e[i], a->now_ms);
     }
-    static const char *const ev_names[] = {"switched", "other_pi", "no_pi", "jumped"};
     jb_printf(j, "],\"events\":[");
     for (unsigned i = 0; i < a->ev_n && i < RADIO_AF_EVENTS; i++) {
         const radio_af_event_t *ev = &a->ev[i];
         jb_printf(j,
                   "%s{\"type\":\"%s\",\"age_s\":%" PRIu32 ",\"from\":%" PRIu32 ",\"to\":%" PRIu32
-                  ",\"score\":%.1f,\"cur\":%.1f,\"pi\":",
-                  i ? "," : "", ev->type < 4 ? ev_names[ev->type] : "?",
-                  (a->now_ms - ev->t_ms) / 1000, ev->from_khz, ev->to_khz, ev->score / 10.0,
-                  ev->cur / 10.0);
+                  ",\"score\":",
+                  i ? "," : "", af_ev_name(ev->type), (a->now_ms - ev->t_ms) / 1000, ev->from_khz,
+                  ev->to_khz);
+        jb_score(j, ev->score);
+        jb_printf(j, ",\"cur\":");
+        jb_score(j, ev->cur);
+        jb_printf(j, ",\"pi\":");
         if (ev->type == RADIO_AF_EV_OTHER_PI) {
             jb_printf(j, "\"%04X\"", ev->pi);
         } else {
@@ -460,6 +512,113 @@ static esp_err_t send_chunk(httpd_req_t *req, jbuf_t *j)
     const esp_err_t err = httpd_resp_send_chunk(req, j->buf, (ssize_t)j->len);
     j->len = 0;
     return err;
+}
+
+/* Integer in chip units, null for AF_SCORE_NONE. */
+static void jb_int(jbuf_t *j, int16_t v)
+{
+    if (v == AF_SCORE_NONE) {
+        jb_printf(j, "null");
+    } else {
+        jb_printf(j, "%d", v);
+    }
+}
+
+/* One trace record, chip units (0.1 dBuV, 0.1 %, 0.1 kHz, 0.1 dB). */
+static void jb_trace(jbuf_t *j, uint32_t seq, const radio_trace_t *r)
+{
+    jb_printf(j, "{\"s\":%" PRIu32 ",\"t\":%" PRIu32 ",", seq, r->t_ms);
+    if (r->kind == RADIO_TRACE_QUALITY) {
+        jb_printf(j,
+                  "\"k\":\"q\",\"f\":%" PRIu32 ",\"age\":%u,\"lv\":%d,\"usn\":%u,\"wam\":%u,"
+                  "\"off\":%d,\"bw\":%u,\"mod\":%u,\"st\":%d,\"sm\":%u,\"hc\":%u,\"sb\":%u,"
+                  "\"hb\":%u,\"sync\":%d,\"g\":%" PRIu32 ",\"rej\":%" PRIu32 ",\"af\":%u,\"cur\":",
+                  r->khz, r->q.age, r->q.level, r->q.usn, r->q.wam, r->q.offset, r->q.bandwidth,
+                  r->q.modulation, r->q.stereo, r->q.softmute, r->q.highcut, r->q.stblend,
+                  r->q.sthiblend, r->q.rds_sync, r->q.rds_groups, r->q.rds_rejected, r->q.af);
+        jb_int(j, r->q.cur);
+        jb_printf(j, ",\"need\":");
+        jb_int(j, r->q.need);
+    } else if (r->kind == RADIO_TRACE_AF_MEASURE) {
+        jb_printf(j,
+                  "\"k\":\"a\",\"f\":%" PRIu32 ",\"lv\":%d,\"usn\":%u,\"wam\":%u,\"off\":%d,"
+                  "\"streak\":%u,\"sc\":",
+                  r->khz, r->a.level, r->a.usn, r->a.wam, r->a.offset, r->a.streak);
+        jb_int(j, r->a.score);
+        jb_printf(j, ",\"avg\":");
+        jb_int(j, r->a.avg);
+        jb_printf(j, ",\"lavg\":");
+        jb_int(j, r->a.level_avg);
+        jb_printf(j, ",\"need\":");
+        jb_int(j, r->a.need);
+    } else {
+        const radio_af_event_t *e = &r->e;
+        jb_printf(j,
+                  "\"k\":\"e\",\"ev\":\"%s\",\"from\":%" PRIu32 ",\"to\":%" PRIu32
+                  ",\"ban_s\":%" PRIu32 ",\"sc\":",
+                  af_ev_name(e->type), e->from_khz, e->to_khz, e->ban_s);
+        jb_int(j, e->score);
+        jb_printf(j, ",\"cur\":");
+        jb_int(j, e->cur);
+        if (e->type == RADIO_AF_EV_OTHER_PI) {
+            jb_printf(j, ",\"pi\":\"%04X\"", e->pi);
+        } else {
+            jb_printf(j, ",\"pi\":null");
+        }
+    }
+    jb_printf(j, "}");
+}
+
+/* ?since=N: the radio's trace from sequence number N on, for a PC recording a ride
+ * (scripts/ride_log.py). "next" is the N to ask for next; "lost" counts records overwritten
+ * before they were fetched; "boot" changes with every start of the firmware. */
+static esp_err_t trace_get(httpd_req_t *req)
+{
+    static radio_trace_t recs[TRACE_BATCH]; /* httpd task only */
+    static char buf[TRACE_CHUNK];
+    static uint32_t boot;
+    if (boot == 0) {
+        boot = esp_random() | 1u;
+    }
+    long arg = 0;
+    const uint32_t since = get_long(req, "since", &arg) && arg >= 0 ? (uint32_t)arg : 0;
+    uint32_t first, next, now;
+    size_t n = radio_get_trace(since, recs, TRACE_BATCH, &first, &next, &now);
+    /* since within this run, and older than the oldest record kept */
+    const uint32_t lost =
+        (int32_t)(next - since) >= 0 && (int32_t)(first - since) > 0 ? first - since : 0;
+    const uint32_t end = next;
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    jbuf_t j = {.buf = buf, .size = sizeof(buf)};
+    jb_printf(&j,
+              "{\"boot\":\"%08" PRIx32 "\",\"now\":%" PRIu32 ",\"first\":%" PRIu32
+              ",\"lost\":%" PRIu32 ",\"r\":[",
+              boot, now, first, lost);
+    uint32_t seq = first;
+    const char *sep = "";
+    while (n > 0) {
+        for (size_t i = 0; i < n; i++, seq++) {
+            jb_printf(&j, "%s", sep);
+            jb_trace(&j, seq, &recs[i]);
+            sep = ",";
+            if (j.len > TRACE_CHUNK_FILL) {
+                ESP_RETURN_ON_ERROR(send_chunk(req, &j), TAG, "trace chunk");
+            }
+        }
+        if ((int32_t)(end - seq) <= 0) {
+            break;
+        }
+        uint32_t at;
+        n = radio_get_trace(seq, recs, TRACE_BATCH, &at, &next, &now);
+        if (at != seq) {
+            break; /* overwritten while sending: the next request reports the gap */
+        }
+    }
+    jb_printf(&j, "],\"next\":%" PRIu32 "}", seq);
+    ESP_RETURN_ON_ERROR(send_chunk(req, &j), TAG, "trace chunk");
+    return httpd_resp_send_chunk(req, NULL, 0);
 }
 
 /* The whole table with current (v) and saved (sv) values, in chip units; display = v / div. */
@@ -845,6 +1004,7 @@ esp_err_t web_ui_start(const web_ui_config_t *ui_cfg)
         {.uri = "/", .method = HTTP_GET, .handler = index_get},
         {.uri = "/favicon.ico", .method = HTTP_GET, .handler = favicon_get},
         {.uri = "/api/status", .method = HTTP_GET, .handler = status_get},
+        {.uri = "/api/trace", .method = HTTP_GET, .handler = trace_get},
         {.uri = "/api/coredump", .method = HTTP_GET, .handler = coredump_get},
         {.uri = "/api/tune", .method = HTTP_POST, .handler = tune_post},
         {.uri = "/api/step", .method = HTTP_POST, .handler = step_post},

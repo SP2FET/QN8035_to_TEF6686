@@ -138,9 +138,14 @@ static void test_find(void)
     TEST_ASSERT_EQUAL_INT(TUNING_SM_LEVEL_START, tuning_find("sm_lv_st"));
     TEST_ASSERT_EQUAL_INT(TUNING_AF_ON, tuning_find("af"));
     TEST_ASSERT_EQUAL_INT(-1, tuning_find("nope"));
-    TEST_ASSERT_EQUAL_INT(TUNING_AF_MIN, tuning_find("af_min"));
+    TEST_ASSERT_EQUAL_INT(TUNING_AF_MIN_LEVEL, tuning_find("af_min_lvl"));
+    TEST_ASSERT_EQUAL_INT(-1, tuning_find("af_min")); /* an AF_Update score: no longer used */
+    TEST_ASSERT_EQUAL_INT(-1, tuning_find("af_margin"));
+    TEST_ASSERT_EQUAL_INT(TUNING_AF_GAIN, tuning_find("af_gain"));
+    TEST_ASSERT_EQUAL_INT(TUNING_AF_MEM, tuning_find("af_mem"));
     TEST_ASSERT_EQUAL_INT(TUNING_AF_BAN, tuning_find("af_ban"));
-    TEST_ASSERT_EQUAL_INT16(200, tuning_params[TUNING_AF_MIN].def);
+    TEST_ASSERT_EQUAL_INT16(150, tuning_params[TUNING_AF_MIN_LEVEL].def);
+    TEST_ASSERT_EQUAL_INT16(1500, tuning_params[TUNING_AF_TRIAL].def);
     TEST_ASSERT_EQUAL_INT16(300, tuning_params[TUNING_AF_BAN].def);
     TEST_ASSERT_EQUAL_INT(TUNING_AF_DWELL, tuning_find("af_dwell"));
     TEST_ASSERT_EQUAL_INT16(15, tuning_params[TUNING_AF_DWELL].def);
