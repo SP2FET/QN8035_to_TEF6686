@@ -20,6 +20,7 @@ typedef struct {
     uint8_t ap_channel;
     const char *sta_ssid;    /**< NULL or "" disables station mode */
     const char *sta_password;
+    uint8_t tx_power_dbm;    /**< 2..20; 0 keeps the driver's maximum (20 dBm) */
 } net_wifi_config_t;
 
 esp_err_t net_wifi_start(const net_wifi_config_t *cfg);

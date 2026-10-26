@@ -250,6 +250,7 @@ void app_main(void)
         .ap_channel = CONFIG_BRIDGE_WIFI_AP_CHANNEL,
         .sta_ssid = CONFIG_BRIDGE_WIFI_STA_SSID,
         .sta_password = CONFIG_BRIDGE_WIFI_STA_PASSWORD,
+        .tx_power_dbm = CONFIG_BRIDGE_WIFI_TX_POWER_DBM,
     };
     ESP_ERROR_CHECK(net_wifi_start(&wifi_cfg));
     const web_ui_config_t web_cfg = {

@@ -34,8 +34,10 @@ target builds and host tests do not establish hardware compatibility.
 
 ### Changed
 
-- Brown-out reset at 2.84 V instead of 2.44 V: a supply dip resets the chip (and the warm
-  restart resumes) instead of leaving it running with the in-package flash under-powered.
+- Wi-Fi transmit power 8 dBm by default (`BRIDGE_WIFI_TX_POWER_DBM`, was the 20 dBm maximum):
+  the phone is next to the head unit, and full-power bursts pulled the supply down. A brown-out
+  level of 2.84 V, tried in between, reset the board on every client connect and is back at the
+  2.44 V default.
 - QN8035 emulation is on by default (`sdkconfig.defaults`): the default build is the car build.
   Memory channels and CPU DFS, which Kconfig excludes with it, are therefore off by default.
 - AF following no longer hops between weak transmitters on single-sample peaks:

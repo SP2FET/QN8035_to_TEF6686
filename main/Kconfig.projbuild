@@ -184,6 +184,16 @@ menu "QN8035 -> TEF6686 bridge"
             range 1 13
             default 6
 
+        config BRIDGE_WIFI_TX_POWER_DBM
+            int "Transmit power (dBm)"
+            range 2 20
+            default 8
+            help
+                The phone sits next to the head unit, so little power is needed.
+                At the 20 dBm maximum the transmit bursts draw about 300 mA and pull
+                a weak 3.3 V supply down: on 2026-10-25 the bench board reset on
+                every client connect with the brown-out level at 2.84 V.
+
         config BRIDGE_WIFI_STA_SSID
             string "Also join this network (empty = AP only)"
             default ""

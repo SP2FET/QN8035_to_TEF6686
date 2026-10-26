@@ -114,9 +114,16 @@ esp_err_t net_wifi_start(const net_wifi_config_t *cfg)
         ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &st), TAG, "sta config");
     }
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "start");
+    if (cfg->tx_power_dbm) {
+        /* 0.25 dBm units, 8..84 = 2..20 dBm (only after esp_wifi_start). Transmit bursts at
+         * 20 dBm draw ~300 mA, which a weak 3.3 V supply does not hold. */
+        unsigned dbm = cfg->tx_power_dbm > 20 ? 20 : cfg->tx_power_dbm;
+        dbm = dbm < 2 ? 2 : dbm;
+        ESP_RETURN_ON_ERROR(esp_wifi_set_max_tx_power((int8_t)(dbm * 4)), TAG, "tx power");
+    }
 
-    ESP_LOGI(TAG, "AP \"%s\" (%s) on channel %u -> http://192.168.4.1/%s", cfg->ap_ssid,
+    ESP_LOGI(TAG, "AP \"%s\" (%s) on channel %u, %u dBm -> http://192.168.4.1/%s", cfg->ap_ssid,
              ap.ap.authmode == WIFI_AUTH_OPEN ? "open" : "WPA2", cfg->ap_channel,
-             sta ? ", station enabled" : "");
+             cfg->tx_power_dbm ? cfg->tx_power_dbm : 20, sta ? ", station enabled" : "");
     return ESP_OK;
 }

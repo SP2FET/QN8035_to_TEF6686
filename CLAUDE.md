@@ -23,7 +23,7 @@ The head unit's software must not notice the swap.
 | Station memory (stand-alone build): last settings + 40 memory channels in NVS, web UI card | Builds; channel logic host-tested (11 tests). **Not yet tried on the device** |
 | Reception tuning: weak-signal DSP (iMS, EQ, noise blanker, soft mute, high cut, stereo blend, high blend, FM IF bandwidth fixed or automatic with the extended API, RF AGC), AF and seek thresholds, live in the web UI (a Weak signal card of presets on top of the full table), saved to NVS on request | Builds; table host-tested. **Not yet tried on the device** |
 | AF following: RDS AF list, AF_Update checks, a candidate must beat the tuned station's score by the margin in 3 measurements in a row, dwell after a switch, muted PI check or a silent jump to a frequency verified within 10 min (PI watched after), escalating bans from 5 min, REG; head-unit tunes to the programme's frequencies keep the AF | The first version hopped between weak transmitters on air (2026-10-25). The rework builds and is host-tested. **Rework not yet tried on air** |
-| Watchdog and warm restart: task watchdog panics on a hang (idle, radio, qn_slave), brown-out reset at 2.84 V, core dump in flash (`/api/coredump`), reset reason, crash count and a reset history kept in NVS in the web UI, station and QN8035 registers resumed from RTC memory | Watchdog and dump download run in the car. Brown-out level and reset history: builds, **not yet tried** |
+| Watchdog and warm restart: task watchdog panics on a hang (idle, radio, qn_slave), core dump in flash (`/api/coredump`), reset reason, crash count and a reset history kept in NVS in the web UI, station and QN8035 registers resumed from RTC memory | Watchdog and dump download run in the car. Reset history: builds, **not yet tried** |
 | QN8035 register model | Implemented to the head-unit MCU's driver (CHSC and 0x55 starts, stale completions, 0x4A/0x4C mutes, 85.5 MHz PLL shift, CCA level rule) and matched to the bus capture of the original chip (IDs, reset values, 0x4F, RDS after a tune). Host-tested (27 tests, one replays the captured cold start and preset tunes byte for byte) |
 | QN8035 I2C slave port + bridge | No clock stretching (TX FIFO filled from the ISR), tune done on settled quality. **On by default** (`sdkconfig.defaults`: the car build); first test ride with the head unit 2026-10-25 |
 | Head-unit protocol | Taken from the MCU firmware ([docs/headunit-mcu-firmware.md](docs/headunit-mcu-firmware.md)); confirmed by a bus capture of the original chip ([docs/headunit-bus-capture.md](docs/headunit-bus-capture.md)) |
@@ -108,6 +108,9 @@ light sleep. It is unavailable with QN8035 emulation to preserve slave interrupt
 timing. In the emulation build, `BRIDGE_WIFI_ENABLE` can disable Wi-Fi, HTTP and
 the log pump entirely (also disables web OTA; USB remains available). Wi-Fi stays
 on by default. `BRIDGE_QN_TRACE` now defaults off; enable it for bus bring-up.
+`BRIDGE_WIFI_TX_POWER_DBM` (default 8 dBm, max 20) caps the access point's
+transmit power: the phone is next to the head unit, and 20 dBm bursts draw about
+300 mA, enough to pull the supply below 2.84 V (2026-10-25).
 See [docs/power-usage.md](docs/power-usage.md) for analysis and measurement steps.
 
 **Watchdog and warm restart.** The task watchdog panics after 5 s if the idle,
@@ -122,8 +125,7 @@ crash count since power-on and the dump's task, PC and backtrace; `GET
 coredump.bin .pio/build/lolin_s2_mini/firmware.elf` (ESP-IDF shell, needs the
 toolchain's GDB). Known hang: ESP-IDF 5.4.0's I2C master spins without a
 deadline while the bus stays busy after a NACK (`s_i2c_send_commands`).
-The brown-out detector resets at 2.84 V (default 2.44 V), above what the
-in-package flash needs. Unexpected resets are also kept in NVS (reason, how long
+Unexpected resets are also kept in NVS (reason, how long
 the run before lasted, its RDS clock time), so the Device card shows them after
 the power cycle that ends a hang.
 
@@ -402,9 +404,12 @@ before changing protocol code.
     changed: check that they narrow the filter (live bar BW) without side effects.
 13. The hang of 2026-10-25 (station stuck, head unit ignored, Wi-Fi network gone
     until a power cycle). With the watchdog armed it left no core dump, so no task
-    stalled: the chip itself stopped or kept resetting. Suspect the supply (a dip
-    between the flash's minimum and the old 2.44 V brown-out level). Check the
-    reset history after the next one. The only dump in flash then was older, from a
+    stalled: the chip itself stopped or kept resetting. Suspect the supply: with the
+    brown-out reset raised to 2.84 V the bench board reset every time a Wi-Fi client
+    connected, so the 3.3 V rail dips below that on transmit bursts, into the range
+    where the core runs on while the in-package flash may not. Back at 2.44 V until
+    the supply is fixed (bulk capacitance at 3V3, the TEF module off the S2 Mini's
+    regulator); Wi-Fi transmit power down to 8 dBm meanwhile. Check the reset history after the next hang. The only dump in flash then was older, from a
     stand-alone build: a NULL read in the ROM USB driver under the USB console
     interrupt (`esp_usb_console_cdc_acm_cb`), with a USB host attached.
 
