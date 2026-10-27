@@ -1,10 +1,13 @@
 """Run with: python -B -m unittest discover -s test/scripts -v"""
 import csv
+import http.server
 import json
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import unittest
+import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 import ride_log as rl
@@ -238,6 +241,75 @@ class HealthTests(unittest.TestCase):
         hs = [{"time": 1.0, "ev": "lost", "why": "x"}, {"time": 2.5, "ev": "ready"},
               {"time": 3.0, "ev": "lost", "why": "y"}]
         self.assertEqual([r[2] for r in rr.outages(hs)], [1.5, None])
+
+
+DUMP = bytes(range(256)) * 5
+
+
+class DumpTests(unittest.TestCase):
+    def serve(self, erase_status=None):
+        """Device stand-in; erase_status forces the answer, else 200 on a matching crc, else 409."""
+        posts = []
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def reply(self, code, body=b'{"ok":true}'):
+                self.send_response(code)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                self.reply(200, DUMP) if self.path == "/api/coredump" else self.reply(404)
+
+            def do_POST(self):
+                posts.append(self.path)
+                crc = self.path.partition("crc=")[2]
+                ok = crc == f"{zlib.crc32(DUMP) & 0xffffffff:08x}"
+                self.reply(erase_status or (200 if ok else 409))
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return f"127.0.0.1:{srv.server_port}", posts
+
+    def fetch(self, host):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        name, outcome = rl.fetch_coredump(host, tmp.name, "abc-0x400")
+        self.assertEqual((Path(tmp.name) / name).read_bytes(), DUMP)
+        return name, outcome
+
+    def test_saved_then_erased_with_crc(self):
+        host, posts = self.serve()
+        name, outcome = self.fetch(host)
+        self.assertEqual(name, "coredump-abc-0x400.bin")
+        self.assertEqual(posts, [f"/api/coredump/erase?crc={zlib.crc32(DUMP):08x}"])
+        self.assertIn("erased on the device", outcome)
+
+    def test_crc_mismatch_keeps_file_and_dump(self):
+        host, posts = self.serve(409)
+        self.assertIn("kept on the device (HTTP 409)", self.fetch(host)[1])
+
+    def test_erase_404_keeps_file(self):
+        host, posts = self.serve(404)
+        self.assertIn("kept on the device (HTTP 404)", self.fetch(host)[1])
+
+    def test_erase_connection_failure_keeps_file(self):
+        host, posts = self.serve()
+        real = rl.urllib.request.urlopen
+
+        def flaky(req, timeout=None):
+            if getattr(req, "method", None) == "POST":
+                raise OSError("connection closed")
+            return real(req, timeout=timeout)
+
+        rl.urllib.request.urlopen = flaky
+        self.addCleanup(setattr, rl.urllib.request, "urlopen", real)
+        self.assertIn("kept on the device (connection closed)", self.fetch(host)[1])
 
 
 if __name__ == "__main__":

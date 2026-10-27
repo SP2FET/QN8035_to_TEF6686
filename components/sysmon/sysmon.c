@@ -359,3 +359,43 @@ esp_err_t sysmon_dump_read(size_t offset, void *buf, size_t len)
     return ESP_ERR_NOT_FOUND;
 #endif
 }
+
+esp_err_t sysmon_dump_erase(uint32_t crc32)
+{
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
+    size_t addr, size;
+    if (esp_core_dump_image_get(&addr, &size) != ESP_OK) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    uint8_t buf[256];
+    uint32_t crc = 0; /* the ROM function inverts on entry and exit: chaining equals zlib.crc32 */
+    for (size_t off = 0; off < size;) {
+        const size_t n = MIN(sizeof(buf), size - off);
+        ESP_RETURN_ON_ERROR(
+            esp_flash_read(esp_flash_default_chip, buf, (uint32_t)(addr + off), (uint32_t)n), TAG,
+            "read");
+        crc = esp_rom_crc32_le(crc, buf, (uint32_t)n);
+        off += n;
+    }
+    if (crc != crc32) {
+        ESP_LOGW(TAG, "core dump kept: CRC %08lx, caller's %08lx", (unsigned long)crc,
+                 (unsigned long)crc32);
+        return ESP_ERR_INVALID_CRC;
+    }
+    ESP_RETURN_ON_ERROR(esp_core_dump_image_erase(), TAG, "erase");
+    xSemaphoreTake(s.lock, portMAX_DELAY);
+    s.info.dump = false;
+    s.info.task[0] = '\0';
+    s.info.elf[0] = '\0';
+    s.info.pc = 0;
+    s.info.bt_n = 0;
+    s.info.bt_corrupted = false;
+    memset(s.info.bt, 0, sizeof(s.info.bt));
+    xSemaphoreGive(s.lock);
+    ESP_LOGI(TAG, "core dump erased (CRC %08lx)", (unsigned long)crc);
+    return ESP_OK;
+#else
+    (void)crc32;
+    return ESP_ERR_NOT_FOUND;
+#endif
+}

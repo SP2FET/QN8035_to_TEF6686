@@ -4,6 +4,27 @@ The firmware uses Semantic Versioning. Development releases use 0.x versions and
 change interfaces between minor versions. Versions and Git tags are recorded here;
 target builds and host tests do not establish hardware compatibility.
 
+## 0.6.4 - 2026-10-27
+
+The ride of 2026-10-27 lost Wi-Fi for two minutes without a reset: the laptop stopped
+acknowledging, httpd's sends timed out and it closed those connections gracefully, so lwIP kept
+their unsent data for minutes. Free heap fell to 308 bytes; the access point dropped the laptop
+and refused two reconnects (key handshake) until the data expired. The core dump that ride
+fetched was 0.4.0's of 2026-10-26, kept in flash since.
+
+### Fixed
+
+- A connection whose send failed is reset when httpd closes it (zero linger), freeing its
+  unsent data at once; normal closes stay graceful. `web.send_resets` in `/api/status`.
+- Less heap per stalled connection: lwIP send buffer 2 × MSS (2880 bytes, was 5760), at most 16
+  Wi-Fi TX buffers (was 32).
+
+### Added
+
+- `POST /api/coredump/erase?crc=…` erases the stored core dump if the CRC-32 of the caller's
+  copy matches. The page's download saves the dump as `coredump-<elf>-<pc>.bin` and then erases
+  it; `scripts/ride_log.py` erases it after saving it in the ride folder.
+
 ## 0.6.3 - 2026-10-27
 
 A page load over the access point sometimes stalled and the phone dropped the connection; it then

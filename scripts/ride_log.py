@@ -14,7 +14,8 @@ Writes into the output directory (default rides/<YYYYmmdd-HHMMSS> under the repo
                  other text = note, q = quit (or Ctrl+C)
   tuning.jsonl   the reception tuning (GET /api/tuning) at the start, after a restart and
                  whenever it changed (checked every 5 min)
-  coredump-*.bin a core dump the device holds (GET /api/coredump), fetched once each
+  coredump-*.bin a core dump the device holds (GET /api/coredump), fetched once each; once the
+                 file is saved the device erases it (POST /api/coredump/erase, CRC-checked)
 
 Problems the device reports are printed as they happen: TUNER lines from the trace (the tuner
 unavailable, ready again, a failed boot) and HEALTH lines from /api/status (I/O errors and
@@ -34,7 +35,9 @@ import struct
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
+import zlib
 from datetime import datetime
 from pathlib import Path
 
@@ -347,7 +350,17 @@ def fetch_coredump(host, directory, key):
         data = r.read()
     name = "coredump-" + re.sub(r"[^0-9A-Za-z_-]", "_", key) + ".bin"
     (Path(directory) / name).write_bytes(data)
-    return name
+    crc = zlib.crc32(data) & 0xFFFFFFFF
+    req = urllib.request.Request(f"http://{host}/api/coredump/erase?crc={crc:08x}", data=b"",
+                                 method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10.0):
+            pass
+        return name, "erased on the device"
+    except urllib.error.HTTPError as e:
+        return name, f"kept on the device (HTTP {e.code})"
+    except Exception as e:  # noqa: BLE001 - the saved file stays
+        return name, f"kept on the device ({e})"
 
 
 def format_health(h):
@@ -493,7 +506,8 @@ def status_thread(host, out, stop, period, coredump=True):
         if key and key not in dumps:
             dumps.add(key)
             try:
-                out.say(f"HEALTH core dump saved as {fetch_coredump(host, out.dir, key)}")
+                name, erase = fetch_coredump(host, out.dir, key)
+                out.say(f"HEALTH core dump saved as {name}, {erase}")
             except Exception as e:  # noqa: BLE001
                 out.say(f"core dump not saved ({e}); GET /api/coredump after the ride")
 

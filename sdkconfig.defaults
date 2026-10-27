@@ -59,6 +59,11 @@ CONFIG_ESP_WIFI_IRAM_OPT=n
 CONFIG_ESP_WIFI_RX_IRAM_OPT=n
 # Abortive close (RST, frees the unsent data) for connections of a client that left: web_ui.c
 CONFIG_LWIP_SO_LINGER=y
+# Bound the heap a stalled client can hold: per connection 2 x MSS of unsent data (lwIP's
+# minimum) instead of 4, and at most 16 frames copied for Wi-Fi to send (default 32). A laptop
+# that stopped acknowledging held enough of both to leave 308 bytes free (ride 2026-10-27).
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=2880
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
 
 # --- Web UI ---
 CONFIG_HTTPD_WS_SUPPORT=y

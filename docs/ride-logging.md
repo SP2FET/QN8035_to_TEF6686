@@ -78,7 +78,7 @@ Send the whole `rides/<date-time>/` folder (or just `report.html` and the CSVs) 
 | `console.log` | the device log, PC time stamps |
 | `marks.jsonl` | marks, ratings, notes |
 | `tuning.jsonl` | the reception tuning at the start, after a restart and after every change |
-| `coredump-*.bin` | a core dump the device held, fetched once (decode with that build's ELF) |
+| `coredump-*.bin` | a core dump the device held, fetched once and then erased on the device (CRC-checked; decode with that build's ELF) |
 | `health.csv` | (report) the device's health counters at every status poll |
 
 The record format is described in `scripts/ride_log.py` and in `radio_trace_t`

@@ -468,8 +468,30 @@ function renderSys(y){
   d.textContent=!y?'—':y.dump?'':'none';
   if(!y||!y.dump)return;
   const c=y.dump,a=document.createElement('a');
+  dumpKey=c.elf?'coredump-'+(c.elf+'-'+c.pc).replace(/[^0-9A-Za-z_-]/g,'_')+'.bin':'coredump.bin';
   d.append('task '+c.task+', PC '+c.pc+(c.bt.length?', backtrace '+c.bt.join(' '):'')+(c.corrupted?' (corrupted)':'')+', build '+c.elf+' · ');
-  a.href='/api/coredump';a.download='coredump.bin';a.textContent='download';d.appendChild(a);
+  a.href='#';a.onclick=e=>{e.preventDefault();saveDump()};a.textContent='download';d.appendChild(a);
+  if(dumpMsg)d.append(' · '+dumpMsg);
+}
+// ---- crash dump: save it, then let the device erase it when the CRC matches ----
+let dumpBusy=false,dumpMsg='',dumpKey='';
+const crcTab=(()=>{const t=[];for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=c&1?0xEDB88320^(c>>>1):c>>>1;t.push(c>>>0)}return t})();
+function crc32(b){let c=0xFFFFFFFF;for(let i=0;i<b.length;i++)c=crcTab[(c^b[i])&255]^(c>>>8);return(c^0xFFFFFFFF)>>>0}
+async function saveDump(){
+  if(dumpBusy)return;
+  dumpBusy=true;dumpMsg='downloading…';
+  try{
+    const r=await fetch('/api/coredump',{cache:'no-store'});
+    if(!r.ok){dumpMsg='download failed (HTTP '+r.status+')';return}
+    const b=new Uint8Array(await r.arrayBuffer()),u=URL.createObjectURL(new Blob([b])),a=document.createElement('a');
+    a.href=u;a.download=dumpKey||'coredump.bin';
+    document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),10000);
+    dumpMsg='saved, erasing…';
+    const e=await fetch('/api/coredump/erase?crc='+crc32(b).toString(16).padStart(8,'0'),{method:'POST'});
+    dumpMsg=e.ok?'saved, erased on the device':e.status==409?'saved, kept on the device: CRC mismatch'
+      :'saved, kept on the device (HTTP '+e.status+')';
+  }catch(x){dumpMsg='failed: '+x}
+  finally{dumpBusy=false;toast(dumpMsg);poll()}
 }
 const fmtDur=n=>n<120?n+' s':Math.round(n/60)+' min';
 function renderAf(a,am){

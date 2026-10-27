@@ -88,6 +88,13 @@ const char *sysmon_reset_name(int reason);
 esp_err_t sysmon_dump_size(size_t *size);
 esp_err_t sysmon_dump_read(size_t offset, void *buf, size_t len);
 
+/** Erases the stored core dump only if crc32 is the CRC-32 (IEEE, as Python's zlib.crc32) of all
+ * its bytes, so the caller proves it holds an intact copy. ESP_ERR_NOT_FOUND: none stored;
+ * ESP_ERR_INVALID_CRC: another dump or an incomplete copy (kept). Erasing the 64 kB coredump
+ * partition turns the flash cache off for up to a few hundred ms: rare and deliberate, like the
+ * tuning Save. */
+esp_err_t sysmon_dump_erase(uint32_t crc32);
+
 #ifdef __cplusplus
 }
 #endif

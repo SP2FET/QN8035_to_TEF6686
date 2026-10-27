@@ -1,5 +1,6 @@
 #include "web_ui.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -10,6 +11,7 @@
 #include <string.h>
 #include <sys/param.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 #include "esp_app_desc.h"
 #include "esp_check.h"
@@ -68,6 +70,7 @@ extern const char index_html_end[] asm("_binary_index_html_end");
 
 static httpd_handle_t s_server;
 static uint32_t s_conn_resets; /* httpd task only */
+static uint32_t s_send_resets; /* httpd task only */
 
 /*
  * Log pump. Everything before s_pump_pos has been broadcast (to whoever was
@@ -385,9 +388,9 @@ static esp_err_t status_get(httpd_req_t *req)
     } else {
         jb_printf(&j, "null");
     }
-    jb_printf(&j, "},\"web\":{\"conn_resets\":%" PRIu32 ",\"select_errors\":%" PRIu32
-                  ",\"select_errno\":%d},", s_conn_resets, s_sel.count,
-              s_sel.err);
+    jb_printf(&j, "},\"web\":{\"conn_resets\":%" PRIu32 ",\"send_resets\":%" PRIu32
+                  ",\"select_errors\":%" PRIu32 ",\"select_errno\":%d},", s_conn_resets,
+              s_send_resets, s_sel.count, s_sel.err);
 
     jb_printf(&j, "\"tef\":{\"ready\":%s,\"op_status\":%d,\"state\":", b(st->tef_ready),
               (int)st->op_state);
@@ -980,6 +983,30 @@ static esp_err_t coredump_get(httpd_req_t *req)
     return httpd_resp_send_chunk(req, NULL, 0);
 }
 
+/* crc = 1..8 hex digits: the CRC-32 of the downloaded file. */
+static esp_err_t coredump_erase_post(httpd_req_t *req)
+{
+    char val[12];
+    char *end;
+    if (!get_param(req, "crc", val, sizeof(val)) || !isxdigit((unsigned char)val[0]) ||
+        strlen(val) > 8) {
+        return reply(req, ESP_ERR_INVALID_ARG);
+    }
+    const unsigned long crc = strtoul(val, &end, 16);
+    if (*end != '\0') {
+        return reply(req, ESP_ERR_INVALID_ARG);
+    }
+    const esp_err_t err = sysmon_dump_erase((uint32_t)crc);
+    if (err == ESP_ERR_NOT_FOUND) {
+        return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no core dump stored");
+    }
+    if (err == ESP_ERR_INVALID_CRC) { /* httpd_err_code_t has no 409 */
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "CRC does not match the stored core dump: kept");
+    }
+    return reply(req, err);
+}
+
 static esp_err_t index_get(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
@@ -1221,6 +1248,77 @@ void web_ui_client_left(uint32_t ip)
     }
 }
 
+/*
+ * A send that failed (client out of range or not acknowledging; httpd's 5 s send timeout) makes
+ * httpd drop the session. A graceful close would leave lwIP retransmitting the unsent data for
+ * minutes, holding heap Wi-Fi needs (ride 2026-10-27: 308 bytes free, the AP dropped the laptop).
+ * A zero linger makes close() send RST and free it at once. Normal closes stay graceful, so a
+ * page load is never cut short. All sends run in the httpd task.
+ */
+static bool s_send_failed[CONFIG_LWIP_MAX_SOCKETS];
+
+static bool *send_failed_slot(int fd)
+{
+    const int i = fd - LWIP_SOCKET_OFFSET;
+    return (i >= 0 && i < CONFIG_LWIP_MAX_SOCKETS) ? &s_send_failed[i] : NULL;
+}
+
+/* httpd_default_send and httpd_sock_err (httpd_txrx.c) plus the mark */
+static int session_send(httpd_handle_t hd, int fd, const char *buf, size_t len, int flags)
+{
+    (void)hd;
+    if (buf == NULL) {
+        return HTTPD_SOCK_ERR_INVALID;
+    }
+    const int ret = send(fd, buf, len, flags);
+    if (ret >= 0) {
+        return ret;
+    }
+    const int err = errno;
+    ESP_LOGW(TAG, "send on connection %d: %s", fd, strerror(err));
+    bool *mark = send_failed_slot(fd);
+    if (mark) {
+        *mark = true;
+    }
+    switch (err) {
+    case EAGAIN:
+    case EINTR:
+        return HTTPD_SOCK_ERR_TIMEOUT;
+    case EINVAL:
+    case EBADF:
+    case EFAULT:
+    case ENOTSOCK:
+        return HTTPD_SOCK_ERR_INVALID;
+    default:
+        return HTTPD_SOCK_ERR_FAIL;
+    }
+}
+
+static esp_err_t session_open(httpd_handle_t hd, int fd)
+{
+    bool *mark = send_failed_slot(fd);
+    if (mark) {
+        *mark = false;
+    }
+    return httpd_sess_set_send_override(hd, fd, session_send);
+}
+
+static void session_close(httpd_handle_t hd, int fd)
+{
+    (void)hd;
+    bool *mark = send_failed_slot(fd);
+    if (mark && *mark) {
+        *mark = false;
+        const struct linger now = {.l_onoff = 1, .l_linger = 0};
+        if (setsockopt(fd, SOL_SOCKET, SO_LINGER, &now, sizeof(now)) != 0) {
+            ESP_LOGW(TAG, "SO_LINGER: %s (CONFIG_LWIP_SO_LINGER off?)", strerror(errno));
+        }
+        s_send_resets++;
+        ESP_LOGI(TAG, "reset connection %d after a failed send", fd);
+    }
+    close(fd);
+}
+
 /* ---- httpd select() failures --------------------------------------------- */
 
 /*
@@ -1290,6 +1388,8 @@ esp_err_t web_ui_start(const web_ui_config_t *ui_cfg)
     cfg.max_uri_handlers = 32;
     cfg.lru_purge_enable = true;
     cfg.stack_size = 6144;
+    cfg.open_fn = session_open;
+    cfg.close_fn = session_close;
     ESP_RETURN_ON_ERROR(httpd_start(&s_server, &cfg), TAG, "httpd_start");
 
     const httpd_uri_t uris[] = {
@@ -1298,6 +1398,7 @@ esp_err_t web_ui_start(const web_ui_config_t *ui_cfg)
         {.uri = "/api/status", .method = HTTP_GET, .handler = status_get},
         {.uri = "/api/trace", .method = HTTP_GET, .handler = trace_get},
         {.uri = "/api/coredump", .method = HTTP_GET, .handler = coredump_get},
+        {.uri = "/api/coredump/erase", .method = HTTP_POST, .handler = coredump_erase_post},
         {.uri = "/api/tune", .method = HTTP_POST, .handler = tune_post},
         {.uri = "/api/step", .method = HTTP_POST, .handler = step_post},
         {.uri = "/api/seek", .method = HTTP_POST, .handler = seek_post},

@@ -84,8 +84,10 @@
  *                 history [{"reason","n","up_s","wall"}] newest first: n = resets since that
  *                 power-on, up_s = how long the run before lasted, wall = its UTC end (RDS
  *                 clock) or null; dump null or {"task","elf","pc","bt":[hex],"corrupted"}
- *   "web"         {"conn_resets","select_errors","select_errno"}: connections reset because
- *                 their client left the access point (web_ui_client_left); failed select()
+ *   "web"         {"conn_resets","send_resets","select_errors","select_errno"}: connections
+ *                 reset because their client left the access point (web_ui_client_left);
+ *                 send_resets: connections reset after a failed send, freeing their unsent
+ *                 data (a graceful close would keep it for minutes); failed select()
  *                 calls in the httpd task since boot and the errno of the last (0 = none);
  *                 httpd backs off after one
  *   GET  /api/trace?since=N   the radio's trace from sequence number N on (radio_trace_t), for
@@ -94,7 +96,11 @@
  *                        Record kinds "k": q quality, a AF_Update, e AF step, h tuner health
  *                        ("ev": lost, ready, boot_failed; "why", "io_err", "retries", "rec")
  *   GET  /api/coredump   the stored core dump, raw (espcoredump.py info_corefile -t raw); 404 if
- *                        none. A new crash overwrites it
+ *                        none. A new crash overwrites it; the page and scripts/ride_log.py
+ *                        erase it after saving it
+ *   POST /api/coredump/erase?crc=XXXXXXXX   CRC-32 (zlib.crc32) of the downloaded file, in hex;
+ *                        erases only if it matches the stored dump. 404 none stored, 409 mismatch
+ *                        (kept), 400 bad crc
  *
  * Memory channels (radio_mem; stand-alone build, else 503). N is the channel number 1..40:
  *   GET  /api/presets                  {"enabled","rev","max","slots":[{slot,band,khz,name}]}

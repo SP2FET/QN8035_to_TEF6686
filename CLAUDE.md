@@ -84,7 +84,8 @@ python scripts/ride_report.py rides/<dir>           # its HTML report and CSVs
   so the head unit keeps its channel and mute state. Unexpected resets are kept in NVS (reason,
   run time, RDS clock). Decode a dump: `GET /api/coredump`, then `esp-coredump info_corefile -t
   raw -c coredump.bin builds/<id>.elf` (ESP-IDF shell; `python scripts/elf_archive.py --find
-  <id>` resolves the dump's 9-character id). SDK workarounds:
+  <id>` resolves the dump's 9-character id). Saving a dump from the page or with `ride_log.py`
+  erases it on the device (CRC-checked), so a stored dump is always new. SDK workarounds:
   `cmake/i2c_deadline.cmake` compiles a checked build-local I2C source copy that bounds
   ESP-IDF 5.4.0's synchronous bus-busy wait after NACK (installed SDK unchanged);
   its httpd selects again at once after a failed select() (`web_ui.c` wraps
@@ -193,13 +194,17 @@ stamps show uptime until then, the station's local time after.
 - **Memory:** no heap allocation in steady state (except the web log chunks, at most 4 queued to
   httpd: its control socket drops a fifth unseen, and the chunk would leak). The S2's
   static DRAM segment is full (0.4.0 overflowed it by 3.5 kB): allocate large buffers once at
-  start from the heap and degrade gracefully if that fails.
+  start from the heap and degrade gracefully if that fails. A stalled Wi-Fi client must not hold
+  the heap: lwIP send buffer 2 × MSS, 16 Wi-Fi TX buffers, and connections whose send failed or
+  whose client left are reset (zero linger).
 - **Flash writes disable the cache** for up to tens of ms. The QN8035 receive service, model
   and lookup tables use IRAM/DRAM; `I2C_ISR_IRAM_SAFE` is required. Run
   `scripts/check_qn_iram.py` against the linked car ELF after changes to that path. This checks
   normal service placement, excluding SDK fatal assertion formatting, and does not establish
   bus timing during flash erase. Keep writes out of the emulation build (`BRIDGE_MEMORY` depends on
-  `!BRIDGE_QN_EMU_ENABLE`), except: the tuning Save button (rare, deliberate); `sysmon`'s reset
+  `!BRIDGE_QN_EMU_ENABLE`), except: the tuning Save button (rare, deliberate); the core dump
+  erase after a CRC-checked download (`POST /api/coredump/erase`, once per dump, 64 kB);
+  `sysmon`'s reset
   history (at boot, before the slave starts, ≤ 16 per power-on); `af_store` (one 36-byte record
   per changed channel, stable for 60 s, ≥ 30 s apart, ≤ 64 per power-on, 10 s after the last
   head-unit command).
