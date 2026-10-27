@@ -1,5 +1,7 @@
 #include "web_ui.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <math.h>
 #include <stdarg.h>
@@ -10,6 +12,7 @@
 
 #include "esp_app_desc.h"
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -50,7 +53,15 @@ extern const char index_html_end[] asm("_binary_index_html_end");
 #define LOG_CHUNK       1024
 #define MAX_CLIENTS     8
 #define PUMP_PERIOD_MS  100
-#define PUMP_MAX_CHUNKS 4 /* per period, bounds memory queued to httpd */
+#define PUMP_MAX_CHUNKS 4 /* per period */
+/* Chunks queued to httpd and not yet sent. httpd_queue_work posts to a UDP control socket
+ * whose mailbox (LWIP_UDP_RECVMBOX_SIZE, 6) drops what does not fit without an error, and a
+ * dropped chunk is never freed: stay below it. */
+#define PUMP_MAX_QUEUED 4
+/* Back-off of the httpd task after a failed select(), doubling while it keeps failing. */
+#define SELECT_BACKOFF_MIN_MS 50
+#define SELECT_BACKOFF_MAX_MS 1000
+#define SELECT_LOG_MS         10000
 
 static httpd_handle_t s_server;
 
@@ -63,6 +74,17 @@ static httpd_handle_t s_server;
 static uint32_t s_pump_pos;
 static volatile bool s_history_wanted;
 static int s_pending[MAX_CLIENTS]; /* httpd task only; 0 = empty slot */
+static volatile uint32_t s_chunks_queued; /* written by log_pump only */
+static volatile uint32_t s_chunks_done;   /* written by the httpd task only */
+
+/* Failed select() calls in the httpd task; status_get reads them in the same task. */
+static struct {
+    uint32_t count; /* since boot */
+    int err;        /* errno of the last one */
+    uint32_t run;   /* in the current run of failures */
+    uint32_t backoff_ms;
+    int64_t run_start_us, last_us, logged_us;
+} s_sel;
 
 typedef struct {
     uint32_t start;
@@ -310,7 +332,8 @@ static esp_err_t status_get(httpd_req_t *req)
     } else {
         jb_printf(&j, "null");
     }
-    jb_printf(&j, "},");
+    jb_printf(&j, "},\"web\":{\"select_errors\":%" PRIu32 ",\"select_errno\":%d},", s_sel.count,
+              s_sel.err);
 
     jb_printf(&j, "\"tef\":{\"ready\":%s,\"op_status\":%d,\"state\":", b(st.tef_ready),
               (int)st.op_state);
@@ -883,7 +906,10 @@ static esp_err_t favicon_get(httpd_req_t *req)
 
 /* ---- WebSocket log console ---------------------------------------------- */
 
-static void ws_send(int fd, const char *p, size_t n)
+/* A client that stopped acknowledging (out of Wi-Fi range) makes every send block the httpd task
+ * for send_wait_timeout (5 s) until TCP gives up minutes later, and httpd keeps the socket after
+ * a failed send: close it. */
+static bool ws_send(int fd, const char *p, size_t n)
 {
     httpd_ws_frame_t f = {
         .final = true,
@@ -891,17 +917,24 @@ static void ws_send(int fd, const char *p, size_t n)
         .payload = (uint8_t *)p,
         .len = n,
     };
-    httpd_ws_send_frame_async(s_server, fd, &f); /* httpd drops broken sockets */
+    if (httpd_ws_send_frame_async(s_server, fd, &f) == ESP_OK) {
+        return true;
+    }
+    httpd_sess_trigger_close(s_server, fd);
+    return false;
 }
 
-static void ws_send_history(int fd, uint32_t upto)
+static bool ws_send_history(int fd, uint32_t upto)
 {
     static char buf[LOG_CHUNK]; /* httpd task only */
     uint32_t pos = log_stream_oldest();
     size_t n;
     while ((n = log_stream_read(&pos, upto, buf, sizeof(buf))) > 0) {
-        ws_send(fd, buf, n);
+        if (!ws_send(fd, buf, n)) {
+            return false;
+        }
     }
+    return true;
 }
 
 static bool take_pending(int fd)
@@ -926,8 +959,8 @@ static void broadcast_work(void *arg)
             if (httpd_ws_get_fd_info(s_server, fds[i]) != HTTPD_WS_CLIENT_WEBSOCKET) {
                 continue;
             }
-            if (take_pending(fds[i])) {
-                ws_send_history(fds[i], c->start);
+            if (take_pending(fds[i]) && !ws_send_history(fds[i], c->start)) {
+                continue;
             }
             if (c->len) {
                 ws_send(fds[i], c->data, c->len);
@@ -936,6 +969,7 @@ static void broadcast_work(void *arg)
     }
     memset(s_pending, 0, sizeof(s_pending)); /* leftovers are closed sockets */
     free(c);
+    s_chunks_done++;
 }
 
 static esp_err_t ws_handler(httpd_req_t *req)
@@ -973,6 +1007,9 @@ static void log_pump_task(void *arg)
             if (head == s_pump_pos && !s_history_wanted) {
                 break;
             }
+            if (s_chunks_queued - s_chunks_done >= PUMP_MAX_QUEUED) {
+                break; /* httpd is behind; the ring keeps the lines (the oldest may be lost) */
+            }
             const size_t want = MIN((size_t)(head - s_pump_pos), (size_t)LOG_CHUNK);
             log_chunk_t *c = malloc(sizeof(*c) + want);
             if (c == NULL) {
@@ -983,12 +1020,72 @@ static void log_pump_task(void *arg)
             c->start = pos - (uint32_t)c->len;
             s_pump_pos = pos;
             s_history_wanted = false;
+            s_chunks_queued++; /* before: httpd may run the work and count it done at once */
             if (httpd_queue_work(s_server, broadcast_work, c) != ESP_OK) {
+                s_chunks_queued--;
                 free(c);
                 break;
             }
         }
     }
+}
+
+/* ---- httpd select() failures --------------------------------------------- */
+
+/*
+ * ESP-IDF 5.4.0's httpd_server() answers a failed select() only with httpd_sess_delete_invalid()
+ * and selects again at once. While the error lasts (ENOMEM: esp_vfs_select allocates on every
+ * call) the httpd task spins at priority 5, starves the idle task, and the task watchdog resets
+ * the board (core dumps of 2026-10-26). It is that function's only caller, so the link wraps it
+ * (CMakeLists.txt) to pause there. Check this when ESP-IDF changes.
+ */
+void __real_httpd_sess_delete_invalid(httpd_handle_t hd);
+void __wrap_httpd_sess_delete_invalid(httpd_handle_t hd);
+
+static bool client_closed_under_httpd(httpd_handle_t hd)
+{
+    size_t n = MAX_CLIENTS;
+    int fds[MAX_CLIENTS];
+    if (httpd_get_client_list(hd, &n, fds) != ESP_OK) {
+        return true; /* let httpd look */
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (fcntl(fds[i], F_GETFD) == -1 && errno == EBADF) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void __wrap_httpd_sess_delete_invalid(httpd_handle_t hd)
+{
+    const int err = errno; /* of select(); httpd has logged it at error level */
+    const int64_t now = esp_timer_get_time();
+    if (s_sel.run == 0 || now - s_sel.last_us > 2000LL * SELECT_BACKOFF_MAX_MS) {
+        s_sel.run = 0;
+        s_sel.run_start_us = now;
+        s_sel.logged_us = now - 1000LL * SELECT_LOG_MS;
+        s_sel.backoff_ms = SELECT_BACKOFF_MIN_MS;
+    } else {
+        s_sel.backoff_ms = MIN(2 * s_sel.backoff_ms, (uint32_t)SELECT_BACKOFF_MAX_MS);
+    }
+    s_sel.count++;
+    s_sel.run++;
+    s_sel.err = err;
+    s_sel.last_us = now;
+    if (now - s_sel.logged_us >= 1000LL * SELECT_LOG_MS) {
+        s_sel.logged_us = now;
+        ESP_LOGE(TAG, "httpd select() fails: %s, %" PRIu32 "x in %" PRId64 " s; heap %" PRIu32
+                 " free, largest block %u, %" PRIu32 " log chunks queued",
+                 strerror(err), s_sel.run, (now - s_sel.run_start_us) / 1000000,
+                 esp_get_free_heap_size(), heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT),
+                 s_chunks_queued - s_chunks_done);
+    }
+    /* httpd's scan also reports every free slot as "invalid socket -1": run it only with work. */
+    if (client_closed_under_httpd(hd)) {
+        __real_httpd_sess_delete_invalid(hd);
+    }
+    vTaskDelay(pdMS_TO_TICKS(s_sel.backoff_ms));
 }
 
 /* ---- server -------------------------------------------------------------- */

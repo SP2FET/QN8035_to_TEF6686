@@ -83,8 +83,12 @@ python scripts/ride_report.py rides/<dir>           # its HTML report and CSVs
   the radio settings and the QN8035 model in RTC memory (500 ms, two CRC slots, same build only),
   so the head unit keeps its channel and mute state. Unexpected resets are kept in NVS (reason,
   run time, RDS clock). Decode a dump: `GET /api/coredump`, then `esp-coredump info_corefile -t
-  raw -c coredump.bin .pio/build/lolin_s2_mini/firmware.elf` (ESP-IDF shell). Known hang:
-  ESP-IDF 5.4.0's I2C master spins without a deadline while the bus stays busy after a NACK.
+  raw -c coredump.bin builds/<id>.elf` (ESP-IDF shell; `python scripts/elf_archive.py --find
+  <id>` resolves the dump's 9-character id). Known hangs:
+  ESP-IDF 5.4.0's I2C master spins without a deadline while the bus stays busy after a NACK;
+  its httpd selects again at once after a failed select() (`web_ui.c` wraps
+  `httpd_sess_delete_invalid` to back off, `-Wl,--wrap`). A watchdog dump's PC is wherever the
+  running task happened to be, not a fault.
 - **Web OTA.** `scripts/ota_upload.py [--info] firmware.bin` (what `-t ota` runs) POSTs to
   `/api/ota` and waits for the restart and the confirmation. Host `$OTA_HOST`, else
   `custom_ota_host`; password `$OTA_PASSWORD` (`BRIDGE_OTA_PASSWORD`), never in the repo. The new
@@ -93,7 +97,10 @@ python scripts/ride_report.py rides/<dir>           # its HTML report and CSVs
   USB always boots `ota_0` and stays the recovery path. httpd serves nothing else during an
   upload (10–20 s).
 - **Build id:** `fw.elf_sha256` in `/api/status` is the first 8 bytes of the ELF SHA-256 as 16
-  hex characters (0.1.0 reported a 9-character form; the uploader accepts both).
+  hex characters (0.1.0 reported a 9-character form; the uploader accepts both). Every flash
+  keeps its ELF in `builds/<id>.elf` (gitignored, `scripts/elf_archive.py`): a rebuild of the
+  same commit can link differently, so a dump decodes only with the flashed ELF. "built" in the
+  app descriptor changes only when the version does.
 
 ## Architecture
 
@@ -178,7 +185,8 @@ stamps show uptime until then, the station's local time after.
   (`(int32_t)(now - t) >= 0`). Watched tasks reset the watchdog every loop and wait ≤ 1 s.
 - **Units:** keep the chip's at the API boundary and name them (TEF: 0.1 dBµV, 0.1 %, 0.1 kHz, FM
   in 10 kHz steps; QN8035 CH: 50 kHz steps from 60 MHz; `radio`: kHz).
-- **Memory:** no heap allocation in steady state (except the bounded web log chunks). The S2's
+- **Memory:** no heap allocation in steady state (except the web log chunks, at most 4 queued to
+  httpd: its control socket drops a fifth unseen, and the chunk would leak). The S2's
   static DRAM segment is full (0.4.0 overflowed it by 3.5 kB): allocate large buffers once at
   start from the heap and degrade gracefully if that fails.
 - **Flash writes stall the CPU** (single core, cache off) for up to tens of ms, and the QN8035

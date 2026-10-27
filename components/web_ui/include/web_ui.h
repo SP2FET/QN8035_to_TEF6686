@@ -68,6 +68,8 @@
  *                 history [{"reason","n","up_s","wall"}] newest first: n = resets since that
  *                 power-on, up_s = how long the run before lasted, wall = its UTC end (RDS
  *                 clock) or null; dump null or {"task","elf","pc","bt":[hex],"corrupted"}
+ *   "web"         {"select_errors","select_errno"}: failed select() calls in the httpd task
+ *                 since boot and the errno of the last (0 = none); httpd backs off after one
  *   GET  /api/trace?since=N   the radio's trace from sequence number N on (radio_trace_t), for
  *                        a PC recording a ride (scripts/ride_log.py): {"boot","now","first",
  *                        "lost","r":[records],"next"}. Chip units. boot changes with every start

@@ -21,6 +21,8 @@ import struct
 import sys
 import time
 
+import elf_archive
+
 DEFAULT_HOST = "192.168.4.1"
 DESC_OFFSET = 24 + 8          # esp_image_header_t + first esp_image_segment_header_t
 DESC_MAGIC = 0xABCD5432       # ESP_APP_DESC_MAGIC_WORD
@@ -176,6 +178,21 @@ def wait_for_confirmation(host, want_sha):
     raise OtaError(f"still '{state}' after {CONFIRM_TIMEOUT_S} s: check the log (web UI)")
 
 
+def archive_elf(image_path, want_sha):
+    """Keep the ELF next to the image when it is the build the device now runs."""
+    elf = os.path.join(os.path.dirname(os.path.abspath(image_path)), "firmware.elf")
+    try:
+        if not os.path.exists(elf):
+            print("  note: no firmware.elf next to the image; ELF not archived")
+        elif elf_archive.build_id(elf) != want_sha:
+            print("  note: firmware.elf is another build than the image; ELF not archived")
+        else:
+            bid = elf_archive.archive(elf, elf_archive.DEFAULT_DEST, "ota")
+            print(f"  ELF archived as build {bid}")
+    except Exception as e:  # an archive problem must not fail a finished upload
+        print(f"  WARNING: ELF not archived: {e}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("image", help="firmware.bin (the app image, not the merged flash image)")
@@ -219,6 +236,7 @@ def main():
         if args.no_wait:
             return 0
         wait_for_new_build(args.host, img["elf_sha256"], st.get("uptime_s", 1 << 30))
+        archive_elf(args.image, img["elf_sha256"])
         wait_for_confirmation(args.host, img["elf_sha256"])
         print("OTA update done.")
         return 0

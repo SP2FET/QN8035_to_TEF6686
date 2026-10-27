@@ -1,8 +1,10 @@
 """Run with: python -B -m unittest discover -s test/scripts -v"""
 import contextlib
 import io
+import os
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -73,6 +75,39 @@ class OtaBuildTests(unittest.TestCase):
                 patch.object(ota, "upload") as upload:
             self.assertEqual(0, ota.main())
         upload.assert_not_called()
+
+
+class ArchiveStepTests(unittest.TestCase):
+    def run_step(self, elf_bytes, want_sha, side_effect=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            if elf_bytes is not None:
+                with open(os.path.join(tmp, "firmware.elf"), "wb") as f:
+                    f.write(elf_bytes)
+            out = io.StringIO()
+            with patch.object(ota.elf_archive, "archive", side_effect=side_effect,
+                              return_value="id") as arch,                     contextlib.redirect_stdout(out):
+                ota.archive_elf(os.path.join(tmp, "firmware.bin"), want_sha)
+            return arch, out.getvalue()
+
+    def test_matching_elf_is_archived(self):
+        elf = b"elf"
+        sha = ota.elf_archive.hashlib.sha256(elf).hexdigest()[:16]
+        arch, _ = self.run_step(elf, sha)
+        arch.assert_called_once()
+        self.assertEqual("ota", arch.call_args[0][2])
+
+    def test_other_or_missing_elf_is_skipped_with_a_note(self):
+        for elf in (b"elf", None):
+            with self.subTest(elf=elf):
+                arch, out = self.run_step(elf, WANT_SHA)
+                arch.assert_not_called()
+                self.assertIn("note:", out)
+
+    def test_archive_error_does_not_raise(self):
+        elf = b"elf"
+        sha = ota.elf_archive.hashlib.sha256(elf).hexdigest()[:16]
+        arch, out = self.run_step(elf, sha, side_effect=OSError("disk full"))
+        self.assertIn("WARNING", out)
 
 
 if __name__ == "__main__":

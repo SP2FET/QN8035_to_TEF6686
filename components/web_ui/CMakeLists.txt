@@ -6,3 +6,5 @@ idf_component_register(
                   esp_hw_support
     EMBED_TXTFILES "www/index.html"
 )
+# httpd's only reaction to a failed select(); web_ui.c adds a back-off (ESP-IDF 5.4.0).
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=httpd_sess_delete_invalid")

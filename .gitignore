@@ -15,3 +15,5 @@ docs/doxygen/
 captures/*.csv
 # Ride recordings (scripts/ride_log.py)
 rides/
+# ELF archive of flashed builds, for core dumps (scripts/elf_archive.py)
+builds/

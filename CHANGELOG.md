@@ -4,6 +4,29 @@ The firmware uses Semantic Versioning. Development releases use 0.x versions and
 change interfaces between minor versions. Versions and Git tags are recorded here;
 target builds and host tests do not establish hardware compatibility.
 
+## 0.5.2 - 2026-10-27
+
+The task watchdog reset the board with the httpd task running (twice before the 2026-10-26 ride,
+once after): ESP-IDF 5.4.0's httpd selects again at once after a failed select(), so while the
+error lasts it starves the idle task. The likely cause was an exhausted heap (select() allocates):
+log chunks queued to httpd were lost and never freed when its control socket's mailbox was full,
+which happens while a WebSocket client out of range blocks httpd for 5 s per frame.
+
+### Fixed
+
+- After a failed select() httpd waits 50 ms, doubling to 1 s while it keeps failing, and logs the
+  errno, free heap and queued log chunks every 10 s. Web: `web.select_errors`, `web.select_errno`.
+- At most 4 log chunks are queued to httpd (below its control socket's 6-entry mailbox); the log
+  ring keeps the rest.
+- A WebSocket client whose send fails is closed instead of blocking every later frame.
+
+### Added
+
+- The ELF of every flashed build is kept in `builds/<id>.elf` (gitignored) with a line in
+  `builds/index.tsv`: after a USB upload (`scripts/pio_archive.py`) and after `ota_upload.py` has
+  seen the device run it. `python scripts/elf_archive.py --find <9+ hex>` finds the ELF for a core
+  dump's build id.
+
 ## 0.5.1 - 2026-10-26
 
 ### Added
