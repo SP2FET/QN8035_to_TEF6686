@@ -188,9 +188,10 @@ typedef struct {
     uint8_t prog_n;
     /* Power-on: until RDS confirms a PI, the programme stored for the channel (pi_mem) is the one
      * wanted. Another PI on the tuned frequency starts a search for it (af_search) that gives up
-     * at resume_until. */
+     * at resume_until; so does another PI later on, for the programme followed. */
     bool resume;
     TickType_t resume_until;
+    bool origin_other; /* the trial began on a channel carrying another programme (af_search) */
 } af_run_t;
 
 typedef struct {
@@ -692,9 +693,11 @@ static void af_probation_fail(uint16_t pi);
 static void af_log_event(radio_af_ev_type_t type, int16_t score, int16_t cur, uint16_t pi,
                          uint32_t ban_s);
 
-/* Power-on: the channel carries another programme (pi) than the one stored for it. The stored one
- * is looked for on its other frequencies (af_set_other); the channel's is followed if it is not
- * found within AF_RESUME_MS (af_give_up). */
+/* The channel carries another programme (pi) than the one wanted: at power-on the one stored for
+ * it, later the one followed (a co-channel station decoded in a fade, or the channel changed
+ * programme). The wanted one is looked for on its other frequencies (af_set_other); the search
+ * ends when its PI comes back (af_follow_rds), and the channel's programme is followed if it is
+ * not found within AF_RESUME_MS (af_give_up). */
 static void af_search(uint16_t pi)
 {
     if (s.af.st.other) {
@@ -728,9 +731,12 @@ static void af_follow_rds(void)
     }
     const bool changed = s.af.pi_known && !af_pi_match(s.af.pi, r->pi, reg);
     if (changed) {
-        if (s.af.resume && s.af.pi_mem && !af_pi_match(s.af.pi, r->pi, reg)) {
+        /* No tune: a co-channel station decoded for a few groups in a fade (ride of 2026-10-27,
+         * 2 s of another PI) reset the AF table, its retry waits with it, and took the channel's
+         * AF memory slot. The programme followed is looked for instead and the table kept. */
+        if ((s.af.resume && s.af.pi_mem) || (!s.af.pi_mem && s.af.st.n > 0)) {
             af_search(r->pi);
-            return; /* nothing of the other programme is learned as the stored one's */
+            return; /* nothing of the other programme is learned as the wanted one's */
         }
         if (s.af.pi_mem) {
             ESP_LOGI(TAG, "AF: the station sends PI %04X, not %04X from memory", r->pi, s.af.pi);
@@ -952,6 +958,7 @@ static void af_trial_start(bool checked)
     s.af.t_start = xTaskGetTickCount();
     s.af.cur_score = s.af.st.trial_ref;
     const bool other = s.af.st.other;
+    s.af.origin_other = other;
     lock();
     if (other) {
         rds_reset(&s.status.rds); /* the other programme's PI must not count as the candidate's */
@@ -1079,7 +1086,7 @@ static void af_probation_fail(uint16_t pi)
     } else { /* the trial was won: undo the switch, with no dwell on a station that was poor */
         af_returned(&s.af.st, &p, s.af.cand, s.af.origin, now_ms());
         prog_remove(s.af.cand);
-        if (s.af.resume) {
+        if (s.af.resume || s.af.origin_other) {
             af_set_other(&s.af.st, true); /* back on the channel that carries another one */
         }
     }
@@ -1169,8 +1176,8 @@ static void trace_af_measure(uint32_t khz, const tef6686_quality_t *q, int16_t s
     unlock();
 }
 
-/* Power-on: the stored programme was not found. The channel's is followed (af_follow_rds takes
- * its PI with the next group) and learned for the channel. */
+/* The programme looked for (af_search) was not found. The channel's is followed (af_follow_rds
+ * takes its PI with the next group) and learned for the channel. */
 static void af_give_up(void)
 {
     const uint16_t want = s.af.pi;

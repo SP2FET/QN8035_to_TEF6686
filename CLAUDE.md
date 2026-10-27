@@ -296,8 +296,9 @@ details up there before changing protocol code.
    answers after Check (`af_pi`, 300 ms). Lessons so far: 38 of 47 muted PI checks on the first
    recorded ride got no PI (noise at a passable level, told apart by its AF_Update USN:
    `af_chk_usn`); a miscorrected block A once changed the PI and reset the AF state (a new PI
-   must now repeat); co-channel use of AFs is normal (expect
-   other-PI bans); deciding on single AF_Update peaks made it hop between transmitters. A build
+   must now repeat); a co-channel station decoded for 2 s did the same on 2026-10-27 (0.6.5:
+   another PI without a tune starts the programme search instead); co-channel use of AFs is
+   normal (expect other-PI bans); deciding on single AF_Update peaks made it hop between transmitters. A build
    that measured the tuned frequency with AF_Update and sent Set_Bandwidth's extended words made
    reception louder and noisier; which one did it is unknown: avoid both untested.
 6. Power-on (0.6.0): the head unit's first tune after it switches the receiver on wants the
@@ -311,7 +312,9 @@ details up there before changing protocol code.
    (AF card: PI FROM MEMORY; tuning row `af_mem` turns it off). Stored frequencies skip the muted
    PI check only while a transmitter of the programme lists them (within 10 min), or while no AF
    list arrived from RDS at all (then a far-away frequency carrying a local programme shows only
-   by its PI during the trial).
+   by its PI during the trial). Since 0.6.5 another PI later on (no tune) starts the same search
+   for the programme followed: check how often co-channel fades trigger it (events `search`) and
+   that the PI coming back ends it.
 7. Weak-signal defaults are the UM V102 power-up values, except its "field performance"
    suggestions since 0.4.3 (high cut, stereo and high blend noise/multipath triggers and timers,
    soft mute fast attack). Compare rated rides before (2026-10-26: power-up values) and after;

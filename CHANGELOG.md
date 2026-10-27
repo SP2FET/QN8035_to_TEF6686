@@ -4,6 +4,22 @@ The firmware uses Semantic Versioning. Development releases use 0.x versions and
 change interfaces between minor versions. Versions and Git tags are recorded here;
 target builds and host tests do not establish hardware compatibility.
 
+## 0.6.5 - 2026-10-27
+
+On the ride of 2026-10-27 another station on 95.6 MHz (PI 7089) was decoded for 2 s in a fade of
+RadioZET (PI 3205). AF following took it for a programme change: it rebuilt the AF table, losing
+the retry waits (107.1 MHz was tried again after 41 s instead of 120 s), and stored PI 7089 for
+the channel in the AF memory.
+
+### Fixed
+
+- Another PI on the tuned frequency without a tune starts the search for the programme followed
+  on its other frequencies, as at power-on (AF card: SEARCHING, events `search` and `gave_up`).
+  The AF table, its waits and the AF memory are kept, and the programme's PI coming back ends the
+  search; the channel's new programme is followed only if the old one is not found within 30 s.
+  A search tries the programme's frequencies at once, so a co-channel fade now switches sooner,
+  not later.
+
 ## 0.6.4 - 2026-10-27
 
 The ride of 2026-10-27 lost Wi-Fi for two minutes without a reset: the laptop stopped
