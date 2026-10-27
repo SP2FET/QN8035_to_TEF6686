@@ -16,7 +16,7 @@ Mini) replaces it with an **NXP TEF6686** tuner module:
 | QN8035 emulation: register model, I2C slave (no clock stretching), bridge | The car build (`sdkconfig.defaults`), first ride 2026-10-25. Model host-tested, replays the captured cold start byte for byte |
 | Radio service, RDS decoder, web UI, watchdog + core dump | Run in the car. Seek not checked |
 | Reception tuning table, Weak signal card | Live changes used in the car. Save and the extended bandwidth words not checked |
-| AF following 0.5.0: AF_Update ranks AFs (also while good) by level, muted PI checks also by USN, a trial on settled quality decides; normal and fast mode (`af_fast`) | First ride 2026-10-26 (0.4.0): switches, too many muted checks. 0.5.0 host-tested, **not yet on air** |
+| AF following 0.6.0: programme first (at power-on the stored programme is looked for if the head unit's channel carries another), the best known AF after a tune and while good (`af_up`); AF_Update ranks AFs by level, muted PI checks also by USN, a trial on settled quality decides; normal and fast mode (`af_fast`) | First ride 2026-10-26 (0.4.0): switches, too many muted checks. 0.5.0 and 0.6.0 host-tested, **not yet on air** |
 | AF memory per channel in NVS, ride recording (`/api/trace`, `scripts/ride_log.py`, `scripts/ride_report.py`) | Host-tested, **not yet on the device** |
 | Web OTA, reset history, station memory (stand-alone build only) | Build and host tests pass, **not yet on the device** (OTA needs one USB flash first) |
 
@@ -129,7 +129,7 @@ python scripts/ride_report.py rides/<dir>           # its HTML report and CSVs
 | `tef6686` | TEF668x driver: framing, read turnaround, boot, patch selection, typed commands; `patch/` blobs from `regen_patch.py` | esp_driver_i2c | no |
 | `radio` | Command queue; polls quality + DSP status (100 ms), RDS (20 ms), health (2 s); seek; AF following (AF_Update screen, PI check, trials); AF memory in RAM; trace ring; tuning at boot and live; recovery; status snapshot | tef6686, rds, af, tuning, trace | no |
 | `rds` | PI/PS/RT, AF list (0A), PTY/TP/TA, clock time (4A) | – | yes |
-| `af` | `af.h`: AF decisions (level screen, streaks, background ranking, normal/fast mode, trials, retry waits, dwell, trust, bans, the table following the transmitter's list, PI match with REG). `af_mem.h`: per channel (a frequency a PI was received on), its PI and its transmitter's AF list | – | yes |
+| `af` | `af.h`: AF decisions (level screen, streaks, background ranking, start phase, upgrades while good, the tuned frequency carrying another programme, normal/fast mode, trials, retry waits, dwell, trust, bans, the table following the transmitter's list, PI match with REG). `af_mem.h`: per channel (a frequency a PI was received on), its PI and its transmitter's AF list; a programme's known frequencies in the order to try them | – | yes |
 | `trace` | Sequence-numbered record ring for "since N" polling | – | yes |
 | `tuning` | Reception tuning table: one row per FM command word (UM V102 range and default) or host value (AF, seek) | – | yes |
 | `presets` | Memory channels: slots, UTF-8 names, versioned image | – | yes |
@@ -274,9 +274,11 @@ details up there before changing protocol code.
 3. Seek thresholds for the car antenna (web UI Seek group); the capture's 26 channels are a
    reference list. Behaviour after a failed scan (we leave CH at CH_STOP).
 4. Audio level match between the TEF DAC and the QN8035 outputs.
-5. AF on air (0.5.0, normal and fast mode, background ranking). Record rides
+5. AF on air (0.6.0: normal and fast mode, background ranking, start phase, upgrades while good
+   with `af_up`, the power-on search). Record rides
    (docs/ride-logging.md) and set `af_window` from the report's
-   AF_Update calibration table, `af_gain`/`af_trial` from the trials. Check how a trial and a
+   AF_Update calibration table, `af_gain`/`af_trial` from the trials, `af_up` from how many
+   upgrade trials are lost. Check how a trial and a
    jump back sound (transmitters of one programme are not time-aligned) and how fast a PI
    answers after Check (`af_pi`, 300 ms). Lessons so far: 38 of 47 muted PI checks on the first
    recorded ride got no PI (noise at a passable level, told apart by its AF_Update USN:
@@ -285,7 +287,13 @@ details up there before changing protocol code.
    other-PI bans); deciding on single AF_Update peaks made it hop between transmitters. A build
    that measured the tuned frequency with AF_Update and sent Set_Bandwidth's extended words made
    reception louder and noisier; which one did it is unknown: avoid both untested.
-6. AF memory assumes the programme stored for a frequency until RDS sends a PI; far from home a
+6. Power-on (0.6.0): the head unit's first tune after it switches the receiver on wants the
+   programme stored for its channel; another PI there starts a 30 s search on the programme's
+   other frequencies (AF card: SEARCHING, events `search`/`gave_up`). Until that tune (cold
+   start, at most 2 min) every tune wants the stored programme. Check on air how long the search
+   takes, that the pre-init tunes keep the stored PI, and whether a source switch re-enables the
+   receiver (then each return to radio is a resume tune). AF memory assumes the programme stored
+   for a frequency until RDS sends a PI; far from home a
    frequency may carry another programme, and a switch before the PI arrives plays the stored one
    (AF card: PI FROM MEMORY; tuning row `af_mem` turns it off). Stored frequencies skip the muted
    PI check only while a transmitter of the programme lists them (within 10 min), or while no AF

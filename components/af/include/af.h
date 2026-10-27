@@ -4,7 +4,8 @@
  *
  * AFs are measured one at a time with the TEF's AF_Update tuning (inaudible, about 6 ms, UM V102
  * §3.1): slowly while the tuned station is good (bg_interval_ms), so they are ranked before a
- * fade, and every interval_ms while it is poor, then the best ranked first. AF_Update samples the
+ * fade, and every interval_ms while it is poor or in the start phase, then the best ranked first.
+ * AF_Update samples the
  * quality detectors for 2 ms only: on air (2026-10-25) single scores swung between -40 and +45 dB
  * and read ~30 dB below the tuned station's settled score, so they cannot decide a switch, and a
  * version that compared them with the settled score never switched. The screen uses the level,
@@ -14,6 +15,18 @@
  * reception worse on air on 2026-10-25, louder and noisier: do not.) Noise never reads a low USN,
  * so the lowest of the last AF_USN_N readings decides whether a muted PI check is worth it (ride
  * of 2026-10-26).
+ *
+ * While the tuned station is good, a trusted AF (below) whose level is af_up_level, up above the
+ * tuned station's, may be tried as well: a known frequency of the programme that is clearly
+ * stronger is used before a fade. The start phase (AF_START_MS after the hold that follows a
+ * tune) measures at the poor rate, takes never measured trusted AFs first, tries nothing while a
+ * trusted AF is unmeasured or being confirmed (the best known frequency wins, not the first one
+ * confirmed), and lets an untrusted AF be tried while good too, after a muted PI check.
+ *
+ * The tuned frequency may carry another programme (af_set_other: at power-on the radio looks for
+ * the programme stored for the channel). It then counts as poor, every AF that reaches min_level
+ * may be tried, a trial wins on the PI alone, and the frequency does not join the candidates when
+ * the programme is found elsewhere.
  *
  * A try is a trial. The radio service tunes there (a Jump if af_trusted: the PI was confirmed
  * there within AF_TRUST_MS, or the programme was received there before and a transmitter lists
@@ -55,6 +68,9 @@ extern "C" {
 #define AF_HOLD_MS    3000
 /** Fast mode, after a switch or a trial (after a tune AF_HOLD_MS still applies). */
 #define AF_HOLD_FAST_MS 500
+/** The start phase after a tune, from the end of its hold: AFs measured at the poor rate, the
+ * best trusted one picked, untrusted ones tried while good too. */
+#define AF_START_MS   30000
 /** Ban escalation cap (normal mode): 2^5 = 32 times the base ban. */
 #define AF_BAN_MAX_SHIFT 5
 /** A wrong PI is proof, not bad luck: such a ban starts at 2^2 = 4 times the base. */
@@ -97,6 +113,10 @@ typedef struct {
      * by a Jump, with no muted PI check and no risk of another programme. It still has to reach
      * af_need_level itself. */
     int16_t trust_pref;
+    /** 0.1 dB: while the tuned station is good, a trusted AF (any in the start phase) is tried
+     * once its af_pick_level and its last af_confirm measurements reach the tuned station's level
+     * plus this (af_up_level). 0: only while poor. */
+    int16_t up;
     /** 0.1 %: an AF that needs a muted PI check (not af_trusted) is tried only if one of its last
      * AF_USN_N AF_Update USN readings is at most this. Noise never reads a low USN: on the ride
      * of 2026-10-26 every AF that answered with a PI read <= 10 % at least once, and the 38
@@ -166,6 +186,10 @@ typedef struct {
     uint8_t ref_n;
     uint8_t ref_pos;
     uint32_t hold_until_ms;
+    bool start;             /**< start_until_ms is valid: the start phase after a tune */
+    uint32_t start_until_ms;
+    /** The tuned frequency carries another programme (af_set_other). */
+    bool other;
     bool checked;           /**< checked_ms is valid */
     uint32_t checked_ms;    /**< the last AF_Update measurement */
     bool switched;          /**< switched_ms and dwell_ms are valid */
@@ -205,8 +229,16 @@ int16_t af_score(int16_t level, uint16_t usn, uint16_t wam, int16_t offset);
 uint8_t af_confirm(const af_params_t *p);
 
 /** New station on tuned_khz (tune, seek, PI change): forget the list, the averages, the bans and
- * the dwell, hold off checks for AF_HOLD_MS. */
+ * the dwell, hold off checks for AF_HOLD_MS, then the start phase for AF_START_MS. */
 void af_reset(af_state_t *s, uint32_t tuned_khz, uint32_t now_ms);
+
+/** In the start phase after a tune (af_reset). */
+bool af_starting(const af_state_t *s, uint32_t now_ms);
+
+/** The tuned frequency carries another programme (true) or the programme after all (false). Set,
+ * it counts as poor, AFs need min_level only, a trial wins on the PI alone and the frequency does
+ * not become a candidate on a switch (which clears it). */
+void af_set_other(af_state_t *s, bool other);
 
 /**
  * Add AFs that are not known yet while there is room (the AF memory: codes of a list stored for
@@ -222,22 +254,31 @@ void af_quality(af_state_t *s, int16_t score, int16_t level);
 int16_t af_current(const af_state_t *s, const af_params_t *p);
 /** Smoothed level of the tuned station (0.1 dBuV), AF_SCORE_NONE before the first sample. */
 int16_t af_current_level(const af_state_t *s, const af_params_t *p);
+/** The tuned station's score is below the trigger, or it carries another programme. */
 bool af_poor(const af_state_t *s, const af_params_t *p);
 
-/** What a candidate's AF_Update levels must reach (0.1 dBuV): the tuned station's level minus
- * the window, at least min_level. AF_SCORE_NONE before the tuned station's first sample. */
+/** What a candidate's AF_Update levels must reach while the tuned station is poor (0.1 dBuV): its
+ * level minus the window, at least min_level; min_level if it carries another programme.
+ * AF_SCORE_NONE before the tuned station's first sample. */
 int16_t af_need_level(const af_state_t *s, const af_params_t *p);
+/** The same while it is good: its level plus up, at least min_level. AF_SCORE_NONE if up is 0 or
+ * before the tuned station's first sample. */
+int16_t af_up_level(const af_state_t *s, const af_params_t *p);
+/** The level that applies now: af_need_level while poor, af_up_level while good (af_need_level
+ * if up is 0, for the ranking alone). */
+int16_t af_try_level(const af_state_t *s, const af_params_t *p);
 
 /**
  * The next AF to measure now, or 0. Nothing during a trial or the hold; every interval_ms while
- * the tuned station is poor, every bg_interval_ms (0: never) while it is good. While poor, a
- * candidate with a streak shorter than af_confirm comes first, then the not waiting AF with the
- * best average level (trusted ones trust_pref stronger) among those measured before but not
- * recently (the ranking made while good); else the one measured longest ago. Restarts the
- * interval.
+ * the tuned station is poor or in the start phase, every bg_interval_ms (0: never) while it is
+ * good. A candidate with a streak shorter than af_confirm comes first (while good only one that
+ * may be tried: up set, trusted or in the start phase). While poor, then the not waiting AF with
+ * the best average level (trusted ones trust_pref stronger) among those measured before but not
+ * recently (the ranking made while good); else one never measured, trusted ones first, else the
+ * one measured longest ago. Restarts the interval.
  */
 uint32_t af_next_check(af_state_t *s, const af_params_t *p, uint32_t now_ms);
-/** An AF_Update result of khz (usn in 0.1 %); its streak is judged against af_need_level now. */
+/** An AF_Update result of khz (usn in 0.1 %); its streak is judged against af_try_level now. */
 void af_measured(af_state_t *s, const af_params_t *p, uint32_t khz, int16_t score, int16_t level,
                  uint16_t usn, uint32_t now_ms);
 /** The lowest of the entry's last AF_USN_N USN readings (0.1 %), UINT16_MAX before any. */
@@ -246,12 +287,14 @@ uint16_t af_usn_min(const af_entry_t *e);
 int16_t af_pick_level(const af_entry_t *e, const af_params_t *p);
 
 /**
- * The AF to try now, or 0: while the tuned station is poor, the not banned, not waiting AF with
- * the best af_pick_level (trusted ones trust_pref stronger) among those whose last af_confirm
- * measurements and af_pick_level all reach af_need_level. An AF that is not af_trusted also needs
- * a USN reading of at most check_usn among its last AF_USN_N.
- * Nothing during a trial or the dwell after a switch. Measurements count as recent for one round
- * of checks plus three intervals (interval_ms).
+ * The AF to try now, or 0: the not banned, not waiting AF with the best af_pick_level (trusted
+ * ones trust_pref stronger) among those whose last af_confirm measurements and af_pick_level all
+ * reach af_try_level. While the tuned station is good (up set) only trusted ones qualify, any in
+ * the start phase. An AF that is not af_trusted also needs a USN reading of at most check_usn
+ * among its last AF_USN_N.
+ * Nothing during a trial or the dwell after a switch, nor in the start phase while a trusted AF
+ * has not been measured yet or is being confirmed (a streak short of af_confirm). Measurements
+ * count as recent for one round of checks plus three intervals (interval_ms).
  */
 uint32_t af_pick(const af_state_t *s, const af_params_t *p, uint32_t now_ms);
 
@@ -289,7 +332,7 @@ uint32_t af_ban(af_state_t *s, const af_params_t *p, uint32_t khz, uint32_t now_
 
 /** khz plays from now on trial: af_quality samples are its own until af_trial_end or
  * af_trial_abort. The reference is the tuned station's mean of its last AF_REF_N samples
- * (AF_REF_FAST_N in fast mode). */
+ * (AF_REF_FAST_N in fast mode), none if it carries another programme (af_set_other). */
 void af_trial_begin(af_state_t *s, const af_params_t *p, uint32_t khz, uint32_t now_ms);
 /** The trial has run its time with AF_TRIAL_MIN_SAMPLES samples, or twice its time. */
 bool af_trial_due(const af_state_t *s, const af_params_t *p, uint32_t now_ms);
@@ -305,7 +348,8 @@ af_trial_result_t af_trial_end(af_state_t *s, const af_params_t *p, uint32_t now
 void af_trial_abort(af_state_t *s, const af_params_t *p, uint32_t now_ms);
 
 /**
- * The radio now plays to_khz. from_khz becomes a candidate, trusted; to_khz leaves the list.
+ * The radio now plays to_khz. from_khz becomes a candidate, trusted, unless it carries another
+ * programme (af_set_other, cleared here); to_khz leaves the list.
  * Streaks (won against the old station) and the tuned station's averages start again, checks
  * hold off and switches wait for the dwell.
  */

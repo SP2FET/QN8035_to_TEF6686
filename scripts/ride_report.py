@@ -26,7 +26,8 @@ MAX_POINTS = 3000
 RESULT_EVENTS = ("switched", "jumped", "worse", "other_pi", "no_pi", "abort")
 EV_COLORS = {"switched": "#2a9d3a", "jumped": "#2a9d3a", "worse": "#e08a00",
              "other_pi": "#d62728", "no_pi": "#d62728", "check": "#888888",
-             "trial": "#888888", "abort": "var(--abort)"}
+             "trial": "#888888", "abort": "var(--abort)", "search": "#9467bd",
+             "gave_up": "#9467bd"}
 PALETTE = ["#1f77b4", "#e377c2", "#17becf", "#bcbd22", "#9467bd", "#8c564b", "#7f7f7f", "#ff7f0e"]
 
 

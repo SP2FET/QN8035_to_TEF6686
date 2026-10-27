@@ -242,6 +242,7 @@ void app_main(void)
     if (warm && warm->radio_valid && radio_settings_valid(&warm->radio)) {
         radio_cfg.initial = warm->radio; /* what played before the reset */
     }
+    radio_cfg.power_on = warm == NULL; /* the head unit starts too: its channel resumes */
     ESP_ERROR_CHECK(radio_start(&radio_cfg));
     free(af_mem);
 #if CONFIG_BRIDGE_MEMORY

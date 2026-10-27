@@ -220,7 +220,7 @@ nav button{flex:1 1 0;display:flex;align-items:center;justify-content:center;gap
 </section>
 
 <section class="a-af" aria-labelledby="h-af">
-<div class="hd"><h2 id="h-af">AF</h2><span class="meta" id="afh"><span class="badge" id="afa">AF</span><span class="badge warn" id="afc">CHECKING</span><span class="badge warn" id="afp">PI CHECK</span><span class="badge warn" id="aftr">TRIAL</span><span class="badge warn" id="afj">PI WATCH</span><span class="badge warn" id="afmm">PI FROM MEMORY</span></span></div>
+<div class="hd"><h2 id="h-af">AF</h2><span class="meta" id="afh"><span class="badge" id="afa">AF</span><span class="badge warn" id="afc">CHECKING</span><span class="badge warn" id="afp">PI CHECK</span><span class="badge warn" id="aftr">TRIAL</span><span class="badge warn" id="afj">PI WATCH</span><span class="badge warn" id="afmm">PI FROM MEMORY</span><span class="badge warn" id="afs">SEARCHING</span></span></div>
 <div id="afb">
 <div class="stats">
 <div class="stat"><small>Score</small><b id="afs">—</b></div>
@@ -474,7 +474,7 @@ function renderAf(a,am){
   $('afb').hidden=am;$('afm').hidden=!am;$('afh').hidden=am;
   if(am)return;
   renderAfEv(a.events||[]);
-  on('afa',a.active);on('afc',a.poor);on('afp',a.checking_pi);on('aftr',!!a.trial);on('afj',a.probation);on('afmm',a.pi_mem);
+  on('afa',a.active);on('afc',a.poor);on('afp',a.checking_pi);on('aftr',!!a.trial);on('afj',a.probation);on('afmm',a.pi_mem);on('afs',a.search);
   $('afa').textContent=a.active&&a.pi?'AF '+a.pi:'AF';
   $('afs').textContent=num(a.score,1,' dB');$('afl').textContent=num(a.level,1,' dBµV');
   $('afn').textContent=num(a.need,1,' dBµV');

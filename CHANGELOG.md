@@ -4,6 +4,40 @@ The firmware uses Semantic Versioning. Development releases use 0.x versions and
 change interfaces between minor versions. Versions and Git tags are recorded here;
 target builds and host tests do not establish hardware compatibility.
 
+## 0.6.0 - 2026-10-27
+
+AF following puts the programme first: at power-on the radio plays the programme stored for the
+head unit's channel on its best frequency, whatever that channel carries now.
+
+### Added
+
+- Better frequency while reception is good: a known AF of the programme (`af_trusted`) whose
+  AF_Update level is `af_up` (6 dB; 0 = only when poor, as before) above the tuned station's is
+  tried by an unmuted jump; the trial still decides on settled scores. The streak while good is
+  judged against that level.
+- Start phase, 30 s after the hold that follows a tune: AFs are measured at the poor rate
+  (`af_int`) even while reception is good, never measured known AFs first, nothing is tried while
+  a known AF is unmeasured or being confirmed (the best known frequency wins, not the first one
+  confirmed), and an unknown AF may be tried while good too, after the USN screen and a muted PI
+  check.
+- Power-on resume. The head unit's first tune after it switches the receiver on
+  (`radio_tune_resume`) wants the programme stored for that channel. If the channel carries
+  another programme, the stored one is looked for on its other frequencies: every AF reaching
+  `af_min_lvl` qualifies, each try is a muted PI check, the PI alone wins the trial, and nothing of
+  the other programme is learned. The other programme plays meanwhile. Not found within 30 s (or
+  no candidates): the channel's programme is followed and learned, as before. On a cold start every
+  tune behaves so until the head unit's resume tune, another tune or two minutes, so the head
+  unit's tunes before it switches the receiver on do not overwrite the stored programme. Presets,
+  seek and web tunes later follow what the frequency carries, as before.
+- Web: `af.start`, `af.search` (SEARCHING badge), events `search` and `gave_up` with the PI found
+  on the tuned frequency; `af.need` is the level that applies now.
+
+### Changed
+
+- Candidates of a programme come from the whole AF memory: the channels it was received on (most
+  recently used first), then the list stored for the tuned channel, then the lists of the others.
+  Far from home the tuned channel's list is the home transmitter's.
+
 ## 0.5.2 - 2026-10-27
 
 The task watchdog reset the board with the httpd task running (twice before the 2026-10-26 ride,

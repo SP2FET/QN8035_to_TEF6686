@@ -171,8 +171,16 @@ static void jb_score(jbuf_t *j, int16_t v)
 static const char *af_ev_name(uint8_t type)
 {
     static const char *const names[] = {"switched", "other_pi", "no_pi", "jumped",
-                                        "check",    "trial",    "worse", "abort"};
+                                        "check",    "trial",    "worse", "abort",
+                                        "search",   "gave_up"};
     return type < sizeof(names) / sizeof(names[0]) ? names[type] : "?";
+}
+
+/* The event names a PI (radio_af_event_t.pi). */
+static bool af_ev_pi(uint8_t type)
+{
+    return type == RADIO_AF_EV_OTHER_PI || type == RADIO_AF_EV_SEARCH ||
+           type == RADIO_AF_EV_GAVE_UP;
 }
 
 /* One AF as measured by AF_Update, and its last trial. */
@@ -215,7 +223,8 @@ static void jb_af(jbuf_t *j, const radio_af_status_t *a)
     } else {
         jb_printf(j, "null");
     }
-    jb_printf(j, ",\"pi_mem\":%s,\"lists\":%s,\"score\":", b(a->pi_mem), b(a->lists));
+    jb_printf(j, ",\"pi_mem\":%s,\"start\":%s,\"search\":%s,\"lists\":%s,\"score\":",
+              b(a->pi_mem), b(a->start), b(a->search), b(a->lists));
     jb_score(j, a->score);
     jb_printf(j, ",\"level\":");
     jb_score(j, a->level);
@@ -258,7 +267,7 @@ static void jb_af(jbuf_t *j, const radio_af_status_t *a)
         jb_printf(j, ",\"cur\":");
         jb_score(j, ev->cur);
         jb_printf(j, ",\"pi\":");
-        if (ev->type == RADIO_AF_EV_OTHER_PI) {
+        if (af_ev_pi(ev->type)) {
             jb_printf(j, "\"%04X\"", ev->pi);
         } else {
             jb_printf(j, "null");
@@ -587,7 +596,7 @@ static void jb_trace(jbuf_t *j, uint32_t seq, const radio_trace_t *r)
         jb_int(j, e->score);
         jb_printf(j, ",\"cur\":");
         jb_int(j, e->cur);
-        if (e->type == RADIO_AF_EV_OTHER_PI) {
+        if (af_ev_pi(e->type)) {
             jb_printf(j, ",\"pi\":\"%04X\"", e->pi);
         } else {
             jb_printf(j, ",\"pi\":null");

@@ -180,6 +180,10 @@ const tuning_param_t tuning_params[TUNING_COUNT] = {
     [TUNING_AF_TRUST_PREF] = ROW("af_trust_pref", G_AF, "Prefer AFs known to carry the programme "
                                  "unless another is stronger by", "dB", NULL, TUNING_HOST, 0, 10,
                                  0, 200, 30),
+    /* AF_Update level against the tuned station's settled level; the trial still decides on
+     * settled scores. 0 keeps AF switching to poor reception. */
+    [TUNING_AF_UP] = ROW("af_up", G_AF, "Good reception: try a known AF stronger by (0 = only "
+                         "when poor)", "dB", NULL, TUNING_HOST, 0, 10, 0, 300, 60),
     [TUNING_AF_GAIN] = ROW("af_gain", G_AF, "Trial: stay if the score is better by", "dB", NULL,
                            TUNING_HOST, 0, 10, 0, 300, 30),
     /* ~14 settled quality samples at 100 ms: fading in a moving car averages out. */

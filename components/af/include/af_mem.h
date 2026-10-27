@@ -81,6 +81,15 @@ uint8_t af_mem_list(const af_mem_t *m, uint32_t khz, uint16_t pi, uint8_t *codes
  * (AF_MEM_CODES), returns the count, 0 if pi is 0 or unknown. */
 uint8_t af_mem_heard(const af_mem_t *m, uint16_t pi, uint8_t *codes);
 
+/**
+ * The frequencies known for pi, as AF codes (AF_MEM_CODES) in the order they are worth trying:
+ * the channels it was received on (most recently used first), then the AF list stored for
+ * tuned_khz, then the lists stored for the other channels. No duplicates, never tuned_khz's own
+ * code. Returns the count, 0 if pi is 0 or unknown. Far from home the tuned channel's list is the
+ * home transmitter's, and the frequency that works there is in another slot.
+ */
+uint8_t af_mem_programme(const af_mem_t *m, uint16_t pi, uint32_t tuned_khz, uint8_t *codes);
+
 /** Used slots. */
 unsigned af_mem_count(const af_mem_t *m);
 

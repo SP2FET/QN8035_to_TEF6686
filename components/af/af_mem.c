@@ -156,6 +156,47 @@ uint8_t af_mem_heard(const af_mem_t *m, uint16_t pi, uint8_t *codes)
     return n;
 }
 
+static void put(uint8_t *codes, uint8_t *n, uint8_t c, uint8_t tuned)
+{
+    if (c != 0 && c != tuned && *n < AF_MEM_CODES && memchr(codes, c, *n) == NULL) {
+        codes[(*n)++] = c;
+    }
+}
+
+uint8_t af_mem_programme(const af_mem_t *m, uint16_t pi, uint32_t tuned_khz, uint8_t *codes)
+{
+    const uint8_t tuned = af_khz_code(tuned_khz);
+    unsigned order[AF_MEM_SLOTS]; /* the slots that carry pi, most recently used first */
+    unsigned k = 0;
+    for (unsigned i = 0; pi != 0 && i < AF_MEM_SLOTS; i++) {
+        if (m->s[i].pi != pi) {
+            continue;
+        }
+        unsigned j = k++;
+        for (; j > 0 && newer(m->s[i].used, m->s[order[j - 1]].used); j--) {
+            order[j] = order[j - 1];
+        }
+        order[j] = i;
+    }
+    uint8_t n = 0;
+    for (unsigned j = 0; j < k; j++) {
+        put(codes, &n, m->s[order[j]].code, tuned);
+    }
+    const int t = chan_find(m, tuned);
+    if (t >= 0 && m->s[t].pi == pi) {
+        for (unsigned c = 0; c < m->s[t].n; c++) {
+            put(codes, &n, m->s[t].codes[c], tuned);
+        }
+    }
+    for (unsigned j = 0; j < k; j++) {
+        const af_mem_slot_t *p = &m->s[order[j]];
+        for (unsigned c = 0; p->code != tuned && c < p->n; c++) {
+            put(codes, &n, p->codes[c], tuned);
+        }
+    }
+    return n;
+}
+
 unsigned af_mem_count(const af_mem_t *m)
 {
     unsigned n = 0;

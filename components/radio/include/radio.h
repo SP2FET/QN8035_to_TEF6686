@@ -79,6 +79,9 @@ typedef enum {
     RADIO_AF_EV_TRIAL,        /**< to_khz plays on trial (score as CHECK) */
     RADIO_AF_EV_WORSE,        /**< trial lost: back to from_khz (score, cur as SWITCHED) */
     RADIO_AF_EV_ABORT,        /**< a command ended a check or trial; back */
+    RADIO_AF_EV_SEARCH,       /**< power-on: from_khz carries another programme (pi); the
+                               *   stored one is looked for on its other frequencies */
+    RADIO_AF_EV_GAVE_UP,      /**< not found: from_khz's programme (pi) is followed now */
 } radio_af_ev_type_t;
 
 /** One AF step, for the web UI and the trace. */
@@ -89,7 +92,7 @@ typedef struct {
     uint32_t to_khz;   /**< the candidate */
     int16_t score;     /**< see radio_af_ev_type_t, AF_SCORE_NONE if none */
     int16_t cur;       /**< see radio_af_ev_type_t, AF_SCORE_NONE if none */
-    uint16_t pi;       /**< heard on the candidate (OTHER_PI) */
+    uint16_t pi;       /**< heard on the candidate (OTHER_PI), on from_khz (SEARCH, GAVE_UP) */
     uint32_t ban_s;    /**< skip time given (OTHER_PI, NO_PI); retry wait (WORSE) */
 } radio_af_event_t;
 
@@ -104,11 +107,15 @@ typedef struct {
     bool trial;         /**< a candidate plays on trial (trial_*) */
     bool pi_mem;        /**< pi comes from the AF memory: no RDS PI from the station yet */
     bool fast;          /**< fast mode (af_params_t.fast) */
+    bool start;         /**< the start phase after a tune (af_starting) */
+    /** Power-on: the tuned frequency carries another programme, pi (from the AF memory) is
+     * looked for on its other frequencies (af_set_other). */
+    bool search;
     uint8_t confirm;    /**< AF_Update measurements in a row a candidate needs (af_confirm) */
     uint16_t pi;        /**< the programme followed, valid while active */
     int16_t score;      /**< smoothed score of the tuned station, 0.1 dB, AF_SCORE_NONE if none */
     int16_t level;      /**< smoothed level of the tuned station, 0.1 dBuV, AF_SCORE_NONE if none */
-    int16_t need;       /**< af_need_level: what a candidate's AF_Update levels must reach */
+    int16_t need;       /**< af_try_level: what a candidate's AF_Update levels must reach now */
     uint32_t dwell_ms;  /**< until switching is allowed again */
     uint32_t trial_khz;
     uint32_t trial_left_ms;
@@ -254,6 +261,11 @@ typedef struct {
     uint16_t fm_deemphasis; /**< 500 or 750 */
     tuning_t tuning;        /**< must pass tuning_valid() */
     const af_mem_t *af_mem; /**< AF memory to start from (copied), NULL for none */
+    /** A cold start, not a warm restart: until the head unit's resume tune (radio_tune_resume),
+     * another tune not from the head unit or two minutes, every channel tuned wants the programme
+     * stored for it, so the head unit's tunes before it switches the receiver on do not replace
+     * it in the AF memory. */
+    bool power_on;
 } radio_config_t;
 
 /** Within what the API accepts (radio_tune, radio_set_volume, radio_set_bandwidth). Usable
@@ -270,6 +282,12 @@ esp_err_t radio_tune(radio_band_t band, uint32_t khz);
  * tuned frequency or one the AF following has switched to since (PI checked, no seek between),
  * the tuner stays where the programme plays and RADIO_EVT_TUNED reports khz at once. */
 esp_err_t radio_tune_keep_programme(uint32_t khz);
+/** The head unit's first tune after it switched the receiver on: as radio_tune_keep_programme,
+ * but the programme stored for khz in the AF memory is the one wanted. If it is not the one that
+ * plays, the tuner tunes khz anew; if khz carries another programme, the stored one is looked for
+ * on its other frequencies first (AF following and the AF memory on), and khz's programme is
+ * followed only if it is not found. */
+esp_err_t radio_tune_resume(uint32_t khz);
 esp_err_t radio_step(int dir);                 /**< +1 up, -1 down */
 esp_err_t radio_seek(int dir);                 /**< +1/-1 with wrap-around, 0 stops */
 /** QN8035-style scan: first station from start to stop, no wrap. FM only. */

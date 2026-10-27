@@ -18,6 +18,20 @@ void setUp(void)
 
 void tearDown(void) {}
 
+/* As if the start phase after the tune were over: the rest of a drive. */
+static void past_start(void)
+{
+    s.start = false;
+}
+
+/* Upgrades while good: 6 dB above the tuned level. */
+static af_params_t up_params(void)
+{
+    af_params_t p = P;
+    p.up = 60;
+    return p;
+}
+
 static af_params_t fast_params(void)
 {
     af_params_t p = P;
@@ -182,8 +196,10 @@ static void test_next_check_none(void)
 
     const uint8_t codes[] = {1};
     af_sync(&s, codes, 1);
-    af_quality(&s, 350, 500); /* good enough, and no checks while good */
-    TEST_ASSERT_EQUAL_UINT32(0, af_next_check(&s, &P, 5000));
+    af_quality(&s, 350, 500); /* good enough */
+    TEST_ASSERT_EQUAL_UINT32(87600, af_next_check(&s, &P, 5000)); /* the start phase measures */
+    /* after it, no checks while good */
+    TEST_ASSERT_EQUAL_UINT32(0, af_next_check(&s, &P, AF_HOLD_MS + AF_START_MS));
 
     af_reset(&s, TUNED, 0);
     three_poor();
@@ -207,6 +223,7 @@ static void test_background_ranking(void)
 {
     af_params_t p = P;
     p.bg_interval_ms = 2000;
+    past_start();
     const uint8_t codes[] = {1, 2, 3};
     af_sync(&s, codes, 3);
     af_quality(&s, 400, 500); /* good */
@@ -405,6 +422,169 @@ static void test_pick_not_while_good(void)
     }
     TEST_ASSERT_EQUAL_UINT8(3, entry(87600)->streak);
     TEST_ASSERT_EQUAL_UINT32(0, af_pick(&s, &P, 3100));
+}
+
+static void test_up_level(void)
+{
+    af_params_t p = up_params();
+    TEST_ASSERT_EQUAL_INT16(AF_SCORE_NONE, af_up_level(&s, &p));
+    af_quality(&s, 400, 500);
+    TEST_ASSERT_EQUAL_INT16(560, af_up_level(&s, &p));
+    TEST_ASSERT_EQUAL_INT16(560, af_try_level(&s, &p)); /* good */
+    TEST_ASSERT_EQUAL_INT16(440, af_try_level(&s, &P)); /* up off: the need, for the ranking */
+    p.min_level = 600;
+    TEST_ASSERT_EQUAL_INT16(600, af_up_level(&s, &p));
+    p = up_params();
+    p.up = 0;
+    TEST_ASSERT_EQUAL_INT16(AF_SCORE_NONE, af_up_level(&s, &p));
+    af_reset(&s, TUNED, 0);
+    af_quality(&s, 200, 300);
+    p = up_params();
+    TEST_ASSERT_EQUAL_INT16(240, af_try_level(&s, &p)); /* poor: the need */
+}
+
+/* While good, a known frequency of the programme clearly stronger is tried; another only in
+ * the start phase (it needs a muted PI check). */
+static void test_upgrade_while_good(void)
+{
+    const af_params_t p = up_params();
+    past_start();
+    const uint8_t codes[] = {1, 2, 3};
+    af_sync(&s, codes, 3);
+    const uint8_t heard[] = {2};
+    af_set_heard(&s, heard, 1); /* no lists yet: trusted */
+    af_quality(&s, 400, 500); /* good: up level 560 */
+    for (unsigned i = 0; i < 3; i++) {
+        af_measured(&s, &p, 87600, -100, 600, 50, 3000 + i); /* stronger, not known */
+        af_measured(&s, &p, 87700, -100, 570, 50, 3100 + i);
+        af_measured(&s, &p, 87800, -100, 550, 50, 3200 + i); /* under the margin */
+    }
+    TEST_ASSERT_EQUAL_UINT8(0, entry(87800)->streak); /* judged against the up level */
+    TEST_ASSERT_EQUAL_UINT32(87700, af_pick(&s, &p, 3300));
+    TEST_ASSERT_EQUAL_UINT32(0, af_pick(&s, &P, 3300)); /* up off: only while poor */
+    af_ban(&s, &p, 87700, 3300, false);
+    TEST_ASSERT_EQUAL_UINT32(0, af_pick(&s, &p, 3300));
+
+    af_reset(&s, TUNED, 0); /* the start phase */
+    af_sync(&s, codes, 3);
+    af_quality(&s, 400, 500);
+    for (unsigned i = 0; i < 3; i++) {
+        af_measured(&s, &p, 87600, -100, 600, 50, 3000 + i);
+    }
+    TEST_ASSERT_EQUAL_UINT32(87600, af_pick(&s, &p, 3100));
+    af_measured(&s, &p, 87600, -100, 600, 400, 3100); /* noise never reads a low USN */
+    af_measured(&s, &p, 87600, -100, 600, 400, 3101);
+    af_measured(&s, &p, 87600, -100, 600, 400, 3102);
+    TEST_ASSERT_EQUAL_UINT32(0, af_pick(&s, &p, 3200));
+}
+
+/* While good, only a candidate that may be tried is confirmed first. */
+static void test_upgrade_confirm_first(void)
+{
+    af_params_t p = up_params();
+    p.bg_interval_ms = 2000;
+    past_start();
+    const uint8_t codes[] = {1, 2};
+    af_sync(&s, codes, 2);
+    const uint8_t heard[] = {2};
+    af_set_heard(&s, heard, 1);
+    af_quality(&s, 400, 500); /* up level 560 */
+    TEST_ASSERT_EQUAL_UINT32(87700, af_next_check(&s, &p, 3000)); /* never measured, trusted */
+    af_measured(&s, &p, 87700, -100, 500, 50, 3000);
+    TEST_ASSERT_EQUAL_UINT32(87600, af_next_check(&s, &p, 5000));
+    af_measured(&s, &p, 87600, -100, 600, 50, 5000); /* passes, but not known */
+    TEST_ASSERT_EQUAL_UINT32(87700, af_next_check(&s, &p, 7000)); /* the round goes on */
+    af_measured(&s, &p, 87700, -100, 600, 50, 7000);
+    TEST_ASSERT_EQUAL_UINT32(87700, af_next_check(&s, &p, 9000)); /* confirmed first */
+}
+
+static void test_start_phase(void)
+{
+    af_params_t p = P;
+    p.bg_interval_ms = 2000;
+    const uint8_t codes[] = {1};
+    af_sync(&s, codes, 1);
+    af_quality(&s, 400, 500); /* good */
+    TEST_ASSERT_TRUE(af_starting(&s, 0));
+    TEST_ASSERT_EQUAL_UINT32(87600, af_next_check(&s, &p, 3000));
+    TEST_ASSERT_EQUAL_UINT32(87600, af_next_check(&s, &p, 3500)); /* the poor rate */
+    const uint32_t end = AF_HOLD_MS + AF_START_MS;
+    TEST_ASSERT_TRUE(af_starting(&s, end - 1));
+    TEST_ASSERT_FALSE(af_starting(&s, end));
+    TEST_ASSERT_EQUAL_UINT32(87600, af_next_check(&s, &p, end - 1));
+    TEST_ASSERT_EQUAL_UINT32(0, af_next_check(&s, &p, end + 500)); /* the slow rate */
+    TEST_ASSERT_FALSE(s.start);
+    TEST_ASSERT_EQUAL_UINT32(87600, af_next_check(&s, &p, end + 1999));
+}
+
+/* The start phase measures the known frequencies first and picks the best of them, not the
+ * first one confirmed. */
+static void test_start_picks_best_known(void)
+{
+    three_poor(); /* need 240 */
+    const uint8_t heard[] = {2, 3};
+    af_set_heard(&s, heard, 2);
+    TEST_ASSERT_EQUAL_UINT32(87700, af_next_check(&s, &P, 3000));
+    meas(87700, 300, 3000);
+    TEST_ASSERT_EQUAL_UINT32(87700, af_next_check(&s, &P, 3500));
+    meas(87700, 300, 3500);
+    TEST_ASSERT_EQUAL_UINT32(87700, af_next_check(&s, &P, 4000));
+    meas(87700, 300, 4000);
+    TEST_ASSERT_EQUAL_UINT32(0, af_pick(&s, &P, 4000)); /* 87800 not measured yet */
+    TEST_ASSERT_EQUAL_UINT32(87800, af_next_check(&s, &P, 4500));
+    meas(87800, 400, 4500);
+    TEST_ASSERT_EQUAL_UINT32(0, af_pick(&s, &P, 4500)); /* 87800 being confirmed */
+    TEST_ASSERT_EQUAL_UINT32(87800, af_next_check(&s, &P, 5000));
+    meas(87800, 400, 5000);
+    TEST_ASSERT_EQUAL_UINT32(87800, af_next_check(&s, &P, 5500));
+    meas(87800, 400, 5500);
+    TEST_ASSERT_EQUAL_UINT32(87800, af_pick(&s, &P, 5500));
+    TEST_ASSERT_EQUAL_UINT32(87600, af_next_check(&s, &P, 6000)); /* then the others */
+
+    /* after the start phase the first confirmed may go */
+    af_reset(&s, TUNED, 0);
+    three_poor();
+    af_set_heard(&s, heard, 2);
+    past_start();
+    for (unsigned i = 0; i < 3; i++) {
+        meas(87700, 300, 3000 + i);
+    }
+    TEST_ASSERT_EQUAL_UINT32(87700, af_pick(&s, &P, 3100));
+}
+
+/* The tuned frequency carries another programme: any AF of the programme beats it. */
+static void test_other_programme(void)
+{
+    af_params_t p = P;
+    p.min_level = 150;
+    const uint8_t codes[] = {1, 2};
+    af_sync(&s, codes, 2);
+    af_quality(&s, 500, 700); /* strong and clean */
+    TEST_ASSERT_FALSE(af_poor(&s, &p));
+    af_set_other(&s, true);
+    TEST_ASSERT_TRUE(af_poor(&s, &p));
+    TEST_ASSERT_EQUAL_INT16(150, af_need_level(&s, &p));
+    for (unsigned i = 0; i < 3; i++) {
+        af_measured(&s, &p, 87700, -100, 200, 50, 3000 + i);
+    }
+    TEST_ASSERT_EQUAL_UINT32(87700, af_pick(&s, &p, 3100));
+    af_trial_begin(&s, &p, 87700, 3100);
+    TEST_ASSERT_EQUAL_INT16(AF_SCORE_NONE, s.trial_ref);
+    for (unsigned i = 0; i < AF_TRIAL_MIN_SAMPLES; i++) {
+        af_quality(&s, 100, 200); /* far worse than the other programme was */
+    }
+    const af_trial_result_t r = af_trial_end(&s, &p, 3100 + p.trial_ms);
+    TEST_ASSERT_TRUE(r.won);
+    TEST_ASSERT_EQUAL_UINT32(87700, s.tuned.khz);
+    TEST_ASSERT_TRUE(index_of(TUNED) < 0); /* it carries another programme */
+    TEST_ASSERT_FALSE(s.other);
+    TEST_ASSERT_EQUAL_UINT8(1, s.n);
+
+    af_reset(&s, TUNED, 0);
+    af_set_other(&s, true);
+    af_set_other(&s, false); /* the programme turned up on it after all */
+    af_quality(&s, 500, 700);
+    TEST_ASSERT_FALSE(af_poor(&s, &p));
 }
 
 static void test_confirm_first(void)
@@ -716,6 +896,7 @@ static void test_dwell_blocks_pick(void)
 {
     const uint8_t codes[] = {1, 2};
     af_sync(&s, codes, 2);
+    past_start(); /* else the trusted old frequency must be measured first */
     af_switched(&s, &P, TUNED, s.e[0].khz, 0);
     af_quality(&s, 100, 300); /* need level 240 */
     const uint32_t k = s.e[0].khz; /* 87700: the first entry after the swap */
@@ -1007,6 +1188,12 @@ int main(void)
     RUN_TEST(test_pick_prefers_trusted);
     RUN_TEST(test_next_check_trusted_first);
     RUN_TEST(test_pick_not_while_good);
+    RUN_TEST(test_up_level);
+    RUN_TEST(test_upgrade_while_good);
+    RUN_TEST(test_upgrade_confirm_first);
+    RUN_TEST(test_start_phase);
+    RUN_TEST(test_start_picks_best_known);
+    RUN_TEST(test_other_programme);
     RUN_TEST(test_confirm_first);
     RUN_TEST(test_trial_won);
     RUN_TEST(test_trial_lost);

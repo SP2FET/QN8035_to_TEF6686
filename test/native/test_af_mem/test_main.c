@@ -227,6 +227,53 @@ static void test_load_and_same(void)
     TEST_ASSERT_FALSE(af_mem_slot_same(&p, &b));
 }
 
+/* Where the programme was received (newest first), then the tuned channel's list, then the
+ * others'. */
+static void test_programme(void)
+{
+    const uint8_t a[] = {70, 88};      /* stored for 92.0 MHz (code 45) */
+    const uint8_t b[] = {88, 120, 45}; /* for 101.2 MHz (code 137) */
+    const uint8_t c[] = {1};
+    af_mem_learn(&m, 0x3F44, 92000, a, 2);
+    af_mem_learn(&m, 0x3F44, 101200, b, 3);
+    af_mem_learn(&m, 0x1234, 95000, c, 1); /* another programme */
+    uint8_t got[AF_MEM_CODES];
+
+    const uint8_t at_a[] = {137, 70, 88, 120};
+    TEST_ASSERT_EQUAL_UINT8(4, af_mem_programme(&m, 0x3F44, 92000, got));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(at_a, got, 4);
+
+    const uint8_t at_b[] = {45, 88, 120, 70};
+    TEST_ASSERT_EQUAL_UINT8(4, af_mem_programme(&m, 0x3F44, 101200, got));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(at_b, got, 4);
+
+    af_mem_learn(&m, 0x3F44, 92000, a, 2); /* used last now */
+    const uint8_t elsewhere[] = {45, 137, 70, 88, 120}; /* 95.0 MHz carries 0x1234 */
+    TEST_ASSERT_EQUAL_UINT8(5, af_mem_programme(&m, 0x3F44, 95000, got));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(elsewhere, got, 5);
+
+    TEST_ASSERT_EQUAL_UINT8(0, af_mem_programme(&m, 0x9999, 92000, got));
+    TEST_ASSERT_EQUAL_UINT8(0, af_mem_programme(&m, 0, 92000, got));
+}
+
+static void test_programme_cap(void)
+{
+    uint8_t many[AF_MEM_CODES];
+    for (unsigned i = 0; i < AF_MEM_CODES; i++) {
+        many[i] = (uint8_t)(i + 1);
+    }
+    const uint8_t few[] = {26, 27, 28, 29, 30};
+    af_mem_learn(&m, 0x3F44, af_code_khz(100), many, AF_MEM_CODES);
+    af_mem_learn(&m, 0x3F44, af_code_khz(101), few, 5);
+    uint8_t got[AF_MEM_CODES];
+    TEST_ASSERT_EQUAL_UINT8(AF_MEM_CODES, af_mem_programme(&m, 0x3F44, 99000, got));
+    TEST_ASSERT_EQUAL_UINT8(101, got[0]);
+    TEST_ASSERT_EQUAL_UINT8(100, got[1]);
+    TEST_ASSERT_EQUAL_UINT8(26, got[2]);
+    TEST_ASSERT_EQUAL_UINT8(1, got[7]);
+    TEST_ASSERT_EQUAL_UINT8(18, got[AF_MEM_CODES - 1]);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -242,5 +289,7 @@ int main(void)
     RUN_TEST(test_lru_eviction);
     RUN_TEST(test_slot_valid);
     RUN_TEST(test_load_and_same);
+    RUN_TEST(test_programme);
+    RUN_TEST(test_programme_cap);
     return UNITY_END();
 }

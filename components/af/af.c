@@ -213,6 +213,18 @@ void af_reset(af_state_t *s, uint32_t tuned_khz, uint32_t now_ms)
     memset(s, 0, sizeof(*s));
     s->tuned = new_entry(tuned_khz);
     s->hold_until_ms = now_ms + AF_HOLD_MS;
+    s->start = true;
+    s->start_until_ms = s->hold_until_ms + AF_START_MS;
+}
+
+bool af_starting(const af_state_t *s, uint32_t now_ms)
+{
+    return s->start && !due(now_ms, s->start_until_ms);
+}
+
+void af_set_other(af_state_t *s, bool other)
+{
+    s->other = other;
 }
 
 void af_sync(af_state_t *s, const uint8_t *codes, uint8_t n)
@@ -259,11 +271,14 @@ int16_t af_current_level(const af_state_t *s, const af_params_t *p)
 
 bool af_poor(const af_state_t *s, const af_params_t *p)
 {
-    return (p->fast ? s->cur_fast.n : s->cur.n) > 0 && af_current(s, p) < p->trigger;
+    return s->other || ((p->fast ? s->cur_fast.n : s->cur.n) > 0 && af_current(s, p) < p->trigger);
 }
 
 int16_t af_need_level(const af_state_t *s, const af_params_t *p)
 {
+    if (s->other) {
+        return p->min_level;
+    }
     const int16_t lvl = af_current_level(s, p);
     if (lvl == AF_SCORE_NONE) {
         return AF_SCORE_NONE;
@@ -272,13 +287,47 @@ int16_t af_need_level(const af_state_t *s, const af_params_t *p)
     return (int16_t)(need > p->min_level ? need : p->min_level);
 }
 
+int16_t af_up_level(const af_state_t *s, const af_params_t *p)
+{
+    const int16_t lvl = af_current_level(s, p);
+    if (p->up <= 0 || lvl == AF_SCORE_NONE) {
+        return AF_SCORE_NONE;
+    }
+    const int32_t need = (int32_t)lvl + p->up;
+    return (int16_t)(need > p->min_level ? need : p->min_level);
+}
+
+int16_t af_try_level(const af_state_t *s, const af_params_t *p)
+{
+    return af_poor(s, p) || p->up <= 0 ? af_need_level(s, p) : af_up_level(s, p);
+}
+
+/* While the tuned station is good: e may be tried once it reaches af_up_level. A known frequency
+ * of the programme is tried by an unmuted jump; another needs a muted PI check, which only the
+ * start phase after a tune spends on a station that plays well. */
+static bool up_ok(const af_state_t *s, const af_params_t *p, const af_entry_t *e, uint32_t now_ms)
+{
+    return p->up > 0 && (af_starting(s, now_ms) || af_entry_trusted(e, s->lists, now_ms));
+}
+
+/* Reached the level lately, but not af_confirm times in a row yet: measured again first. */
+static bool confirming(const af_entry_t *e, const af_params_t *p, uint32_t limit_ms,
+                       uint32_t now_ms)
+{
+    return !banned(e, now_ms) && !waiting(e, now_ms) && e->streak > 0 &&
+           e->streak < af_confirm(p) && fresh(e, limit_ms, now_ms);
+}
+
 uint32_t af_next_check(af_state_t *s, const af_params_t *p, uint32_t now_ms)
 {
+    if (s->start && due(now_ms, s->start_until_ms)) {
+        s->start = false;
+    }
     if (!p->enable || s->trial || s->n == 0 || !due(now_ms, s->hold_until_ms)) {
         return 0;
     }
     const bool poor = af_poor(s, p);
-    const uint32_t every = poor ? p->interval_ms : p->bg_interval_ms;
+    const uint32_t every = poor || s->start ? p->interval_ms : p->bg_interval_ms;
     if (every == 0 || (s->checked && (uint32_t)(now_ms - s->checked_ms) < every)) {
         return 0;
     }
@@ -291,15 +340,14 @@ uint32_t af_next_check(af_state_t *s, const af_params_t *p, uint32_t now_ms)
         }
     }
     const uint32_t limit = fresh_ms(s, p);
+    for (unsigned i = 0; i < s->n; i++) {
+        const af_entry_t *e = &s->e[i];
+        if (confirming(e, p, limit, now_ms) && (poor || up_ok(s, p, e, now_ms))) {
+            return e->khz; /* would be tried: confirm it before the round goes on */
+        }
+    }
     int pick = -1;
     if (poor) {
-        for (unsigned i = 0; i < s->n; i++) {
-            const af_entry_t *e = &s->e[i];
-            if (!e->banned && !waiting(e, now_ms) && e->streak > 0 && e->streak < af_confirm(p) &&
-                fresh(e, limit, now_ms)) {
-                return e->khz; /* would be tried: confirm it before the round goes on */
-            }
-        }
         /* Ranked while good: the best first, so a fade goes to it without a full round. */
         int32_t best = INT32_MIN;
         for (unsigned i = 0; i < s->n; i++) {
@@ -318,18 +366,24 @@ uint32_t af_next_check(af_state_t *s, const af_params_t *p, uint32_t now_ms)
             return s->e[pick].khz;
         }
     }
-    for (unsigned i = 0; i < s->n; i++) { /* measured longest ago, never measured first */
+    int unmeasured = -1; /* never measured first, a trusted one before the others */
+    for (unsigned i = 0; i < s->n; i++) { /* else the one measured longest ago */
         const af_entry_t *e = &s->e[i];
         if (e->banned) {
             continue;
         }
         if (!e->measured) {
-            return e->khz;
+            if (af_entry_trusted(e, s->lists, now_ms)) {
+                return e->khz;
+            }
+            unmeasured = unmeasured < 0 ? (int)i : unmeasured;
+            continue;
         }
         if (pick < 0 || (int32_t)(e->measured_ms - s->e[pick].measured_ms) < 0) {
             pick = (int)i;
         }
     }
+    pick = unmeasured >= 0 ? unmeasured : pick;
     return pick >= 0 ? s->e[pick].khz : 0; /* 0: all banned */
 }
 
@@ -353,7 +407,7 @@ void af_measured(af_state_t *s, const af_params_t *p, uint32_t khz, int16_t scor
     }
     memmove(&e->usn[1], &e->usn[0], (AF_USN_N - 1) * sizeof(e->usn[0]));
     e->usn[0] = score == AF_SCORE_NONE ? UINT16_MAX : usn;
-    const int16_t need = af_need_level(s, p);
+    const int16_t need = af_try_level(s, p);
     if (score != AF_SCORE_NONE && need != AF_SCORE_NONE && level >= need) {
         e->streak = e->streak < UINT8_MAX ? (uint8_t)(e->streak + 1) : UINT8_MAX;
     } else {
@@ -400,17 +454,28 @@ uint32_t af_dwell_left(const af_state_t *s, uint32_t now_ms)
 
 uint32_t af_pick(const af_state_t *s, const af_params_t *p, uint32_t now_ms)
 {
-    if (!p->enable || s->trial || !af_poor(s, p) || af_dwell_left(s, now_ms) > 0) {
+    if (!p->enable || s->trial || af_dwell_left(s, now_ms) > 0) {
         return 0;
     }
-    const int16_t need = af_need_level(s, p);
+    const bool poor = af_poor(s, p);
+    const int16_t need = af_try_level(s, p);
+    if ((!poor && p->up <= 0) || need == AF_SCORE_NONE) {
+        return 0;
+    }
     const uint32_t limit = fresh_ms(s, p);
+    for (unsigned i = 0; af_starting(s, now_ms) && i < s->n; i++) {
+        const af_entry_t *e = &s->e[i];
+        if (af_entry_trusted(e, s->lists, now_ms) &&
+            (!e->measured || confirming(e, p, limit, now_ms))) {
+            return 0; /* the best known frequency, not the first one confirmed */
+        }
+    }
     int32_t best = INT32_MIN;
     uint32_t khz = 0;
     for (unsigned i = 0; i < s->n; i++) {
         const af_entry_t *e = &s->e[i];
         if (e->streak < af_confirm(p) || !fresh(e, limit, now_ms) || banned(e, now_ms) ||
-            waiting(e, now_ms)) {
+            waiting(e, now_ms) || (!poor && !up_ok(s, p, e, now_ms))) {
             continue;
         }
         if (!af_entry_trusted(e, s->lists, now_ms) && af_usn_min(e) > p->check_usn) {
@@ -535,7 +600,7 @@ void af_trial_begin(af_state_t *s, const af_params_t *p, uint32_t khz, uint32_t 
     s->trial = true;
     s->trial_khz = khz;
     s->trial_end_ms = now_ms + p->trial_ms;
-    s->trial_ref = ref_mean(s, p);
+    s->trial_ref = s->other ? AF_SCORE_NONE : ref_mean(s, p); /* the PI decides */
     s->trial_n = 0;
     s->trial_sum = 0;
     s->trial_lsum = 0;
@@ -623,10 +688,13 @@ static void swap_tuned(af_state_t *s, const af_params_t *p, uint32_t from_khz, u
     from.banned = false;
     s->tuned = tuned;
     s->trial = false;
-    if (s->n >= AF_MAX) {
-        evict(s, now_ms);
+    if (!s->other) { /* carries the programme too */
+        if (s->n >= AF_MAX) {
+            evict(s, now_ms);
+        }
+        add(s, &from);
     }
-    add(s, &from);
+    s->other = false;
     for (unsigned k = 0; k < s->n; k++) {
         s->e[k].streak = 0;
     }

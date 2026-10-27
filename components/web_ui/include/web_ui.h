@@ -25,12 +25,15 @@
  * /api/status additions:
  *   "q.dsp"       {"softmute","highcut","stereo","sthiblend"} in % of each control's range
  *                 (stereo 100 = mono); null on AM
- *   "af"          {"active","poor","checking_pi","probation","pi","pi_mem","lists","score","level",
- *                 "need","trial","mem","dwell_s","confirm","fast","switches","pi_fails","list":[ENTRY]}
+ *   "af"          {"active","poor","checking_pi","probation","pi","pi_mem","start","search",
+ *                 "lists","score","level","need","trial","mem","dwell_s","confirm","fast","switches","pi_fails","list":[ENTRY]}
  *                 (af.h). score/level: the tuned station's smoothed quality score (dB = level -
  *                 USN - WAM) and level (dBuV); need: the level a candidate's AF_Update
- *                 measurements must reach "confirm" times in a row to be tried; pi_mem: the PI
- *                 comes from the AF memory; lists: an AF list arrived from RDS since tuning
+ *                 measurements must reach "confirm" times in a row to be tried (while reception
+ *                 is good: the tuned level plus af_up, known AFs only); pi_mem: the PI comes from
+ *                 the AF memory; start: the start phase after a tune (AFs measured at the poor
+ *                 rate, the best known one tried first); search: power-on, the tuned frequency
+ *                 carries another programme and pi is looked for on its other frequencies; lists: an AF list arrived from RDS since tuning
  *                 (until then heard AFs are trusted from AF memory alone);
  *                 trial: null or {"khz","left_ms","n","mean","ref"}
  *                 (the candidate's mean settled score so far and what it must beat, plus the
@@ -52,9 +55,12 @@
  *                 "pi","ban_s"} (kHz, dB). type: check (muted PI check begins), trial (the
  *                 candidate plays), switched/jumped (trial won after a PI check / on a trusted
  *                 frequency), worse (trial lost, back), other_pi, no_pi (PI check failed), abort
- *                 (a command came in). score/cur: for check and trial the candidate's AF_Update
+ *                 (a command came in), search (power-on: "from" carries another programme, pi;
+ *                 the stored one is looked for), gave_up (not found: from's programme, pi, is
+ *                 followed). score/cur: for check and trial the candidate's AF_Update
  *                 level (dBuV) and the tuned score; for results the trial mean and the tuned
- *                 station's mean; null if none. pi: heard on the candidate for other_pi;
+ *                 station's mean; null if none. pi: heard on the candidate for other_pi, on
+ *                 "from" for search and gave_up;
  *                 ban_s: the skip (other_pi, no_pi) or retry wait (worse)
  *   "rds.pty"     programme type 0..31 (RDS table); null until known
  *   "rds.tp","rds.ta"  traffic programme / traffic announcement flags

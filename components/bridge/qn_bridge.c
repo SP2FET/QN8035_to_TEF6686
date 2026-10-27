@@ -46,6 +46,7 @@ static struct {
     uint32_t khz;      /* asked for; for a scan, where it ended */
     TickType_t t;      /* request, then RADIO_EVT_TUNED */
     uint32_t next_khz; /* TUNE waiting for the coalescing timer */
+    bool resume;       /* the next TUNE is the first since the head unit switched the receiver on */
     esp_timer_handle_t tune_timer;
     bool powered;      /* head unit requested receive mode (slave task only) */
     bool hu_mute;      /* head unit mute (slave task only) */
@@ -90,10 +91,15 @@ static void fail_op(uint32_t khz, bool scan)
 static void start_tune(uint32_t khz)
 {
     begin_op(OP_TUNE, khz);
+    portENTER_CRITICAL(&b.mux);
+    const bool resume = b.resume;
+    b.resume = false;
+    portEXIT_CRITICAL(&b.mux);
     /* The head unit does not see the radio's AF switches: asking for the frequency it tuned (a
      * re-tune after a source switch, the way back from its own AF check) must not drop the AF
-     * the programme moved to. */
-    const esp_err_t err = radio_tune_keep_programme(khz);
+     * the programme moved to. Its first tune after switching the receiver on is its saved
+     * channel: the programme stored for it is looked for (radio_tune_resume). */
+    const esp_err_t err = resume ? radio_tune_resume(khz) : radio_tune_keep_programme(khz);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "tune %lu kHz: %s", (unsigned long)khz, esp_err_to_name(err));
         fail_op(khz, false);
@@ -117,12 +123,20 @@ static void on_qn_event(const qn8035_evt_t *e, void *ctx)
     switch (e->type) {
     case QN8035_EVT_RESET:
         ESP_LOGI(TAG, "head unit reset the QN8035");
+        portENTER_CRITICAL(&b.mux);
+        b.resume = false;
+        portEXIT_CRITICAL(&b.mux);
         b.powered = false;
         b.hu_mute = false;
         apply_mute();
         break;
     case QN8035_EVT_POWER:
         ESP_LOGI(TAG, "head unit %s the receiver", e->on ? "enabled" : "disabled");
+        portENTER_CRITICAL(&b.mux);
+        if (!e->on || !b.powered) {
+            b.resume = e->on; /* off, or newly on */
+        }
+        portEXIT_CRITICAL(&b.mux);
         b.powered = e->on;
         apply_mute();
         break;
@@ -135,6 +149,9 @@ static void on_qn_event(const qn8035_evt_t *e, void *ctx)
         break;
     case QN8035_EVT_SEEK: {
         esp_timer_stop(b.tune_timer); /* the scan replaces a tune not started yet */
+        portENTER_CRITICAL(&b.mux);
+        b.resume = false; /* a station chosen on purpose */
+        portEXIT_CRITICAL(&b.mux);
         ESP_LOGI(TAG, "head unit scan %lu..%lu kHz step %lu", (unsigned long)e->seek.start_khz,
                  (unsigned long)e->seek.stop_khz, (unsigned long)e->seek.step_khz);
         begin_op(OP_SCAN, e->seek.stop_khz);
