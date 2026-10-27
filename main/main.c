@@ -50,8 +50,8 @@ static esp_err_t init_power(void)
 #define TEF_I2C_PORT I2C_NUM_0 /* the head-unit side uses I2C_NUM_1 */
 #define QN_I2C_PORT  I2C_NUM_1
 #define PROBE_TIMEOUT_MS 50
-/* A web OTA image must run this long before it is confirmed; a crash or reset earlier
- * makes the bootloader return to the previous image (BOOTLOADER_APP_ROLLBACK_ENABLE). */
+/* Minimum probation before essential tuner/slave diagnostics decide confirmation;
+ * failure rolls back via BOOTLOADER_APP_ROLLBACK_ENABLE. */
 #define OTA_PROBATION_S 30
 
 #if CONFIG_BRIDGE_TEF_REFCLK_4M
@@ -165,9 +165,22 @@ static void confirm_ota_image(void)
         state != ESP_OTA_IMG_PENDING_VERIFY) {
         return;
     }
-    ESP_LOGW(TAG, "new firmware on probation: confirming in %d s, a reset before that rolls back",
+    ESP_LOGW(TAG, "new firmware on probation: checking health in %d s, a reset before that rolls back",
              OTA_PROBATION_S);
     vTaskDelay(pdMS_TO_TICKS(OTA_PROBATION_S * 1000));
+    bool healthy = radio_diagnostics_passed();
+#if CONFIG_BRIDGE_QN_EMU_ENABLE
+    qn8035_slave_stats_t qn;
+    qn8035_slave_get_stats(&qn);
+    healthy = healthy && qn.running;
+#endif
+    if (!healthy) {
+        ESP_LOGE(TAG, "new firmware failed essential radio diagnostics; rolling back");
+        const esp_err_t rollback = esp_ota_mark_app_invalid_rollback_and_reboot();
+        ESP_LOGE(TAG, "rollback could not restart (%s); image remains unconfirmed",
+                 esp_err_to_name(rollback));
+        return;
+    }
     const esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "new firmware confirmed");
@@ -250,7 +263,9 @@ void app_main(void)
         ESP_LOGE(TAG, "settings autosave not running");
     }
 #endif
-    const af_store_config_t af_store_cfg = {.activity = QN_ACTIVITY};
+    const af_store_config_t af_store_cfg = {
+        .activity = QN_ACTIVITY,
+    };
     if (radio_cfg.af_mem && af_store_start(&af_store_cfg) != ESP_OK) {
         ESP_LOGE(TAG, "AF memory not saved");
     }

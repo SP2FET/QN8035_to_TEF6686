@@ -223,7 +223,7 @@ nav button{flex:1 1 0;display:flex;align-items:center;justify-content:center;gap
 <div class="hd"><h2 id="h-af">AF</h2><span class="meta" id="afh"><span class="badge" id="afa">AF</span><span class="badge warn" id="afc">CHECKING</span><span class="badge warn" id="afp">PI CHECK</span><span class="badge warn" id="aftr">TRIAL</span><span class="badge warn" id="afj">PI WATCH</span><span class="badge warn" id="afmm">PI FROM MEMORY</span><span class="badge warn" id="afs">SEARCHING</span></span></div>
 <div id="afb">
 <div class="stats">
-<div class="stat"><small>Score</small><b id="afs">—</b></div>
+<div class="stat"><small>Score</small><b id="afscore">—</b></div>
 <div class="stat"><small>Level</small><b id="afl">—</b></div>
 <div class="stat"><small>AF needs level</small><b id="afn">—</b></div>
 <div class="stat"><small>Trial</small><b id="aftv">—</b></div>
@@ -385,6 +385,8 @@ function fillBw(b){
   (b==='FM'?FM_BW:AM_BW).forEach(v=>add(v,v+' kHz'));
 }
 function render(s){
+  DEF.AM=s.am_step_khz===10?1000:999;
+  if(s.am_step_khz===10&&last.AM===999)last.AM=1000;
   const tef=s.tef||{},q=s.q||{},rds=s.rds||{},qn=s.qn||{};
   if(s.band==='FM'||s.band==='AM'){
     band=s.band;
@@ -476,7 +478,7 @@ function renderAf(a,am){
   renderAfEv(a.events||[]);
   on('afa',a.active);on('afc',a.poor);on('afp',a.checking_pi);on('aftr',!!a.trial);on('afj',a.probation);on('afmm',a.pi_mem);on('afs',a.search);
   $('afa').textContent=a.active&&a.pi?'AF '+a.pi:'AF';
-  $('afs').textContent=num(a.score,1,' dB');$('afl').textContent=num(a.level,1,' dBµV');
+  $('afscore').textContent=num(a.score,1,' dB');$('afl').textContent=num(a.level,1,' dBµV');
   $('afn').textContent=num(a.need,1,' dBµV');
   const tr=a.trial;
   $('aftv').textContent=tr?(tr.khz/1000).toFixed(2)+': '+num(tr.mean,1)+' vs '+num(tr.ref,1)+' dB ('+tr.n+')':'—';
@@ -619,6 +621,24 @@ const HELP={
 'AF':'Follows the programme to another transmitter from the RDS AF list. When the score (level − USN − WAM, in dB) falls below the trigger, one AF per interval is measured inaudibly (AF_Update). One that beats the score by the margin three times in a row is tried: a frequency that played the programme in the last 10 minutes at once, others muted until their PI answers (PI check timeout). After a switch the radio stays for the dwell time. A failed PI check skips the frequency for the ban time, doubled each time. REG on: regional variants count as other programmes.',
 'Seek':'A seek stops on the first channel that meets all four limits.'};
 let tun=null,tdTimer=0;
+let tuningWork=Promise.resolve(),tuningFailed=false;
+const tuningTimers=new Map();
+function cancelTuningTimer(key){const t=tuningTimers.get(key);if(t)clearTimeout(t.id);tuningTimers.delete(key)}
+function deferTuning(key,run,ms){
+  cancelTuningTimer(key);
+  const id=setTimeout(()=>{tuningTimers.delete(key);run()},ms);
+  tuningTimers.set(key,{id,run});
+}
+function flushTuningTimers(){
+  for(const [key,t] of [...tuningTimers]){cancelTuningTimer(key);t.run()}
+}
+function queueTuning(run){
+  tuningWork=tuningWork.then(run).catch(()=>{tuningFailed=true;toast('Tuning update failed; save cancelled')});
+  return tuningWork;
+}
+async function drainTuning(){
+  for(;;){const work=tuningWork;await work;if(work===tuningWork)return}
+}
 const dec=p=>Math.round(Math.log10(p.div)),fv=(p,v)=>(v/p.div).toFixed(dec(p));
 const clampV=(p,v)=>Math.max(p.min,Math.min(p.max,Math.round(v)));
 function tstat(){
@@ -661,9 +681,8 @@ function renderQs(){
     let sl=null;
     if(g.s){
       const c=g.s,box=mk('div','qsl'),r=mk('input'),val=mk('span','mono');
-      let t=0;
       r.type='range';r.min=c.min;r.max=c.max;r.step=c.step;r.setAttribute('aria-label',c.l);
-      r.oninput=()=>{val.textContent=(r.value/10).toFixed(0)+' dBµV';clearTimeout(t);t=setTimeout(()=>qset(ps,c.f(+r.value)),300)};
+      r.oninput=()=>{val.textContent=(r.value/10).toFixed(0)+' dBµV';deferTuning(r,()=>qset(ps,c.f(+r.value)),300)};
       box.append(mk('span','hs',c.l),r,val);w.appendChild(box);
       sl={c,r,val};
     }
@@ -688,12 +707,17 @@ function qmark(){ // highlight the option each group's current values match
     g.cu.hidden=any||on;
   }
 }
-async function qset(ps,vs){
+function qset(ps,vs){
+  const changes=[];
   for(let i=0;i<ps.length;i++){
     if(vs[i]===null||ps[i].v===vs[i])continue;
+    cancelTuningTimer(ps[i]);
     ps[i].v=vs[i];tupd(ps[i]);
-    if(!await cmd('tuning',{k:ps[i].k,v:vs[i]}))return loadTun();
+    changes.push({k:ps[i].k,v:vs[i]});
   }
+  return queueTuning(async()=>{
+    for(const p of changes)if(!await cmd('tuning',p))throw new Error('tuning');
+  });
 }
 function tupd(p){ // refresh the controls of p (not the focused one), its reset button and group
   const a=document.activeElement,s=(e,v)=>{if(a!==e)e.value=v};
@@ -704,14 +728,17 @@ function tupd(p){ // refresh the controls of p (not the focused one), its reset 
   p.G.bd.textContent=n+' changed';p.G.bd.hidden=!n;
   tstat();
 }
-async function tset(p,v){
+function tset(p,v){
+  cancelTuningTimer(p);
   p.v=clampV(p,v);tupd(p);
-  if(!await cmd('tuning',{k:p.k,v:p.v}))loadTun();
+  const value={k:p.k,v:p.v};
+  return queueTuning(async()=>{if(!await cmd('tuning',value))throw new Error('tuning')});
 }
 async function loadTun(){
   try{
+    flushTuningTimers();await drainTuning();
     const r=await fetch('/api/tuning',{cache:'no-store'});
-    tun=await r.json();renderTun();
+    tun=await r.json();tuningFailed=false;renderTun();
   }catch(e){}
 }
 function renderTun(){
@@ -737,13 +764,12 @@ function renderTun(){
       r.appendChild(s);
     }else{
       const rs=p.rs=mk('input'),nm=p.nm=mk('input'),f=(e,t)=>{e.type=t;e.min=p.min/p.div;e.max=p.max/p.div;e.step=1/p.div};
-      let t=0;
       f(rs,'range');f(nm,'number');nm.id=id;rs.setAttribute('aria-label',p.l);
       rs.oninput=()=>{
         p.v=clampV(p,rs.value*p.div);tupd(p);nm.value=fv(p,p.v);
-        clearTimeout(t);t=setTimeout(()=>tset(p,p.v),250);
+        deferTuning(p,()=>tset(p,p.v),250);
       };
-      rs.onchange=()=>{clearTimeout(t);tset(p,rs.value*p.div)};
+      rs.onchange=()=>tset(p,rs.value*p.div);
       nm.onchange=()=>{
         const v=parseFloat(nm.value);
         if(isNaN(v)){nm.value=fv(p,p.v);return}
@@ -760,13 +786,22 @@ function renderTun(){
   renderQs();
 }
 $('tsave').onclick=$('qsave').onclick=async()=>{
-  if(!tun||!await cmd('tuning/save'))return;
-  tun.params.forEach(p=>p.sv=p.v);tstat();
+  if(!tun)return;
+  $('tsave').disabled=$('qsave').disabled=true;
+  try{
+    flushTuningTimers();await drainTuning();
+    if(tuningFailed){toast('A tuning update failed; review values before saving');await loadTun();return}
+    if(await cmd('tuning/save'))await loadTun();
+  }finally{$('tsave').disabled=$('qsave').disabled=false}
 };
-$('trev').onclick=async()=>{if(await cmd('tuning/revert'))setTimeout(loadTun,300)};
+async function resetTuning(action){
+  flushTuningTimers();await drainTuning();
+  if(await cmd(action))await loadTun();
+}
+$('trev').onclick=()=>resetTuning('tuning/revert');
 $('tdef').onclick=()=>{
   const b=$('tdef'),reset=()=>{tdTimer=0;b.textContent='Defaults';b.classList.remove('danger')};
-  if(tdTimer){clearTimeout(tdTimer);reset();cmd('tuning/defaults').then(j=>{if(j)setTimeout(loadTun,300)});return}
+  if(tdTimer){clearTimeout(tdTimer);reset();resetTuning('tuning/defaults');return}
   b.textContent='Confirm?';b.classList.add('danger');
   tdTimer=setTimeout(reset,3000);
 };
@@ -930,22 +965,21 @@ $('fwu').onclick=()=>{
 
 // ---- Log ----
 const log=$('logv');
-let queue=[],partial='',paused=false,auto=true,raf=0,filt='';
+let queue=[],partial='',paused=false,auto=true,raf=0,filt='',logDropped=0;
 const ANSI=/\x1b\[[0-9;]*m/g;
 const lineCls=l=>l.startsWith('E (')?'lE':l.startsWith('W (')?'lW':/^[DV] \(/.test(l)?'lD':'';
 const shown=l=>!filt||l.toLowerCase().includes(filt);
-function count(){$('lcnt').textContent=log.childElementCount+' lines'+(paused&&queue.length?' (+'+queue.length+' paused)':'')}
+function count(){$('lcnt').textContent=log.childElementCount+' lines'+(paused&&queue.length?' (+'+queue.length+' paused)':'')+(logDropped?' · '+logDropped+' dropped':'')}
 function flush(){
   raf=0;
   if(paused||!queue.length)return;
   const frag=document.createDocumentFragment();
-  for(const l of queue){
+  for(const l of queue.splice(0,200)){
     const d=document.createElement('div');d.textContent=l;
     const c=lineCls(l);if(c)d.className=c;
     if(!shown(l))d.hidden=true;
     frag.appendChild(d);
   }
-  queue=[];
   if(curTab!=='log'){
     unread+=frag.childElementCount;
     for(const d of frag.children){if(d.className==='lE')unE=true;else if(d.className==='lW')unW=true}
@@ -955,6 +989,7 @@ function flush(){
   while(log.childElementCount>MAXLINES)log.removeChild(log.firstChild);
   if(auto)log.scrollTop=log.scrollHeight;
   count();
+  if(queue.length)sched();
 }
 function badge(){
   const b=$('lbadge');b.hidden=!unread;b.textContent=unread;
@@ -964,7 +999,10 @@ function sched(){if(!raf)raf=requestAnimationFrame(flush)}
 function addText(t){
   const parts=(partial+t.replace(ANSI,'')).split('\n');
   partial=parts.pop();
+  if(partial.length>4096){partial=partial.slice(-4096);logDropped++}
   for(const p of parts)queue.push(p.replace(/\r$/,''));
+  if(queue.length>MAXLINES){logDropped+=queue.length-MAXLINES;queue.splice(0,queue.length-MAXLINES)}
+  if(paused)count();
   if(parts.length)sched();
 }
 $('lpause').onclick=e=>{
@@ -975,7 +1013,7 @@ $('lauto').onclick=e=>{
   auto=!auto;e.target.classList.toggle('sel',auto);
   if(auto)log.scrollTop=log.scrollHeight;
 };
-$('lclear').onclick=()=>{log.textContent='';queue=[];partial='';count()};
+$('lclear').onclick=()=>{log.textContent='';queue=[];partial='';logDropped=0;count()};
 $('lfilt').oninput=e=>{
   filt=e.target.value.toLowerCase();
   for(const d of log.children)d.hidden=!shown(d.textContent);

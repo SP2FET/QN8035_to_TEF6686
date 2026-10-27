@@ -143,7 +143,8 @@ typedef struct {
     char error[64];      /**< last init/IO problem, "" when healthy */
 
     radio_band_t band;
-    uint32_t freq_khz;   /**< what plays; an AF switch changes it */
+    uint32_t freq_khz;   /**< playing frequency when ready; recovery target otherwise */
+    uint32_t am_step_khz;
     bool seeking;
     bool mute;
     int16_t volume;      /**< 0.1 dB */
@@ -163,6 +164,7 @@ typedef enum {
     RADIO_EVT_QUALITY,     /**< periodic quality sample */
     RADIO_EVT_RDS,         /**< one RDS group as received */
     RADIO_EVT_AF_SWITCHED, /**< the same programme now plays on another frequency */
+    RADIO_EVT_RDS_SYNC,    /**< sync-only change; no group data */
 } radio_evt_type_t;
 
 typedef struct {
@@ -306,12 +308,16 @@ esp_err_t radio_reinit(void);
 esp_err_t radio_set_tuning(int id, long value);
 /** All values at once (defaults, saved set). */
 esp_err_t radio_set_tuning_all(const tuning_t *t);
+/** Wait until all previously accepted commands have been processed; never call from a listener. */
+esp_err_t radio_wait_commands(uint32_t timeout_ms);
+/** Essential tuner diagnostics, independent of whether an RF station/RDS is received. */
+bool radio_diagnostics_passed(void);
 /** The values in effect (a queued change shows once the radio task applied it). */
 void radio_get_tuning(tuning_t *out);
 
 void radio_get_status(radio_status_t *out);
-/** The settings part of the status. false while a seek runs (khz is moving) or before
- * radio_start(). */
+/** Settled settings suitable for persistence. False before start, while unavailable, seeking,
+ * checking/trialling an AF, or before a valid settled quality sample. */
 bool radio_get_settings(radio_settings_t *out);
 
 /**

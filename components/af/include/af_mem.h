@@ -65,6 +65,8 @@ bool af_mem_slot_same(const af_mem_slot_t *a, const af_mem_slot_t *b);
  * whose content changed, -1 if only the recency did, pi is 0 or tuned_khz is off the RDS raster.
  */
 int af_mem_learn(af_mem_t *m, uint16_t pi, uint32_t tuned_khz, const uint8_t *codes, uint8_t n);
+/** A complete announced list replaces the previous list, including removal of obsolete codes. */
+int af_mem_replace_list(af_mem_t *m, uint16_t pi, uint32_t khz, const uint8_t *codes, uint8_t n);
 
 /** khz does not carry pi (another programme is there): empties its slot if it holds pi. Returns
  * the slot, -1 if nothing changed. */
@@ -89,6 +91,10 @@ uint8_t af_mem_heard(const af_mem_t *m, uint16_t pi, uint8_t *codes);
  * home transmitter's, and the frequency that works there is in another slot.
  */
 uint8_t af_mem_programme(const af_mem_t *m, uint16_t pi, uint32_t tuned_khz, uint8_t *codes);
+/** REG-aware variants retain regional programme equivalence consistently with AF PI checks. */
+uint8_t af_mem_programme_reg(const af_mem_t *m, uint16_t pi, uint32_t khz, uint8_t *codes, bool reg);
+uint8_t af_mem_heard_reg(const af_mem_t *m, uint16_t pi, uint8_t *codes, bool reg);
+uint8_t af_mem_list_reg(const af_mem_t *m, uint32_t khz, uint16_t pi, uint8_t *codes, bool reg);
 
 /** Used slots. */
 unsigned af_mem_count(const af_mem_t *m);

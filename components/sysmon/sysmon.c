@@ -267,11 +267,27 @@ static void snapshot(void)
 {
     sysmon_state_t *st = &s.last;
     radio_settings_t rs;
-    if (radio_get_settings(&rs)) { /* false while a seek runs: the last settled one stays */
+    qn8035_emu_t before, after;
+    for (unsigned attempt = 0; attempt < 3; attempt++) {
+        const bool qn = qn8035_slave_snapshot(&before);
+        const bool settled = radio_get_settings(&rs);
+        const bool qn_after = qn8035_slave_snapshot(&after);
+        if (qn != qn_after || (qn &&
+            (before.revision != after.revision || before.op != after.op ||
+             before.op_generation != after.op_generation || before.tuned_ch != after.tuned_ch))) {
+            continue;
+        }
+        if (!settled || (qn && after.op != QN8035_OP_NONE)) {
+            continue; /* retain the entire previous pair during a transition */
+        }
         st->radio_valid = true;
         st->radio = rs;
+        st->qn_valid = qn;
+        if (qn) {
+            st->qn = after;
+        }
+        break;
     }
-    st->qn_valid = qn8035_slave_snapshot(&st->qn);
     st->up_s = (uint32_t)(esp_timer_get_time() / 1000000);
     const time_t now = time(NULL);
     st->wall_s = now > CLOCK_SET_AFTER ? (int64_t)now : 0;

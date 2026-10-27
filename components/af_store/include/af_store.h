@@ -13,12 +13,14 @@
  * written again.
  *
  * The per-programme layout of 0.4.x (keys "ver", "p0"..) is never read; its records stay in the
- * namespace unused (layout "cver" 2 starts empty, with no erase).
+ * namespace unused. A missing or incompatible "cver" erases channel keys before recording
+ * the current schema, so an incompatible record cannot return on the following boot.
  *
- * Stalls: a flash write stops the CPU (cache off), and the QN8035 slave's receive interrupt runs
- * from flash, so a head-unit read during a write can get a stale byte. Writes are short (one
- * record) and also wait until the head unit has sent no command for 10 s (config.activity), so
- * they never fall into a tune or seek.
+ * Flash writes disable the cache. Writes are short (one record) and also wait until the head
+ * unit has sent no command for 10 s (config.activity). Status polling continues then:
+ * the complete receive service uses IRAM/DRAM and the SDK ISR
+ * is IRAM-safe so automatic persistence can remain enabled during those reads. The quiet timer
+ * reduces command overlap; it is not a substitute for that cache-safe path or a timing test.
  */
 #pragma once
 

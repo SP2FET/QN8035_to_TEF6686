@@ -84,15 +84,18 @@ python scripts/ride_report.py rides/<dir>           # its HTML report and CSVs
   so the head unit keeps its channel and mute state. Unexpected resets are kept in NVS (reason,
   run time, RDS clock). Decode a dump: `GET /api/coredump`, then `esp-coredump info_corefile -t
   raw -c coredump.bin builds/<id>.elf` (ESP-IDF shell; `python scripts/elf_archive.py --find
-  <id>` resolves the dump's 9-character id). Known hangs:
-  ESP-IDF 5.4.0's I2C master spins without a deadline while the bus stays busy after a NACK;
+  <id>` resolves the dump's 9-character id). SDK workarounds:
+  `cmake/i2c_deadline.cmake` compiles a checked build-local I2C source copy that bounds
+  ESP-IDF 5.4.0's synchronous bus-busy wait after NACK (installed SDK unchanged);
   its httpd selects again at once after a failed select() (`web_ui.c` wraps
   `httpd_sess_delete_invalid` to back off, `-Wl,--wrap`). A watchdog dump's PC is wherever the
   running task happened to be, not a fault.
 - **Web OTA.** `scripts/ota_upload.py [--info] firmware.bin` (what `-t ota` runs) POSTs to
   `/api/ota` and waits for the restart and the confirmation. Host `$OTA_HOST`, else
   `custom_ota_host`; password `$OTA_PASSWORD` (`BRIDGE_OTA_PASSWORD`), never in the repo. The new
-  image runs on probation and `main.c` confirms it after 30 s; a reset before that rolls back
+  image runs on probation; after 30 s `main.c` confirms only a ready tuner in its expected
+  operation state with a fresh settled measurement, plus a running slave in the car build.
+  Diagnostics require no station or RDS reception. Failure or an earlier reset rolls back
   (the rollback bootloader exists only after one USB flash). A USB upload blanks `otadata`, so
   USB always boots `ota_0` and stays the recovery path. httpd serves nothing else during an
   upload (10–20 s).
@@ -179,7 +182,8 @@ stamps show uptime until then, the station's local time after.
   callback runs the model and writes the TX FIFO under a spinlock (no clock stretching).
 - **Errors:** `ESP_RETURN_ON_ERROR`/`ESP_RETURN_ON_FALSE` in init paths; `ESP_ERROR_CHECK` only
   for unrecoverable start-up in `app_main`. Runtime I/O errors are counted and recovered (`radio`
-  re-boots the tuner after 5 failures in a row or when the chip falls back to boot/idle). Never
+  re-boots the tuner after 5 errors without a full clean second or on an unexpected operation
+  state). Failed writes invalidate readiness and reapply requested settings on reboot. Never
   turn a failed read into a plausible value.
 - **Every wait has a deadline.** Stack sizes are in **bytes**. Tick comparisons are wrap-safe
   (`(int32_t)(now - t) >= 0`). Watched tasks reset the watchdog every loop and wait ≤ 1 s.
@@ -189,13 +193,16 @@ stamps show uptime until then, the station's local time after.
   httpd: its control socket drops a fifth unseen, and the chunk would leak). The S2's
   static DRAM segment is full (0.4.0 overflowed it by 3.5 kB): allocate large buffers once at
   start from the heap and degrade gracefully if that fails.
-- **Flash writes stall the CPU** (single core, cache off) for up to tens of ms, and the QN8035
-  slave's receive ISR runs from flash, so a head-unit read during a write can return a stale
-  byte. Keep writes out of the emulation build (`BRIDGE_MEMORY` depends on
+- **Flash writes disable the cache** for up to tens of ms. The QN8035 receive service, model
+  and lookup tables use IRAM/DRAM; `I2C_ISR_IRAM_SAFE` is required. Run
+  `scripts/check_qn_iram.py` against the linked car ELF after changes to that path. This checks
+  normal service placement, excluding SDK fatal assertion formatting, and does not establish
+  bus timing during flash erase. Keep writes out of the emulation build (`BRIDGE_MEMORY` depends on
   `!BRIDGE_QN_EMU_ENABLE`), except: the tuning Save button (rare, deliberate); `sysmon`'s reset
   history (at boot, before the slave starts, ≤ 16 per power-on); `af_store` (one 36-byte record
   per changed channel, stable for 60 s, ≥ 30 s apart, ≤ 64 per power-on, 10 s after the last
   head-unit command).
+  AF-list persistence is required in both builds; retain these automatic writes and wear limits.
 - **Reception tuning lives in the `tuning` table, not Kconfig**: one row per command word, all
   words of a command covered, UM V102 range and default. Rows are applied at every tuner boot,
   so defaults are the chip's documented ones unless a comment says why. Renaming a key drops what

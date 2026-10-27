@@ -40,6 +40,7 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
 # Slave driver v2 provides on_request/on_receive callbacks, needed to emulate
 # a register-mapped chip (QN8035) towards the head unit.
 CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2=y
+CONFIG_I2C_ISR_IRAM_SAFE=y
 
 # --- Bridge hardware ---
 # The fitted TEF6686 module has a 9.216 MHz crystal (verified on air: stereo

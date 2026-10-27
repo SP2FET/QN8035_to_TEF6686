@@ -115,6 +115,25 @@ int af_mem_learn(af_mem_t *m, uint16_t pi, uint32_t tuned_khz, const uint8_t *co
     return changed ? i : -1;
 }
 
+int af_mem_replace_list(af_mem_t *m, uint16_t pi, uint32_t khz, const uint8_t *codes, uint8_t n)
+{
+    const int changed = af_mem_learn(m, pi, khz, NULL, 0);
+    const int i = chan_find(m, af_khz_code(khz));
+    if (i < 0 || pi == 0) {
+        return -1;
+    }
+    af_mem_slot_t fresh = {.pi = pi, .code = m->s[i].code, .used = m->s[i].used};
+    for (unsigned k = 0; k < n && fresh.n < AF_MEM_CODES; k++) {
+        const uint8_t c = codes[k];
+        if (af_code_khz(c) && c != fresh.code && !memchr(fresh.codes, c, fresh.n)) {
+            fresh.codes[fresh.n++] = c;
+        }
+    }
+    const bool differs = !af_mem_slot_same(&fresh, &m->s[i]);
+    m->s[i] = fresh;
+    return changed >= 0 || differs ? i : -1;
+}
+
 int af_mem_forget(af_mem_t *m, uint16_t pi, uint32_t khz)
 {
     const int i = chan_find(m, af_khz_code(khz));
@@ -137,8 +156,13 @@ bool af_mem_lookup(const af_mem_t *m, uint32_t khz, uint16_t *pi)
 
 uint8_t af_mem_list(const af_mem_t *m, uint32_t khz, uint16_t pi, uint8_t *codes)
 {
+    return af_mem_list_reg(m, khz, pi, codes, true);
+}
+
+uint8_t af_mem_list_reg(const af_mem_t *m, uint32_t khz, uint16_t pi, uint8_t *codes, bool reg)
+{
     const int i = chan_find(m, af_khz_code(khz));
-    if (i < 0 || m->s[i].pi != pi) {
+    if (i < 0 || !af_pi_match(m->s[i].pi, pi, reg)) {
         return 0;
     }
     memcpy(codes, m->s[i].codes, m->s[i].n);
@@ -147,9 +171,14 @@ uint8_t af_mem_list(const af_mem_t *m, uint32_t khz, uint16_t pi, uint8_t *codes
 
 uint8_t af_mem_heard(const af_mem_t *m, uint16_t pi, uint8_t *codes)
 {
+    return af_mem_heard_reg(m, pi, codes, true);
+}
+
+uint8_t af_mem_heard_reg(const af_mem_t *m, uint16_t pi, uint8_t *codes, bool reg)
+{
     uint8_t n = 0;
     for (unsigned i = 0; pi != 0 && i < AF_MEM_SLOTS; i++) {
-        if (m->s[i].pi == pi) {
+        if (m->s[i].pi && af_pi_match(m->s[i].pi, pi, reg)) {
             codes[n++] = m->s[i].code;
         }
     }
@@ -165,11 +194,17 @@ static void put(uint8_t *codes, uint8_t *n, uint8_t c, uint8_t tuned)
 
 uint8_t af_mem_programme(const af_mem_t *m, uint16_t pi, uint32_t tuned_khz, uint8_t *codes)
 {
+    return af_mem_programme_reg(m, pi, tuned_khz, codes, true);
+}
+
+uint8_t af_mem_programme_reg(const af_mem_t *m, uint16_t pi, uint32_t tuned_khz, uint8_t *codes,
+                           bool reg)
+{
     const uint8_t tuned = af_khz_code(tuned_khz);
     unsigned order[AF_MEM_SLOTS]; /* the slots that carry pi, most recently used first */
     unsigned k = 0;
     for (unsigned i = 0; pi != 0 && i < AF_MEM_SLOTS; i++) {
-        if (m->s[i].pi != pi) {
+        if (!m->s[i].pi || !af_pi_match(m->s[i].pi, pi, reg)) {
             continue;
         }
         unsigned j = k++;
@@ -183,7 +218,7 @@ uint8_t af_mem_programme(const af_mem_t *m, uint16_t pi, uint32_t tuned_khz, uin
         put(codes, &n, m->s[order[j]].code, tuned);
     }
     const int t = chan_find(m, tuned);
-    if (t >= 0 && m->s[t].pi == pi) {
+    if (t >= 0 && af_pi_match(m->s[t].pi, pi, reg)) {
         for (unsigned c = 0; c < m->s[t].n; c++) {
             put(codes, &n, m->s[t].codes[c], tuned);
         }

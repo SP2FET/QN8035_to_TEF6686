@@ -100,7 +100,7 @@ menu "QN8035 -> TEF6686 bridge"
 
         config BRIDGE_AM_STEP_KHZ
             int "MW step (kHz)"
-            range 1 10
+            range 9 10
             default 9
 
         config BRIDGE_DEFAULT_VOLUME_DB

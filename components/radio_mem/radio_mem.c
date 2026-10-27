@@ -224,7 +224,7 @@ esp_err_t radio_mem_store(int slot, const char *name, int *stored)
                         slot);
     radio_status_t st;
     radio_get_status(&st);
-    if (st.seeking) {
+    if (!st.tef_ready || !st.q.valid || st.seeking || st.af.trial || st.af.checking_pi) {
         return ESP_ERR_INVALID_STATE;
     }
     const char *ps = st.rds.pi_valid && st.rds.ps_segments == PS_COMPLETE ? st.rds.ps : NULL;

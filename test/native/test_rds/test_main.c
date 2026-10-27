@@ -16,7 +16,7 @@ void tearDown(void) {}
 
 static void ps_group(uint16_t pi, unsigned seg, char a, char b)
 {
-    const uint16_t blk[4] = {pi, (uint16_t)(0x0000 | seg), 0xE0CD,
+    const uint16_t blk[4] = {pi, (uint16_t)(0x0000 | seg), 0xCDCD,
                              (uint16_t)(((uint8_t)a << 8) | (uint8_t)b)};
     TEST_ASSERT_TRUE(rds_process_group(&s, blk, OK));
 }
@@ -378,6 +378,26 @@ static void test_reset_clears_flags_and_ct(void)
     TEST_ASSERT_FALSE(s.ct.valid);
 }
 
+static void test_af_announced_list_replaces_old_entries(void)
+{
+    af_group(0xE201, OK); /* two entries, first code 1 */
+    TEST_ASSERT_EQUAL_UINT8(1, s.af_seen_n);
+    TEST_ASSERT_FALSE(s.af_list_complete);
+    af_group(0x02CD, OK);
+    TEST_ASSERT_TRUE(s.af_list_complete);
+    TEST_ASSERT_EQUAL_UINT8(2, s.af_count);
+    af_group(0xE103, OK); /* a shorter replacement, only code 3 */
+    TEST_ASSERT_TRUE(s.af_list_complete);
+    TEST_ASSERT_EQUAL_UINT8(1, s.af_count);
+    TEST_ASSERT_EQUAL_UINT8(3, s.af[0]);
+    pi_group(0xD312, OK);
+    TEST_ASSERT_EQUAL_UINT8(0, s.af_seen_n);
+    TEST_ASSERT_FALSE(s.af_list_complete);
+    af_group(0xE0CD, OK); /* explicitly empty list */
+    TEST_ASSERT_TRUE(s.af_list_complete);
+    TEST_ASSERT_EQUAL_UINT8(0, s.af_count);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -388,6 +408,7 @@ int main(void)
     RUN_TEST(test_large_error_not_used_for_text);
     RUN_TEST(test_unprintable_characters);
     RUN_TEST(test_af_basic_and_dedup);
+    RUN_TEST(test_af_announced_list_replaces_old_entries);
     RUN_TEST(test_af_clear);
     RUN_TEST(test_af_lfmf_skipped);
     RUN_TEST(test_af_bad_block_c_and_0b);

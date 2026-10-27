@@ -49,6 +49,10 @@ typedef struct {
      * receiver checks the PI before it stays on one. LF/MF entries are skipped. */
     uint8_t af[RDS_AF_MAX];
     uint8_t af_count;
+    uint8_t af_expected;     /**< method A count in the current announcement, 0 if unknown */
+    uint8_t af_seen[2];      /**< valid FM codes actually received in this group */
+    uint8_t af_seen_n;
+    bool af_list_complete;  /**< this group completed an announced replacement list */
     bool af_lfmf;            /**< the next AF code is an LF/MF frequency (after code 250) */
     /** Programme type 0..31 (RDS table, not RBDS), traffic programme and traffic announcement.
      * Taken from error-free B blocks only: a miscorrected one would flicker them. */

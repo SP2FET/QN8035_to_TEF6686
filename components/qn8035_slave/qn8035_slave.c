@@ -6,6 +6,7 @@
 
 #include "driver/i2c_slave.h"
 #include "esp_check.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -22,8 +23,8 @@
 #if !CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2
 #error "qn8035_slave needs CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2=y (see sdkconfig.defaults)"
 #endif
-#if CONFIG_I2C_ISR_IRAM_SAFE
-#error "the QN8035 model runs in the I2C ISR from flash: keep CONFIG_I2C_ISR_IRAM_SAFE off"
+#if !CONFIG_I2C_ISR_IRAM_SAFE
+#error "QN8035 emulation with AF persistence requires CONFIG_I2C_ISR_IRAM_SAFE=y"
 #endif
 
 static const char *TAG = "qn8035";
@@ -54,6 +55,7 @@ typedef struct {
     uint8_t rreg;                  /* register of the first byte read */
     uint8_t rdata[TRACE_BYTES];
     uint8_t nevt;
+    uint32_t revision;
     qn8035_evt_t evts[QN8035_EMU_MAX_EVENTS];
 } bus_msg_t;
 
@@ -82,6 +84,8 @@ static struct {
     void *cb_ctx;
     bool trace;
     volatile uint32_t dropped;
+    bool reconcile;
+    uint32_t command_drops;
     qn8035_slave_stats_t stats;
 } s = {.mux = portMUX_INITIALIZER_UNLOCKED};
 
@@ -97,7 +101,7 @@ static struct {
  */
 
 /* Bytes the master clocked out since the last fill: they were read, the pointer moves on. */
-static void take_reads_locked(bus_msg_t *m)
+static void IRAM_ATTR take_reads_locked(bus_msg_t *m)
 {
     uint32_t free_len = 0;
     i2c_ll_get_txfifo_len(s.hw, &free_len);
@@ -113,7 +117,7 @@ static void take_reads_locked(bus_msg_t *m)
     s.tx_n = 0;
 }
 
-static void fill_tx_locked(void)
+static void IRAM_ATTR fill_tx_locked(void)
 {
     i2c_ll_txfifo_rst(s.hw);
     s.tx_reg = s.emu.ptr;
@@ -136,7 +140,7 @@ static void refresh_tx_locked(bus_msg_t *m)
 /* ---- ISR side ------------------------------------------------------------- */
 
 /* Runs at the STOP of a write (the v2 driver calls it only when bytes arrived). */
-static bool on_receive(i2c_slave_dev_handle_t dev, const i2c_slave_rx_done_event_data_t *evt,
+static bool IRAM_ATTR on_receive(i2c_slave_dev_handle_t dev, const i2c_slave_rx_done_event_data_t *evt,
                        void *arg)
 {
     (void)dev;
@@ -147,6 +151,7 @@ static bool on_receive(i2c_slave_dev_handle_t dev, const i2c_slave_rx_done_event
     portENTER_CRITICAL_ISR(&s.mux);
     take_reads_locked(&m);
     m.nevt = (uint8_t)qn8035_emu_write(&s.emu, evt->buffer, len, m.evts, QN8035_EMU_MAX_EVENTS);
+    m.revision = s.emu.revision;
     fill_tx_locked();
     portEXIT_CRITICAL_ISR(&s.mux);
 
@@ -155,6 +160,12 @@ static bool on_receive(i2c_slave_dev_handle_t dev, const i2c_slave_rx_done_event
     BaseType_t woken = pdFALSE;
     if (xQueueSendFromISR(s.msgs, &m, &woken) != pdTRUE) {
         s.dropped++;
+        if (m.nevt) {
+            portENTER_CRITICAL_ISR(&s.mux);
+            s.reconcile = true;
+            s.command_drops++;
+            portEXIT_CRITICAL_ISR(&s.mux);
+        }
     }
     return woken == pdTRUE;
 }
@@ -199,6 +210,8 @@ static void slave_task(void *arg)
 {
     (void)arg;
     bus_msg_t m;
+    uint32_t reconciled = 0;
+    bool have_reconciled = false;
 
 #if CONFIG_ESP_TASK_WDT_EN
     if (esp_task_wdt_add(NULL) != ESP_OK) {
@@ -209,6 +222,23 @@ static void slave_task(void *arg)
 #if CONFIG_ESP_TASK_WDT_EN
         esp_task_wdt_reset();
 #endif
+        qn8035_emu_t model;
+        portENTER_CRITICAL(&s.mux);
+        const bool reconcile = s.reconcile;
+        if (reconcile) {
+            model = s.emu;
+            s.reconcile = false;
+        }
+        portEXIT_CRITICAL(&s.mux);
+        if (reconcile) {
+            qn8035_evt_t evts[QN8035_EMU_MAX_EVENTS];
+            const size_t n = qn8035_emu_controls(&model, evts, QN8035_EMU_MAX_EVENTS);
+            reconciled = model.revision;
+            have_reconciled = true;
+            for (size_t i = 0; i < n; i++) {
+                s.cb(&evts[i], s.cb_ctx);
+            }
+        }
         if (xQueueReceive(s.msgs, &m, pdMS_TO_TICKS(WDT_FEED_MS)) != pdTRUE) {
             continue;
         }
@@ -224,7 +254,8 @@ static void slave_task(void *arg)
         if (m.wlen) {
             trace(MSG_WRITE, m.wdata[0], &m.wdata[1], m.wlen - 1u);
         }
-        for (size_t i = 0; i < m.nevt; i++) {
+        const bool stale = have_reconciled && (int32_t)(m.revision - reconciled) <= 0;
+        for (size_t i = 0; !stale && i < m.nevt; i++) {
             s.cb(&m.evts[i], s.cb_ctx);
         }
     }
@@ -345,14 +376,15 @@ bool qn8035_slave_snapshot(qn8035_emu_t *out)
     return true;
 }
 
-void qn8035_slave_complete_tune(uint32_t khz, bool found, bool by_scan)
+void qn8035_slave_complete_tune(uint32_t khz, bool found, bool by_scan, uint32_t generation)
 {
     if (!s.stats.running) {
         return;
     }
     bus_msg_t m = {0};
     portENTER_CRITICAL(&s.mux);
-    const bool irq = qn8035_emu_complete_tune(&s.emu, khz, found, by_scan);
+    const bool irq = generation == s.emu.op_generation &&
+                     qn8035_emu_complete_tune(&s.emu, khz, found, by_scan);
     refresh_tx_locked(&m);
     portEXIT_CRITICAL(&s.mux);
     post_reads(&m);
@@ -399,5 +431,33 @@ void qn8035_slave_get_stats(qn8035_slave_stats_t *out)
     xSemaphoreTake(s.lock, portMAX_DELAY);
     *out = s.stats;
     out->dropped = s.dropped;
+    portENTER_CRITICAL(&s.mux);
+    out->command_drops = s.command_drops;
+    portEXIT_CRITICAL(&s.mux);
     xSemaphoreGive(s.lock);
+}
+
+void qn8035_slave_request_reconcile(void)
+{
+    if (!s.msgs) {
+        return;
+    }
+    portENTER_CRITICAL(&s.mux);
+    s.reconcile = true;
+    portEXIT_CRITICAL(&s.mux);
+    const bus_msg_t wake = {0};
+    xQueueSend(s.msgs, &wake, 0); /* a full queue already wakes the consumer */
+}
+
+void qn8035_slave_set_rds_sync(bool sync)
+{
+    if (!s.stats.running) {
+        return;
+    }
+    bus_msg_t m = {0};
+    portENTER_CRITICAL(&s.mux);
+    qn8035_emu_set_rds_sync(&s.emu, sync);
+    refresh_tx_locked(&m);
+    portEXIT_CRITICAL(&s.mux);
+    post_reads(&m);
 }

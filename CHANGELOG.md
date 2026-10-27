@@ -4,6 +4,40 @@ The firmware uses Semantic Versioning. Development releases use 0.x versions and
 change interfaces between minor versions. Versions and Git tags are recorded here;
 target builds and host tests do not establish hardware compatibility.
 
+## 0.6.1 - 2026-10-27
+
+### Fixed
+
+- Failed tuner writes invalidate readiness and reapply requested settings through bounded
+  recovery; AF Check/End/return stop on failure. Unrelated successful reads no longer hide
+  persistent failures. Health checks cover seek, standby and wrong-band states; seek has a
+  total deadline, and bridge completion deadlines run independently of quality callbacks.
+- Head-unit command loss triggers reconciliation from the current register model. Tune/scan
+  completions carry an operation generation. Warm snapshots reject changes between the radio
+  and model reads; restore reapplies mono and de-emphasis. RDS sync loss reaches the head unit.
+- Retunes drain old RDS groups. Actual AF observations refresh trust; announced replacement
+  lists remove obsolete memory entries. REG-off following retains regional programme state.
+  Incompatible stored AF records are erased before updating their schema marker.
+- **Automatic AF-list flash persistence remains enabled.** The no-stretch receive service and
+  model code/tables reside in internal RAM, including the shifted-raster arithmetic; the IDF
+  ISR is configured IRAM-safe. Timing during flash erase still requires a bus capture.
+- A checked build-local patch bounds ESP-IDF 5.4.0's synchronous bus-busy wait after NACK,
+  without modifying the installed SDK. OTA uploads have total/progress deadlines and first-boot
+  confirmation requires fresh essential tuner diagnostics, independent of station reception.
+- Tuning replacement commands own their payload; bandwidth commands retain their target band.
+  Save flushes debounced edits and waits for radio command completion before writing NVS.
+  Preset storage rejects temporary AF trials, ten-kHz MW tuning keeps its regional raster,
+  browser log queues are bounded, and AF score/search elements have distinct IDs.
+
+### Validation
+
+- Native model/decoder tests and host fault-injection tests cover the review regressions.
+  `python -B -m unittest discover -s test/scripts -v` also runs radio/bridge C fixtures and the
+  embedded-page JavaScript checks (GCC and Node.js required).
+- `scripts/check_qn_iram.py` checks linked service-path code and literal placement; SDK fatal
+  assertion formatting is excluded explicitly. This does not measure interrupt latency.
+- Build/test results and remaining bench checks are recorded in `docs/review-fixes-20261027.md`.
+
 ## 0.6.0 - 2026-10-27
 
 AF following puts the programme first: at power-on the radio plays the programme stored for the

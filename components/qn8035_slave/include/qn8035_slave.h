@@ -16,6 +16,8 @@
  * bus tracing is done by a separate low-priority task, so logging never
  * delays a bus response. Reads are traced when the next write or refresh
  * notices them.
+ * The receive service, register model and lookup tables reside in internal RAM; the SDK
+ * ISR must be IRAM-safe. Lost control messages trigger replay of current model controls.
  */
 #pragma once
 
@@ -51,6 +53,7 @@ typedef struct {
     uint32_t cmds;    /**< writes with data: commands, not the register pointer set before a read */
     uint32_t reads;
     uint32_t dropped; /**< bus messages or trace records lost */
+    uint32_t command_drops; /**< control messages requiring reconciliation */
     char last[48];    /**< last transaction, e.g. "W 00 <- 13" */
 } qn8035_slave_stats_t;
 
@@ -58,8 +61,11 @@ esp_err_t qn8035_slave_start(const qn8035_slave_config_t *cfg, qn8035_slave_even
                              void *ctx);
 
 /** Model updates from the tuner side. Thread-safe; no-ops when not running. See
- * qn8035_emu_complete_tune(): set the new channel's signal first. */
-void qn8035_slave_complete_tune(uint32_t khz, bool found, bool by_scan);
+ * qn8035_emu_complete_tune(): set the new channel's signal first. Completion is ignored when
+ * generation does not match the current model operation. */
+void qn8035_slave_complete_tune(uint32_t khz, bool found, bool by_scan, uint32_t generation);
+void qn8035_slave_request_reconcile(void);
+void qn8035_slave_set_rds_sync(bool sync);
 void qn8035_slave_set_signal(uint8_t rssi, uint8_t snr, bool stereo);
 void qn8035_slave_push_rds(const uint16_t blocks[4], uint8_t err_mask, bool version_b, bool sync);
 

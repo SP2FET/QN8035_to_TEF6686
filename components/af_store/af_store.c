@@ -85,6 +85,13 @@ esp_err_t af_store_init(af_mem_t *out)
     if (err == ESP_OK) {
         ESP_LOGW(TAG, "stored AF lists have layout %u, not %u: ignored", ver, AF_MEM_VERSION);
     }
+    for (unsigned i = 0; i < AF_MEM_SLOTS; i++) {
+        char key[4];
+        slot_key(i, key);
+        err = nvs_erase_key(s.nvs, key);
+        ESP_RETURN_ON_FALSE(err == ESP_OK || err == ESP_ERR_NVS_NOT_FOUND, err, TAG,
+                            "erase old channel");
+    }
     ESP_RETURN_ON_ERROR(nvs_set_u8(s.nvs, KEY_VER, AF_MEM_VERSION), TAG, "version");
     return nvs_commit(s.nvs);
 }
@@ -171,6 +178,7 @@ static void store_task(void *arg)
 esp_err_t af_store_start(const af_store_config_t *cfg)
 {
     ESP_RETURN_ON_FALSE(s.open, ESP_ERR_INVALID_STATE, TAG, "not initialised");
+    ESP_RETURN_ON_FALSE(cfg, ESP_ERR_INVALID_ARG, TAG, "null config");
     s.cfg = *cfg;
     ESP_RETURN_ON_FALSE(xTaskCreate(store_task, "af_store", TASK_STACK, NULL, TASK_PRIO, NULL) ==
                             pdPASS,

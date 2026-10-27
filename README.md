@@ -93,7 +93,9 @@ requires re-enabling Wi-Fi over USB. Bus transaction logging defaults off.
 See [power analysis and measurement steps](docs/power-usage.md).
 
 Web OTA needs one USB flash first (the rollback lives in the bootloader). A new image runs on
-probation and is confirmed after 30 s; a reset before that boots the previous one again. Set
+probation. After 30 s it is confirmed only if essential tuner diagnostics pass (and the
+head-unit slave is running in the car build); failure or an earlier reset rolls back.
+No received station or RDS is required. Set
 `OTA_HOST` and, if a password is configured, `OTA_PASSWORD` in the environment.
 
 ## Web UI

@@ -597,6 +597,34 @@ static void test_replay_captured_chip(void)
     TEST_ASSERT_FALSE(seq_last(QN8035_EVT_MUTE)->on);
 }
 
+static void test_reconcile_controls_and_generation(void)
+{
+    qn8035_emu_t model;
+    qn8035_emu_init(&model);
+    qn8035_evt_t events[QN8035_EMU_MAX_EVENTS];
+    const uint8_t tune[] = {QN8035_REG_SYSTEM1,
+        QN8035_SYSTEM1_RXREQ | QN8035_SYSTEM1_CCA_CH_DIS | QN8035_SYSTEM1_CHSC |
+        QN8035_SYSTEM1_FORCE_MO};
+    qn8035_emu_write(&model, tune, sizeof(tune), events, QN8035_EMU_MAX_EVENTS);
+    const uint32_t generation = model.op_generation;
+    const uint32_t revision = model.revision;
+    const uint8_t pointer[] = {QN8035_REG_STATUS1};
+    qn8035_emu_write(&model, pointer, sizeof(pointer), events, QN8035_EMU_MAX_EVENTS);
+    TEST_ASSERT_EQUAL_UINT32(revision, model.revision);
+    const size_t n = qn8035_emu_controls(&model, events, QN8035_EMU_MAX_EVENTS);
+    TEST_ASSERT_EQUAL_size_t(6, n);
+    TEST_ASSERT_EQUAL_INT(QN8035_EVT_POWER, events[0].type);
+    TEST_ASSERT_TRUE(events[0].on);
+    TEST_ASSERT_EQUAL_INT(QN8035_EVT_FORCE_MONO, events[2].type);
+    TEST_ASSERT_TRUE(events[2].on);
+    TEST_ASSERT_EQUAL_INT(QN8035_EVT_TUNE, events[n - 1].type);
+    TEST_ASSERT_EQUAL_UINT32(generation, events[n - 1].generation);
+    const uint8_t reset[] = {QN8035_REG_SYSTEM1, QN8035_SYSTEM1_SWRST};
+    qn8035_emu_write(&model, reset, sizeof(reset), events, QN8035_EMU_MAX_EVENTS);
+    TEST_ASSERT_TRUE(model.revision != revision);
+    TEST_ASSERT_TRUE(model.op_generation != generation);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -626,5 +654,6 @@ int main(void)
     RUN_TEST(test_reset_values_match_captured_chip);
     RUN_TEST(test_cal_readback);
     RUN_TEST(test_replay_captured_chip);
+    RUN_TEST(test_reconcile_controls_and_generation);
     return UNITY_END();
 }

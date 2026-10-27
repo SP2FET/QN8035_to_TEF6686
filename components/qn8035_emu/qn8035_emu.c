@@ -2,6 +2,15 @@
 
 #include <string.h>
 
+#ifdef ESP_PLATFORM
+#include "esp_attr.h"
+#define QN_IRAM IRAM_ATTR
+#define QN_DRAM DRAM_ATTR
+#else
+#define QN_IRAM
+#define QN_DRAM
+#endif
+
 #define REG_MASK  (QN8035_REG_COUNT - 1u)
 #define RDS_BYTES (QN8035_REG_RDSD7 - QN8035_REG_RDSD0 + 1)
 
@@ -11,43 +20,47 @@ typedef struct {
     size_t max;
 } evt_sink_t;
 
-static void emit(evt_sink_t *sink, qn8035_evt_t evt)
+static void QN_IRAM emit(evt_sink_t *sink, qn8035_evt_t evt)
 {
     if (sink->n < sink->max) {
         sink->buf[sink->n++] = evt;
     }
 }
 
-static void set_fsm(qn8035_emu_t *emu, uint8_t fsm)
+static void QN_IRAM set_fsm(qn8035_emu_t *emu, uint8_t fsm)
 {
     uint8_t *st = &emu->regs[QN8035_REG_STATUS1];
     *st = (uint8_t)((*st & ~QN8035_STATUS1_FSM_MASK) | (fsm << QN8035_STATUS1_FSM_SHIFT));
 }
 
-static uint16_t pll_dlt(const uint8_t *r)
+static uint16_t QN_IRAM pll_dlt(const uint8_t *r)
 {
     return (uint16_t)(((uint16_t)r[QN8035_REG_XTAL_DIV2] << 5) | (r[QN8035_REG_XTAL_DIV1] >> 3));
 }
 
-static bool mute_state(const uint8_t *r)
+static bool QN_IRAM mute_state(const uint8_t *r)
 {
     return (r[QN8035_REG_VOL_CTL] & QN8035_VOL_MUTE_EN) || (r[QN8035_REG_MUTE] & QN8035_MUTE_BIT) ||
            (r[QN8035_REG_DAC] & QN8035_DAC_MUTE_BITS) == QN8035_DAC_MUTE_BITS;
 }
 
-static void load_defaults(qn8035_emu_t *emu)
+static void QN_IRAM load_defaults(qn8035_emu_t *emu)
 {
     /* Undocumented registers the QF30 MCU read-modify-writes, as the captured chip reads them at
      * power-on and after SWRST (docs/headunit-bus-capture.md). */
-    static const uint8_t k_undocumented[][2] = {
+    static QN_DRAM const uint8_t k_undocumented[][2] = {
         {0x1B, 0x70}, {0x1D, 0xE9}, {0x27, 0x65}, {0x2C, 0x6D}, {0x34, 0x30}, {0x35, 0x54},
         {0x36, 0x35}, {0x38, 0x02}, {0x39, 0x20}, {0x3A, 0x45}, {0x3E, 0xB5}, {0x40, 0x0A},
         {0x41, 0xE8}, {0x47, 0x35}, {0x49, 0x75}, {QN8035_REG_MUTE, 0x10}, {QN8035_REG_DAC, 0x10},
         {QN8035_REG_TUNE_GO, 0x33}, {QN8035_REG_CHIP_ID, 0x33},
     };
     const bool explicit_start = emu->explicit_start;
+    const uint32_t revision = emu->revision;
+    const uint32_t generation = emu->op_generation + 1;
     memset(emu, 0, sizeof(*emu));
     emu->explicit_start = explicit_start;
+    emu->revision = revision;
+    emu->op_generation = generation;
     uint8_t *r = emu->regs;
     /* Reset values from the Rev 0.08 register tables. CH/CH_START/CH_STOP
      * decode to 88.0 / 87.0 / 108.0 MHz, 100 kHz scan step. The captured chip comes up in
@@ -75,13 +88,13 @@ static void load_defaults(qn8035_emu_t *emu)
     emu->muted = mute_state(r);
 }
 
-void qn8035_emu_init(qn8035_emu_t *emu)
+void QN_IRAM qn8035_emu_init(qn8035_emu_t *emu)
 {
-    emu->explicit_start = false;
+    memset(emu, 0, sizeof(*emu));
     load_defaults(emu);
 }
 
-static bool is_read_only(uint8_t reg)
+static bool QN_IRAM is_read_only(uint8_t reg)
 {
     switch (reg) {
     case QN8035_REG_SNR:
@@ -96,7 +109,7 @@ static bool is_read_only(uint8_t reg)
     }
 }
 
-static uint16_t current_ch(const qn8035_emu_t *emu)
+static uint16_t QN_IRAM current_ch(const qn8035_emu_t *emu)
 {
     const uint8_t *r = emu->regs;
     return (uint16_t)(r[QN8035_REG_CH] | ((r[QN8035_REG_CH_STEP] & 0x3u) << 8));
@@ -105,25 +118,36 @@ static uint16_t current_ch(const qn8035_emu_t *emu)
 /* The frequency CH stands for. Drivers move the PLL step off its nominal value to push a spur
  * off a channel, and the CH raster moves with it: the QF30 MCU asks for 85.7 MHz with
  * XTAL_DIV1/2 = 0x88/0x3B to receive 85.5 MHz. Rounded to the TEF's 10 kHz. */
-static uint32_t effective_khz(const qn8035_emu_t *emu, uint16_t ch)
+static uint32_t QN_IRAM effective_khz(const qn8035_emu_t *emu, uint16_t ch)
 {
     const uint32_t khz = qn8035_ch_to_khz(ch);
-    const uint64_t now = QN8035_PLL_DLT_BASE + pll_dlt(emu->regs);
-    const uint64_t ref = QN8035_PLL_DLT_BASE + emu->pll_ref;
+    const uint32_t now = QN8035_PLL_DLT_BASE + pll_dlt(emu->regs);
+    const uint32_t ref = QN8035_PLL_DLT_BASE + emu->pll_ref;
     if (now == ref) {
         return khz;
     }
-    return (uint32_t)((khz * now + ref * 5u) / (ref * 10u)) * 10u;
+    uint64_t numerator = (uint64_t)khz * now + (uint64_t)ref * 5u;
+    const uint32_t denominator = ref * 10u;
+    uint32_t quotient = 0;
+    /* Avoid libgcc's flash-resident 64-bit division while the flash cache is off. */
+    for (int bit = 31; bit >= 0; bit--) {
+        const uint64_t scaled = (uint64_t)denominator << bit;
+        if (numerator >= scaled) {
+            numerator -= scaled;
+            quotient |= UINT32_C(1) << bit;
+        }
+    }
+    return quotient * 10u;
 }
 
 /* The captured chip's QN8035_REG_CAL read-back falls by one at each of these frequencies, from
  * 156 at 87.5 MHz to 134 at 107.5 MHz (412 channels, docs/headunit-bus-capture.md). */
-static const uint32_t k_cal_step_khz[] = {
+static QN_DRAM const uint32_t k_cal_step_khz[] = {
     87800, 88500, 89200, 89950, 90700, 91500, 92300, 93100, 93950, 94800, 95700,
     96600, 97550, 98500, 99500, 100550, 101600, 102700, 103850, 105000, 106250, 107500,
 };
 
-static uint8_t cal_readback(uint32_t khz)
+static uint8_t QN_IRAM cal_readback(uint32_t khz)
 {
     if (khz < 87500) {
         /* One point below the band: 191 at 65.0 MHz. */
@@ -138,7 +162,7 @@ static uint8_t cal_readback(uint32_t khz)
     return v;
 }
 
-static uint32_t scan_step_khz(uint8_t ch_step)
+static uint32_t QN_IRAM scan_step_khz(uint8_t ch_step)
 {
     switch ((ch_step >> QN8035_CH_STEP_FSTEP_SHIFT) & 0x3u) {
     case 0:  return 50;
@@ -148,10 +172,11 @@ static uint32_t scan_step_khz(uint8_t ch_step)
 }
 
 /* A new channel is being tuned: nothing measured on the old one is valid any more. */
-static void start_op(qn8035_emu_t *emu, qn8035_op_t op, uint16_t ch, uint32_t khz)
+static void QN_IRAM start_op(qn8035_emu_t *emu, qn8035_op_t op, uint16_t ch, uint32_t khz)
 {
     uint8_t *r = emu->regs;
     emu->op = (uint8_t)op;
+    emu->op_generation++;
     emu->op_ch = ch;
     emu->op_khz = khz;
     r[QN8035_REG_RSSISIG] = 0;
@@ -166,7 +191,7 @@ static void start_op(qn8035_emu_t *emu, qn8035_op_t op, uint16_t ch, uint32_t kh
 }
 
 /* busy: set CHSC for a driver that started the tune another way but polls CHSC. */
-static void request_tune(qn8035_emu_t *emu, evt_sink_t *sink, bool busy)
+static void QN_IRAM request_tune(qn8035_emu_t *emu, evt_sink_t *sink, bool busy)
 {
     const uint16_t ch = current_ch(emu);
     const uint32_t khz = effective_khz(emu, ch);
@@ -174,10 +199,11 @@ static void request_tune(qn8035_emu_t *emu, evt_sink_t *sink, bool busy)
     if (busy) {
         emu->regs[QN8035_REG_SYSTEM1] |= QN8035_SYSTEM1_CHSC;
     }
-    emit(sink, (qn8035_evt_t){.type = QN8035_EVT_TUNE, .khz = khz});
+    emit(sink, (qn8035_evt_t){.type = QN8035_EVT_TUNE, .khz = khz,
+                             .generation = emu->op_generation});
 }
 
-static void request_scan(qn8035_emu_t *emu, evt_sink_t *sink)
+static void QN_IRAM request_scan(qn8035_emu_t *emu, evt_sink_t *sink)
 {
     const uint8_t *r = emu->regs;
     const uint8_t step = r[QN8035_REG_CH_STEP];
@@ -188,13 +214,14 @@ static void request_scan(qn8035_emu_t *emu, evt_sink_t *sink)
     start_op(emu, QN8035_OP_SCAN, current_ch(emu), 0);
     set_fsm(emu, QN8035_FSM_RXCCA);
     emit(sink, (qn8035_evt_t){.type = QN8035_EVT_SEEK,
+                              .generation = emu->op_generation,
                               .seek = {.start_khz = qn8035_ch_to_khz(start),
                                        .stop_khz = qn8035_ch_to_khz(stop),
                                        .step_khz = scan_step_khz(step)}});
 }
 
 /* Returns true after a software reset (the rest of the transaction is moot). */
-static bool on_system1(qn8035_emu_t *emu, uint8_t old, evt_sink_t *sink)
+static bool QN_IRAM on_system1(qn8035_emu_t *emu, uint8_t old, evt_sink_t *sink)
 {
     uint8_t *r = emu->regs;
     const uint8_t v = r[QN8035_REG_SYSTEM1];
@@ -251,7 +278,7 @@ static bool on_system1(qn8035_emu_t *emu, uint8_t old, evt_sink_t *sink)
     return false;
 }
 
-static void on_tune_go(qn8035_emu_t *emu, uint8_t old, evt_sink_t *sink)
+static void QN_IRAM on_tune_go(qn8035_emu_t *emu, uint8_t old, evt_sink_t *sink)
 {
     const uint8_t v = emu->regs[QN8035_REG_TUNE_GO];
     if (emu->receiving && (v & ~old & QN8035_TUNE_GO_BIT)) {
@@ -260,7 +287,7 @@ static void on_tune_go(qn8035_emu_t *emu, uint8_t old, evt_sink_t *sink)
     }
 }
 
-static void on_vol_ctl(qn8035_emu_t *emu, uint8_t old, evt_sink_t *sink)
+static void QN_IRAM on_vol_ctl(qn8035_emu_t *emu, uint8_t old, evt_sink_t *sink)
 {
     const uint8_t v = emu->regs[QN8035_REG_VOL_CTL];
     const uint8_t changed = v ^ old;
@@ -277,7 +304,7 @@ static void on_vol_ctl(qn8035_emu_t *emu, uint8_t old, evt_sink_t *sink)
     }
 }
 
-static void update_mute(qn8035_emu_t *emu, evt_sink_t *sink)
+static void QN_IRAM update_mute(qn8035_emu_t *emu, evt_sink_t *sink)
 {
     const bool m = mute_state(emu->regs);
     if (m != emu->muted) {
@@ -286,11 +313,14 @@ static void update_mute(qn8035_emu_t *emu, evt_sink_t *sink)
     }
 }
 
-size_t qn8035_emu_write(qn8035_emu_t *emu, const uint8_t *data, size_t len, qn8035_evt_t *evts,
+size_t QN_IRAM qn8035_emu_write(qn8035_emu_t *emu, const uint8_t *data, size_t len, qn8035_evt_t *evts,
                         size_t max_evts)
 {
     if (len == 0) {
         return 0;
+    }
+    if (len > 1) {
+        emu->revision++;
     }
     evt_sink_t sink = {.buf = evts, .n = 0, .max = evts ? max_evts : 0};
     uint8_t *r = emu->regs;
@@ -341,13 +371,45 @@ size_t qn8035_emu_write(qn8035_emu_t *emu, const uint8_t *data, size_t len, qn80
     return sink.n;
 }
 
-void qn8035_emu_read(qn8035_emu_t *emu, uint8_t *out, size_t len)
+void QN_IRAM qn8035_emu_read(qn8035_emu_t *emu, uint8_t *out, size_t len)
 {
     qn8035_emu_peek_block(emu, out, len);
     qn8035_emu_skip(emu, len);
 }
 
-void qn8035_emu_peek_block(const qn8035_emu_t *emu, uint8_t *out, size_t len)
+size_t QN_IRAM qn8035_emu_controls(const qn8035_emu_t *emu, qn8035_evt_t *out, size_t max)
+{
+    evt_sink_t sink = {.buf = out, .max = out ? max : 0};
+    const uint8_t *r = emu->regs;
+    emit(&sink, (qn8035_evt_t){.type = QN8035_EVT_POWER, .on = emu->receiving});
+    emit(&sink, (qn8035_evt_t){.type = QN8035_EVT_MUTE, .on = emu->muted});
+    emit(&sink, (qn8035_evt_t){.type = QN8035_EVT_FORCE_MONO,
+                              .on = (r[QN8035_REG_SYSTEM1] & QN8035_SYSTEM1_FORCE_MO) != 0});
+    emit(&sink, (qn8035_evt_t){.type = QN8035_EVT_DEEMPHASIS,
+                              .us = r[QN8035_REG_VOL_CTL] & QN8035_VOL_TC ? 75 : 50});
+    const uint8_t v = r[QN8035_REG_VOL_CTL];
+    const int ana = ((int)(v & QN8035_VOL_GAIN_ANA_MASK) - 7) * 6;
+    int dig = (v & QN8035_VOL_GAIN_DIG_MASK) >> QN8035_VOL_GAIN_DIG_SHIFT;
+    emit(&sink, (qn8035_evt_t){.type = QN8035_EVT_VOLUME,
+                              .db = (int8_t)(ana - (dig > 5 ? 5 : dig))});
+    if (emu->receiving && emu->op == QN8035_OP_TUNE) {
+        emit(&sink, (qn8035_evt_t){.type = QN8035_EVT_TUNE, .khz = emu->op_khz,
+                                  .generation = emu->op_generation});
+    } else if (emu->receiving && emu->op == QN8035_OP_SCAN) {
+        const uint8_t step = r[QN8035_REG_CH_STEP];
+        const uint16_t start = r[QN8035_REG_CH_START] |
+            (((step >> QN8035_CH_STEP_START_SHIFT) & 3u) << 8);
+        const uint16_t stop = r[QN8035_REG_CH_STOP] |
+            (((step >> QN8035_CH_STEP_STOP_SHIFT) & 3u) << 8);
+        emit(&sink, (qn8035_evt_t){.type = QN8035_EVT_SEEK,
+            .generation = emu->op_generation,
+            .seek = {.start_khz = qn8035_ch_to_khz(start), .stop_khz = qn8035_ch_to_khz(stop),
+                     .step_khz = scan_step_khz(step)}});
+    }
+    return sink.n;
+}
+
+void QN_IRAM qn8035_emu_peek_block(const qn8035_emu_t *emu, uint8_t *out, size_t len)
 {
     uint8_t p = emu->ptr;
     for (size_t i = 0; i < len; i++) {
@@ -356,18 +418,18 @@ void qn8035_emu_peek_block(const qn8035_emu_t *emu, uint8_t *out, size_t len)
     }
 }
 
-void qn8035_emu_skip(qn8035_emu_t *emu, size_t len)
+void QN_IRAM qn8035_emu_skip(qn8035_emu_t *emu, size_t len)
 {
     emu->ptr = (uint8_t)((emu->ptr + len) & REG_MASK);
 }
 
-static bool cca_level_ok(const uint8_t *r)
+static bool QN_IRAM cca_level_ok(const uint8_t *r)
 {
     const int dbuv = (int)r[QN8035_REG_RSSISIG] - QN8035_RSSI_DBUV_OFFSET;
     return dbuv > (int)(r[QN8035_REG_CCA] & QN8035_CCA_RXCCAD_MASK) - 10;
 }
 
-bool qn8035_emu_complete_tune(qn8035_emu_t *emu, uint32_t khz, bool found, bool by_scan)
+bool QN_IRAM qn8035_emu_complete_tune(qn8035_emu_t *emu, uint32_t khz, bool found, bool by_scan)
 {
     uint8_t *r = emu->regs;
     if (emu->op == QN8035_OP_NONE || (emu->op == QN8035_OP_SCAN) != by_scan ||
@@ -397,7 +459,7 @@ bool qn8035_emu_complete_tune(qn8035_emu_t *emu, uint32_t khz, bool found, bool 
     return was_busy && (r[QN8035_REG_INT_CTRL] & QN8035_INT_CCA_INT_EN);
 }
 
-void qn8035_emu_set_signal(qn8035_emu_t *emu, uint8_t rssi, uint8_t snr, bool stereo)
+void QN_IRAM qn8035_emu_set_signal(qn8035_emu_t *emu, uint8_t rssi, uint8_t snr, bool stereo)
 {
     uint8_t *r = emu->regs;
     r[QN8035_REG_RSSISIG] = rssi;
@@ -406,7 +468,7 @@ void qn8035_emu_set_signal(qn8035_emu_t *emu, uint8_t rssi, uint8_t snr, bool st
                                    : (uint8_t)(r[QN8035_REG_STATUS1] | QN8035_STATUS1_ST_MO_RX);
 }
 
-bool qn8035_emu_push_rds(qn8035_emu_t *emu, const uint16_t blocks[4], uint8_t err_mask,
+bool QN_IRAM qn8035_emu_push_rds(qn8035_emu_t *emu, const uint16_t blocks[4], uint8_t err_mask,
                          bool version_b, bool sync)
 {
     uint8_t *r = emu->regs;
@@ -435,7 +497,7 @@ bool qn8035_emu_push_rds(qn8035_emu_t *emu, const uint16_t blocks[4], uint8_t er
     return (r[QN8035_REG_INT_CTRL] & QN8035_INT_RDS_INT_EN) != 0;
 }
 
-void qn8035_emu_set_rds_sync(qn8035_emu_t *emu, bool sync)
+void QN_IRAM qn8035_emu_set_rds_sync(qn8035_emu_t *emu, bool sync)
 {
     uint8_t *st2 = &emu->regs[QN8035_REG_STATUS2];
     *st2 = sync ? (uint8_t)(*st2 | QN8035_STATUS2_RDSSYNC) : (uint8_t)(*st2 & ~QN8035_STATUS2_RDSSYNC);

@@ -354,7 +354,7 @@ static esp_err_t status_get(httpd_req_t *req)
     jb_str(&j, st.patch ? st.patch : "none");
     jb_printf(&j, ",\"error\":");
     jb_str(&j, st.error);
-    jb_printf(&j, "},");
+    jb_printf(&j, "},\"am_step_khz\":%" PRIu32 ",", st.am_step_khz);
 
     const bool fm = st.band == RADIO_BAND_FM;
     jb_printf(&j,
@@ -409,6 +409,8 @@ static esp_err_t status_get(httpd_req_t *req)
     jb_printf(&j, "\"qn\":{\"enabled\":%s,\"writes\":%" PRIu32 ",\"reads\":%" PRIu32 ",\"last\":",
               b(qn.running), qn.writes, qn.reads);
     jb_str(&j, qn.last);
+    jb_printf(&j, ",\"dropped\":%" PRIu32 ",\"command_drops\":%" PRIu32,
+              qn.dropped, qn.command_drops);
 
     radio_mem_info_t mem;
     radio_mem_get(NULL, &mem);
@@ -712,6 +714,10 @@ static esp_err_t tuning_post(httpd_req_t *req)
 static esp_err_t tuning_save_post(httpd_req_t *req)
 {
     static tuning_t t;
+    const esp_err_t err = radio_wait_commands(2000);
+    if (err != ESP_OK) {
+        return reply(req, err);
+    }
     radio_get_tuning(&t);
     ESP_LOGI(TAG, "saving reception tuning");
     return reply(req, tuning_store_save(&t));

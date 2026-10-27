@@ -274,6 +274,29 @@ static void test_programme_cap(void)
     TEST_ASSERT_EQUAL_UINT8(18, got[AF_MEM_CODES - 1]);
 }
 
+static void test_complete_list_removes_obsolete_entries(void)
+{
+    const uint8_t old[] = {70, 88}, fresh[] = {100};
+    af_mem_learn(&m, 0xD412, 92000, old, 2);
+    TEST_ASSERT_EQUAL_INT(0, af_mem_replace_list(&m, 0xD412, 92000, fresh, 1));
+    TEST_ASSERT_EQUAL_UINT8(1, slot(92000)->n);
+    TEST_ASSERT_EQUAL_UINT8(100, slot(92000)->codes[0]);
+    TEST_ASSERT_EQUAL_INT(-1, af_mem_replace_list(&m, 0xD412, 92000, fresh, 1));
+    TEST_ASSERT_EQUAL_INT(0, af_mem_replace_list(&m, 0xD412, 92000, NULL, 0));
+    TEST_ASSERT_EQUAL_UINT8(0, slot(92000)->n);
+}
+
+static void test_reg_off_memory_keeps_regional_programme(void)
+{
+    const uint8_t codes[] = {70};
+    af_mem_learn(&m, 0xD512, 92000, codes, 1);
+    uint8_t out[AF_MEM_CODES];
+    TEST_ASSERT_EQUAL_UINT8(0, af_mem_heard_reg(&m, 0xD412, out, true));
+    TEST_ASSERT_EQUAL_UINT8(1, af_mem_heard_reg(&m, 0xD412, out, false));
+    TEST_ASSERT_EQUAL_UINT8(2, af_mem_programme_reg(&m, 0xD412, 93000, out, false));
+    TEST_ASSERT_EQUAL_UINT8(1, af_mem_list_reg(&m, 92000, 0xD412, out, false));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -291,5 +314,7 @@ int main(void)
     RUN_TEST(test_load_and_same);
     RUN_TEST(test_programme);
     RUN_TEST(test_programme_cap);
+    RUN_TEST(test_complete_list_removes_obsolete_entries);
+    RUN_TEST(test_reg_off_memory_keeps_regional_programme);
     return UNITY_END();
 }

@@ -26,6 +26,8 @@ static const char *TAG = "ota";
 
 #define OTA_BUF_SIZE         4096
 #define OTA_RECV_RETRIES     3            /* consecutive recv timeouts (recv_wait_timeout each) */
+#define OTA_TOTAL_US         (120LL * 1000000)
+#define OTA_PROGRESS_US      (20LL * 1000000)
 #define OTA_RESTART_DELAY_US (500 * 1000) /* lets the response reach the client */
 #define OTA_PASSWORD_MAX     64
 #define OTA_PASSWORD_HDR     "X-OTA-Password"
@@ -64,10 +66,15 @@ static bool password_ok(httpd_req_t *req)
 }
 
 /* Reads exactly len bytes of the body. */
-static bool recv_exact(httpd_req_t *req, char *buf, size_t len)
+static bool recv_exact(httpd_req_t *req, char *buf, size_t len, int64_t deadline)
 {
     unsigned timeouts = 0;
+    const int64_t progress_deadline = esp_timer_get_time() + OTA_PROGRESS_US;
     for (size_t got = 0; got < len;) {
+        const int64_t now = esp_timer_get_time();
+        if (now >= deadline || now >= progress_deadline) {
+            return false;
+        }
         const int n = httpd_req_recv(req, buf + got, len - got);
         if (n == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts <= OTA_RECV_RETRIES) {
             continue;
@@ -105,11 +112,12 @@ static const char *check_descriptor(const char *buf, size_t len)
 static const char *receive_image(httpd_req_t *req, esp_ota_handle_t ota, size_t total)
 {
     static char buf[OTA_BUF_SIZE]; /* httpd task only */
+    const int64_t deadline = esp_timer_get_time() + OTA_TOTAL_US;
     unsigned next_pct = 25;
     for (size_t done = 0; done < total;) {
         const size_t n = MIN(sizeof(buf), total - done);
-        if (!recv_exact(req, buf, n)) {
-            return "connection lost";
+        if (!recv_exact(req, buf, n, deadline)) {
+            return "upload interrupted or deadline exceeded";
         }
         if (done == 0) {
             const char *why = check_descriptor(buf, n);

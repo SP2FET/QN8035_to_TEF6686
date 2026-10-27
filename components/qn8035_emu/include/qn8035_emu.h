@@ -47,6 +47,7 @@ typedef enum {
 
 typedef struct {
     qn8035_evt_type_t type;
+    uint32_t generation; /**< tune/scan identity, unaffected by unrelated register writes */
     union {
         bool on;
         uint32_t khz;
@@ -68,6 +69,8 @@ typedef enum {
 
 typedef struct {
     uint8_t regs[QN8035_REG_COUNT];
+    uint32_t revision; /**< increments on data writes, survives software reset */
+    uint32_t op_generation;
     uint8_t ptr;       /**< register address for the next read */
     bool receiving;    /**< RXREQ set and not in standby */
     bool muted;        /**< last reported mute state */
@@ -86,6 +89,8 @@ typedef struct {
 
 /** Power-on state. */
 void qn8035_emu_init(qn8035_emu_t *emu);
+/** Current controls plus a pending operation, for bounded queue-overrun reconciliation. */
+size_t qn8035_emu_controls(const qn8035_emu_t *emu, qn8035_evt_t *out, size_t max);
 
 /**
  * One bus write transaction: data[0] is the register address, the rest are

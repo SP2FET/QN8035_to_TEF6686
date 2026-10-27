@@ -19,3 +19,4 @@ idf_component_register(
         web_ui
         sysmon
 )
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/i2c_deadline.cmake")

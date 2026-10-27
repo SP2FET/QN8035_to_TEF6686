@@ -7,7 +7,7 @@
 1. Reads the app descriptor from the image and asks the device what it runs.
 2. POSTs the image to /api/ota. The device verifies it, switches the boot slot and restarts.
 3. Waits until the device answers with the new build, then until it leaves probation
-   (main.c confirms after 30 s; a reset before that rolls back to the old image).
+   (main.c checks essential diagnostics after 30 s; failure or an earlier reset rolls back).
 
 The host defaults to $OTA_HOST, else the access point address. The password, needed only
 when BRIDGE_OTA_PASSWORD is set, comes from --password or $OTA_PASSWORD. Uses the Python

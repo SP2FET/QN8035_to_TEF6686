@@ -30,8 +30,7 @@ static void clear_text(rds_state_t *s)
     s->rt[RDS_RT_LEN] = '\0';
     s->ps_segments = 0;
     s->rt_ab = 0xFF;
-    s->af_count = 0;
-    s->af_lfmf = false;
+    rds_af_clear(s);
     s->pty_valid = false;
     s->tp = false;
     s->ta = false;
@@ -42,6 +41,9 @@ void rds_af_clear(rds_state_t *s)
 {
     s->af_count = 0;
     s->af_lfmf = false;
+    s->af_expected = 0;
+    s->af_seen_n = 0;
+    s->af_list_complete = false;
 }
 
 void rds_reset(rds_state_t *s)
@@ -73,6 +75,8 @@ static void update_pi(rds_state_t *s, uint16_t pi, uint8_t err)
 
 void rds_process_pi(rds_state_t *s, uint16_t pi, uint8_t err)
 {
+    s->af_seen_n = 0;
+    s->af_list_complete = false;
     update_pi(s, pi, err);
 }
 
@@ -86,9 +90,18 @@ static void process_af(rds_state_t *s, uint16_t c)
             s->af_lfmf = false;
         } else if (code == RDS_AF_LFMF) {
             s->af_lfmf = true;
-        } else if (code >= 1 && code <= RDS_AF_FM_LAST && s->af_count < RDS_AF_MAX &&
-                   memchr(s->af, code, s->af_count) == NULL) {
-            s->af[s->af_count++] = code;
+        } else if (code >= 224 && code <= 249) {
+            s->af_count = 0;
+            s->af_expected = code - 224;
+            s->af_list_complete = code == 224;
+        } else if (code >= 1 && code <= RDS_AF_FM_LAST) {
+            s->af_seen[s->af_seen_n++] = code;
+            if (s->af_count < RDS_AF_MAX && memchr(s->af, code, s->af_count) == NULL) {
+                s->af[s->af_count++] = code;
+                if (s->af_expected && s->af_count == s->af_expected) {
+                    s->af_list_complete = true;
+                }
+            }
         }
     }
 }
@@ -122,6 +135,8 @@ static void put_rt(rds_state_t *s, unsigned pos, uint8_t c)
 
 bool rds_process_group(rds_state_t *s, const uint16_t blk[4], const uint8_t err[4])
 {
+    s->af_seen_n = 0;
+    s->af_list_complete = false;
     update_pi(s, blk[0], err[0]);
     if (err[1] > RDS_ERR_SMALL) {
         s->rejected++;
