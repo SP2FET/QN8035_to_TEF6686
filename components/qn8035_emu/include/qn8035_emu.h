@@ -74,6 +74,7 @@ typedef struct {
     uint8_t ptr;       /**< register address for the next read */
     bool receiving;    /**< RXREQ set and not in standby */
     bool muted;        /**< last reported mute state */
+    bool volume_set;   /**< the head unit changed the gains since reset: the tuner follows */
     bool rds_upd;      /**< STATUS2.RDS_RXUPD of the last group published */
     bool rds_resync;   /**< tuned since the last group: the next one only sets RDSSYNC */
     uint16_t tuned_ch; /**< CH of the last completed tune (register value) */
@@ -89,7 +90,8 @@ typedef struct {
 
 /** Power-on state. */
 void qn8035_emu_init(qn8035_emu_t *emu);
-/** Current controls plus a pending operation, for bounded queue-overrun reconciliation. */
+/** Current controls (the volume once the head unit set it) plus a pending operation, for
+ * bounded queue-overrun reconciliation. */
 size_t qn8035_emu_controls(const qn8035_emu_t *emu, qn8035_evt_t *out, size_t max);
 
 /**

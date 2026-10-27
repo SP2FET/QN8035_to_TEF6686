@@ -67,3 +67,22 @@ bootloader/partition/initial-OTA images and `manifest.json`, plus the matching
 `builds/b2d0f5cc50764c86.elf`. The BIN descriptor's version and ELF ID were checked against
 the archive. Stand-alone application usage: 968,933 bytes, static RAM 74,020 bytes.
 These static size reports do not measure runtime heap or stack margins.
+
+## Follow-up review of 0.6.1 (0.6.2)
+
+A second review of `37dca78` found one regression and some recoveries heavier or lighter than
+intended. Version 0.6.2 addresses them.
+
+| ID | Priority | Finding and fix |
+|---|---|---|
+| FU-01 | P2 | FW-07 regression: AF memory learned only each group's 1-2 codes, so a list longer than a channel's 25 codes (method B networks) collapsed to two codes on every overflow and never stayed stable long enough to be saved. The decoder keeps the transmitter's codes so far again; a completed announcement replaces them; memory learns from that list. |
+| FU-02 | P2 | Any failed command rebooted the tuner (audible), and a failed RDS flush read after a good tune took it offline for 5 s while head-unit tunes timed out. Commands and flush reads get one immediate retry; a failed retry recovers after 250 ms. `tef.diag` counts retries and recoveries. |
+| FU-03 | P3 | OTA confirmation sampled the diagnostics once at 30 s; a recovery at that moment rolled back a good image. A 60 s window follows, and the failing check is logged. |
+| FU-04 | P3 | Boot failed unless FM/AM showed right after its tune (no delay at all on AM). It polls up to 150 ms, the health check's grace. |
+| FU-05 | P3 | Reconciliation replayed the QN reset volume over the configured start volume, and any radio error, deterministic ones included, requested another replay. Volume is replayed once the head unit set the gains; only a full radio queue replays; a refused tune fails at once. A head-unit reset replays the model's reset controls (VOL_CTL resets to 75 us, not the assumed 50 us). |
+| FU-06 | P3 | A miscorrected count code could announce an empty list and erase a channel's stored AFs. Replacement needs the whole announcement in error-free blocks. |
+| FU-07 | P3 | The warm snapshot froze while the tuner was unavailable; it now records the requested settings then. Presets and snapshots wait out a jump's PI watch. The seek deadline scales with the channel count (a 5 kHz shortwave sweep needs ~13 min). |
+| FU-08 | - | Ride diagnostics: tuner health trace records, I/O and recovery counters, bridge outcomes, slave replays, heap and stack margins. `ride_log.py` 1.1 prints them live and saves the tuning and core dumps; the report has a heap/tuner chart and health tables. |
+
+Validation: host unit and fault-injection tests cover each item (22 radio, 6 bridge scenarios);
+see the commit for build results. Not yet on hardware.

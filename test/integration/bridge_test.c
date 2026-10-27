@@ -47,5 +47,14 @@ int main(void){
     const TickType_t first=b.t;mock_tick+=100;start_tune(97000,9);
     assert(b.t==first);
     puts("PASS queue retry requests reconciliation without extending tune deadline");
+    reconciles=0;mono_calls=deemph_calls=0;
+    dispatch_qn_event(&(qn8035_evt_t){.type=QN8035_EVT_RESET},NULL);
+    assert(reconciles==1 && !mono_calls && !deemph_calls && b.op==OP_NONE);
+    puts("PASS head-unit reset replays the model's controls instead of assumed defaults");
+    reconciles=0;complete_calls=0;tune_error=ESP_ERR_INVALID_STATE;
+    start_tune(98000,11);
+    assert(!reconciles && complete_calls==1 && completed_generation==11 && b.op==OP_NONE);
+    assert(b.stats.refused==1 && b.stats.queue_retries==2 && b.stats.timeouts==1);
+    puts("PASS a refused tune fails at once and the counters record each outcome");
     return 0;
 }

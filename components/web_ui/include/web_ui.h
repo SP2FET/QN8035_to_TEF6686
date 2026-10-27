@@ -62,6 +62,16 @@
  *                 station's mean; null if none. pi: heard on the candidate for other_pi, on
  *                 "from" for search and gave_up;
  *                 ban_s: the skip (other_pi, no_pi) or retry wait (worse)
+ *   "heap_min"    least free heap since boot (bytes); "heap_largest": the largest free block now
+ *   "stacks"      {"task": least free stack in bytes since it started}, for the bridge's tasks
+ *   "tef.diag"    {"io_errors","io_retries","recoveries","boots","boot_failures","last_recovery",
+ *                 "last_recovery_age_s"} (radio_diag_t): a command or RDS flush read that fails
+ *                 is retried once at once; a failed retry, or 5 errors without a clean second,
+ *                 make the tuner unavailable until a reboot reapplies the requested settings
+ *   "qn"          {"enabled","writes","reads","last","dropped","command_drops","reconciles"}
+ *   "bridge"      {"tunes","scans","timeouts","settle_timeouts","refused","queue_retries"}
+ *                 (qn_bridge_stats_t): head-unit tunes completed without the tuner's answer or
+ *                 before its quality settled, refused, or retried after a full radio queue
  *   "rds.pty"     programme type 0..31 (RDS table); null until known
  *   "rds.tp","rds.ta"  traffic programme / traffic announcement flags
  *   "rds.ct"      {"unix": UTC seconds, "off_min": local offset} of the last error-free
@@ -78,7 +88,9 @@
  *                 since boot and the errno of the last (0 = none); httpd backs off after one
  *   GET  /api/trace?since=N   the radio's trace from sequence number N on (radio_trace_t), for
  *                        a PC recording a ride (scripts/ride_log.py): {"boot","now","first",
- *                        "lost","r":[records],"next"}. Chip units. boot changes with every start
+ *                        "lost","r":[records],"next"}. Chip units. boot changes with every start.
+ *                        Record kinds "k": q quality, a AF_Update, e AF step, h tuner health
+ *                        ("ev": lost, ready, boot_failed; "why", "io_err", "retries", "rec")
  *   GET  /api/coredump   the stored core dump, raw (espcoredump.py info_corefile -t raw); 404 if
  *                        none. A new crash overwrites it
  *

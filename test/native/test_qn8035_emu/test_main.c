@@ -612,17 +612,23 @@ static void test_reconcile_controls_and_generation(void)
     qn8035_emu_write(&model, pointer, sizeof(pointer), events, QN8035_EMU_MAX_EVENTS);
     TEST_ASSERT_EQUAL_UINT32(revision, model.revision);
     const size_t n = qn8035_emu_controls(&model, events, QN8035_EMU_MAX_EVENTS);
-    TEST_ASSERT_EQUAL_size_t(6, n);
+    TEST_ASSERT_EQUAL_size_t(5, n); /* no volume before the head unit sets the gains */
     TEST_ASSERT_EQUAL_INT(QN8035_EVT_POWER, events[0].type);
     TEST_ASSERT_TRUE(events[0].on);
     TEST_ASSERT_EQUAL_INT(QN8035_EVT_FORCE_MONO, events[2].type);
     TEST_ASSERT_TRUE(events[2].on);
     TEST_ASSERT_EQUAL_INT(QN8035_EVT_TUNE, events[n - 1].type);
     TEST_ASSERT_EQUAL_UINT32(generation, events[n - 1].generation);
+    const uint8_t gain[] = {QN8035_REG_VOL_CTL, 0x45}; /* analog gain 5: -12 dB */
+    qn8035_emu_write(&model, gain, sizeof(gain), events, QN8035_EMU_MAX_EVENTS);
+    TEST_ASSERT_EQUAL_size_t(6, qn8035_emu_controls(&model, events, QN8035_EMU_MAX_EVENTS));
+    TEST_ASSERT_EQUAL_INT(QN8035_EVT_VOLUME, events[4].type);
+    TEST_ASSERT_EQUAL_INT(-12, events[4].db);
     const uint8_t reset[] = {QN8035_REG_SYSTEM1, QN8035_SYSTEM1_SWRST};
     qn8035_emu_write(&model, reset, sizeof(reset), events, QN8035_EMU_MAX_EVENTS);
     TEST_ASSERT_TRUE(model.revision != revision);
     TEST_ASSERT_TRUE(model.op_generation != generation);
+    TEST_ASSERT_FALSE(model.volume_set);
 }
 
 int main(void)

@@ -12,6 +12,14 @@ Writes into the output directory (default rides/<YYYYmmdd-HHMMSS> under the repo
   console.log    the WebSocket log, ANSI colours stripped, prefixed with the PC time
   marks.jsonl    marks typed on stdin: empty line = mark, 1-5 = audio rating (5 = clean),
                  other text = note, q = quit (or Ctrl+C)
+  tuning.jsonl   the reception tuning (GET /api/tuning) at the start, after a restart and
+                 whenever it changed (checked every 5 min)
+  coredump-*.bin a core dump the device holds (GET /api/coredump), fetched once each
+
+Problems the device reports are printed as they happen: TUNER lines from the trace (the tuner
+unavailable, ready again, a failed boot) and HEALTH lines from /api/status (I/O errors and
+retries, head-unit commands dropped or replayed, head-unit tunes timed out, restarts, a core
+dump, stack or heap running low).
 
 The host defaults to $OTA_HOST, else the access point address. Standard library only.
 """
@@ -30,13 +38,32 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "ride_log 1.0"
+VERSION = "ride_log 1.1"
 DEFAULT_HOST = "192.168.4.1"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WS_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 CLOCK_EVERY_S = 10.0
 LIVE_WIDTH = 100
+TUNING_EVERY_S = 300.0
+# /api/status counters whose increase gets a HEALTH line: (dotted path, label).
+WATCH = (
+    ("tef.diag.recoveries", "tuner recoveries"),
+    ("tef.diag.boot_failures", "tuner boot failures"),
+    ("tef.diag.io_errors", "tuner I/O errors"),
+    ("tef.diag.io_retries", "tuner I/O retries"),
+    ("qn.dropped", "head-unit bus messages dropped"),
+    ("qn.command_drops", "head-unit commands dropped"),
+    ("qn.reconciles", "head-unit control replays"),
+    ("bridge.timeouts", "head-unit tunes without a tuner answer"),
+    ("bridge.settle_timeouts", "head-unit tunes reported before settling"),
+    ("bridge.refused", "head-unit tunes refused"),
+    ("af.mem.errors", "AF memory write errors"),
+    ("sys.crashes", "unexpected resets since power-on"),
+    ("web.select_errors", "httpd select errors"),
+)
+STACK_WARN_BYTES = 512
+HEAP_WARN_BYTES = 16 * 1024
 
 
 # ---- WebSocket (RFC 6455), pure parts ----
@@ -236,7 +263,8 @@ def format_live(now, q, status, nrec, lost, tuned_khz=None):
     if q is None:
         af = "--"
     trial = f"{q['f'] / 1000:.2f}" if q and flags & 8 and "f" in q else "--"
-    return (f"{time.strftime('%H:%M:%S', time.localtime(now))} "
+    down = "TUNER DOWN " if (st.get("tef") or {}).get("ready") is False else ""
+    return (f"{time.strftime('%H:%M:%S', time.localtime(now))} {down}"
             f"{'--' if khz is None else format(khz / 1000, '.2f')} MHz {rds.get('ps') or '--'} "
             f"lvl {_f((q or {}).get('lv'))} usn {_f((q or {}).get('usn'))} "
             f"wam {_f((q or {}).get('wam'))} | AF {af} cur {_f((q or {}).get('cur'))} "
@@ -249,6 +277,82 @@ def format_event(e):
     return (f"EVENT {e.get('ev')} {mhz(e.get('from'))}->{mhz(e.get('to'))} sc {_f(e.get('sc'))} "
             f"cur {_f(e.get('cur'))} pi {e.get('pi') or '--'}"
             + (f" ban {e['ban_s']}s" if e.get("ban_s") else ""))
+
+
+# ---- device health ----
+
+def dig(obj, path):
+    """obj["a"]["b"] for "a.b"; None where a level is missing."""
+    for key in path.split("."):
+        if not isinstance(obj, dict):
+            return None
+        obj = obj.get(key)
+    return obj
+
+
+class HealthWatch:
+    """Compares consecutive /api/status replies and names what got worse."""
+
+    def __init__(self):
+        self.prev = None
+        self.warned = set()
+
+    def check(self, st):
+        prev, self.prev = self.prev, st
+        msgs = []
+        up, pup = st.get("uptime_s"), (prev or {}).get("uptime_s")
+        if isinstance(up, (int, float)) and isinstance(pup, (int, float)) and up < pup:
+            reason = (st.get("sys") or {}).get("reset") or "?"
+            self.warned.clear()
+            return [f"device restarted (reset reason {reason}, it had run {pup} s)"]
+        if prev is not None:
+            for path, label in WATCH:
+                a, b = dig(prev, path), dig(st, path)
+                if isinstance(a, (int, float)) and isinstance(b, (int, float)) and b > a:
+                    msgs.append(f"{label} +{b - a} (now {b})")
+            tef = st.get("tef") or {}
+            if (prev.get("tef") or {}).get("ready") and tef.get("ready") is False:
+                msgs.append(f"tuner not ready: {tef.get('error') or '?'}")
+        if dig(st, "sys.dump") and not dig(prev or {}, "sys.dump"):
+            msgs.append("the device holds a core dump")
+        heap = st.get("heap_min")
+        if isinstance(heap, (int, float)) and heap < HEAP_WARN_BYTES and "heap" not in self.warned:
+            self.warned.add("heap")
+            msgs.append(f"free heap went down to {heap} bytes")
+        for task, free in sorted((st.get("stacks") or {}).items()):
+            if isinstance(free, (int, float)) and free < STACK_WARN_BYTES and task not in self.warned:
+                self.warned.add(task)
+                msgs.append(f"task {task}: stack margin down to {free} bytes")
+        return msgs
+
+
+def tuning_values(resp):
+    """The values and defaults of GET /api/tuning, and whether the set is saved."""
+    params = resp.get("params") if isinstance(resp, dict) else None
+    ps = [p for p in params or [] if isinstance(p, dict) and "k" in p]
+    return {"saved": resp.get("saved") if isinstance(resp, dict) else None,
+            "v": {p["k"]: p.get("v") for p in ps}, "def": {p["k"]: p.get("def") for p in ps}}
+
+
+def dump_key(st):
+    """Identity of the core dump /api/status reports, None without one."""
+    d = dig(st, "sys.dump")
+    if not isinstance(d, dict):
+        return None
+    return f"{d.get('elf', '')}-{d.get('pc', '')}"
+
+
+def fetch_coredump(host, directory, key):
+    with urllib.request.urlopen(f"http://{host}/api/coredump", timeout=10.0) as r:
+        data = r.read()
+    name = "coredump-" + re.sub(r"[^0-9A-Za-z_-]", "_", key) + ".bin"
+    (Path(directory) / name).write_bytes(data)
+    return name
+
+
+def format_health(h):
+    return (f"TUNER {h.get('ev')} {h.get('why') or ''} (I/O errors {h.get('io_err')}, retries "
+            f"{h.get('retries')}, recoveries {h.get('rec')})")
 
 
 # ---- I/O ----
@@ -331,9 +435,11 @@ def trace_thread(host, out, stop, period):
             k = line.get("k")
             if k == "e":
                 out.say(format_event(line))
+            elif k == "h":
+                out.say(format_health(line))
             elif k == "boot":
                 out.say(f"device restarted, boot segment {line['boot']}")
-            if k in ("q", "a", "e"):
+            if k in ("q", "a", "e", "h"):
                 out.nrec += 1
             if k == "q":
                 out.q = line
@@ -345,13 +451,51 @@ def trace_thread(host, out, stop, period):
     retry_loop("trace", out, stop, period, step)
 
 
-def status_thread(host, out, stop, period):
+def status_thread(host, out, stop, period, coredump=True):
+    watch = HealthWatch()
+    tuning = {"last": None, "at": None, "warned": False}
+    dumps = set()
+
+    def save_tuning(pc, force):
+        if not force and tuning["at"] is not None and pc - tuning["at"] < TUNING_EVERY_S:
+            return
+        tuning["at"] = pc
+        vals = tuning_values(http_get_json(host, "/api/tuning", timeout=5.0))
+        last = tuning["last"]
+        if vals == last:
+            return
+        if last is not None:
+            changed = sorted(k for k in vals["v"] if vals["v"][k] != last["v"].get(k))
+            out.say("HEALTH tuning changed: " + (", ".join(f"{k}={vals['v'][k]}" for k in changed)
+                                                 or f"saved {vals['saved']}"))
+        tuning["last"] = vals
+        out.jsonl("tuning.jsonl", dict(vals, pc=round(pc, 3)))
+
     def step():
         st = http_get_json(host, "/api/status")
         if not isinstance(st, dict):
             raise ValueError("bad status response")
+        pc = time.time()
         out.status = st
-        out.jsonl("status.jsonl", {"pc": round(time.time(), 3), "status": st})
+        out.jsonl("status.jsonl", {"pc": round(pc, 3), "status": st})
+        msgs = watch.check(st)
+        for msg in msgs:
+            out.say("HEALTH " + msg)
+        try:
+            save_tuning(pc, any(m.startswith("device restarted") for m in msgs))
+            tuning["warned"] = False
+        except Exception as e:  # noqa: BLE001 - the status line is written already
+            tuning["at"] = None
+            if not tuning["warned"]:
+                tuning["warned"] = True
+                out.say(f"tuning not read ({e})")
+        key = dump_key(st) if coredump else None
+        if key and key not in dumps:
+            dumps.add(key)
+            try:
+                out.say(f"HEALTH core dump saved as {fetch_coredump(host, out.dir, key)}")
+            except Exception as e:  # noqa: BLE001
+                out.say(f"core dump not saved ({e}); GET /api/coredump after the ride")
 
     retry_loop("status", out, stop, period, step)
 
@@ -414,6 +558,8 @@ def parse_args(argv=None):
     ap.add_argument("--trace-period", type=float, default=0.5)
     ap.add_argument("--status-period", type=float, default=2.0)
     ap.add_argument("--no-ws", action="store_true", help="do not record the WebSocket log")
+    ap.add_argument("--no-coredump", action="store_true",
+                    help="do not fetch a core dump the device holds")
     ap.add_argument("--note", default="", help="free text stored in meta.json")
     return ap.parse_args(argv)
 
@@ -434,7 +580,8 @@ def main(argv=None) -> int:
 
     stop = threading.Event()
     threads = [threading.Thread(target=trace_thread, args=(args.host, out, stop, args.trace_period)),
-               threading.Thread(target=status_thread, args=(args.host, out, stop, args.status_period)),
+               threading.Thread(target=status_thread,
+                                args=(args.host, out, stop, args.status_period, not args.no_coredump)),
                threading.Thread(target=live_thread, args=(out, stop))]
     if not args.no_ws:
         threads.append(threading.Thread(target=ws_thread, args=(args.host, out, stop)))

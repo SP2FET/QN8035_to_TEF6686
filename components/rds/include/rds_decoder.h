@@ -45,14 +45,21 @@ typedef struct {
     uint8_t ps_segments;     /**< bit n = segment n received since reset */
     uint8_t rt_ab;           /**< last text A/B flag, 0xFF = none yet */
     /** AF frequency codes 1..204 (87.6..107.9 MHz in 100 kHz steps) in order of arrival, each
-     * once. Method B pairs are not told apart from method A: every code is kept, and the
-     * receiver checks the PI before it stays on one. LF/MF entries are skipped. */
+     * once, since the reset or the last completed announcement (which replaces them). Method B
+     * pairs are not told apart from method A: every code is kept, and the receiver checks the
+     * PI before it stays on one. LF/MF entries are skipped. */
     uint8_t af[RDS_AF_MAX];
     uint8_t af_count;
-    uint8_t af_expected;     /**< method A count in the current announcement, 0 if unknown */
+    /** The current announcement: a count code 224..249, then its codes. It completes when every
+     * code it announced arrived, all in error-free blocks; a method B list (the tuned frequency
+     * repeated in every pair) never does, nor one with LF/MF entries. */
+    uint8_t af_cycle[RDS_AF_MAX];
+    uint8_t af_cycle_n;
+    uint8_t af_expected;     /**< codes the current announcement announced */
+    bool af_cycle_ok;        /**< announced and received without corrected blocks so far */
     uint8_t af_seen[2];      /**< valid FM codes actually received in this group */
     uint8_t af_seen_n;
-    bool af_list_complete;  /**< this group completed an announced replacement list */
+    bool af_list_complete;  /**< this group completed an announcement: af is exactly its list */
     bool af_lfmf;            /**< the next AF code is an LF/MF frequency (after code 250) */
     /** Programme type 0..31 (RDS table, not RBDS), traffic programme and traffic announcement.
      * Taken from error-free B blocks only: a miscorrected one would flicker them. */

@@ -125,7 +125,30 @@ def synthetic_ride(d: Path):
                           "sc": 100, "cur": 150, "pi": "3F44", "ban_s": 0, "pc": pc0 + 8.1, "boot": 1})
             lines.append({"s": 902, "t": dev0 + 9000, "k": "e", "ev": "novel", "from": 92000, "to": 94400,
                           "sc": None, "cur": None, "pi": None, "ban_s": 0, "pc": pc0 + 9.0, "boot": 1})
+    lines.append({"s": 903, "t": 5000 + 9500, "k": "h", "f": 92000, "ev": "lost",
+                  "why": "RDS flush failed", "op": 3, "io_err": 1, "retries": 2, "rec": 1,
+                  "pc": base + 9.5, "boot": 1})
+    lines.append({"s": 904, "t": 5000 + 10700, "k": "h", "f": 92000, "ev": "ready", "why": "mock",
+                  "op": 3, "io_err": 1, "retries": 2, "rec": 1, "pc": base + 10.7, "boot": 1})
     lines.append({"pc": base + 3, "k": "gap", "boot": 1, "lost": 5})
+    statuses = [
+        {"pc": base + 1, "status": {"uptime_s": 100, "heap_free": 60000, "heap_min": 50000,
+                                    "tef": {"ready": True, "diag": {"io_errors": 0, "recoveries": 0}},
+                                    "qn": {"dropped": 0}, "stacks": {"radio": 900}}},
+        {"pc": base + 10, "status": {"uptime_s": 109, "heap_free": 58000, "heap_min": 49000,
+                                     "tef": {"ready": False, "diag": {"io_errors": 1, "recoveries": 1}},
+                                     "qn": {"dropped": 3}, "stacks": {"radio": 850}}},
+        {"pc": base + 101, "status": {"uptime_s": 2, "heap_free": 61000, "heap_min": 60000,
+                                      "sys": {"reset": "panic", "warm": True, "crashes": 1},
+                                      "tef": {"ready": True, "diag": {"io_errors": 0, "recoveries": 0}},
+                                      "qn": {"dropped": 0}, "stacks": {"radio": 1000}}},
+    ]
+    (d / "status.jsonl").write_text("\n".join(json.dumps(x) for x in statuses) + "\n", encoding="utf-8")
+    tunings = [{"pc": base, "saved": True, "v": {"af_up": 60, "af_gain": 20},
+                "def": {"af_up": 60, "af_gain": 30}},
+               {"pc": base + 50, "saved": False, "v": {"af_up": 40, "af_gain": 20},
+                "def": {"af_up": 60, "af_gain": 30}}]
+    (d / "tuning.jsonl").write_text("\n".join(json.dumps(x) for x in tunings) + "\n", encoding="utf-8")
     (d / "trace.jsonl").write_text("\n".join(json.dumps(x) for x in lines) + "\nnot json\n", encoding="utf-8")
     marks = [{"pc": base + 5, "k": "mark", "rate": 2}, {"pc": base + 12, "k": "mark", "note": "tunnel"},
              {"pc": base + 13, "k": "mark"}]
@@ -146,12 +169,18 @@ class ReportTests(unittest.TestCase):
             paths = rr.build_report(d)
             text = paths["report"].read_text(encoding="utf-8")
             self.assertIn("<svg", text)
-            self.assertEqual(text.count("<svg"), 6)
+            self.assertEqual(text.count("<svg"), 7)
+            self.assertIn("Device health", text)
+            self.assertIn("tuner recoveries", text)
+            self.assertIn("RDS flush failed", text)
+            self.assertIn("panic", text)
+            self.assertIn("af_gain", text)
+            self.assertEqual(len(rows(paths["health"])), 3)
             self.assertIn("AF_Update calibration", text)
             self.assertIn("novel", text)
             self.assertEqual(len(rows(paths["quality"])), sum(1 for x in lines if x.get("k") == "q"))
             self.assertEqual(len(rows(paths["af"])), sum(1 for x in lines if x.get("k") == "a"))
-            self.assertEqual(len(rows(paths["events"])), 3 + 3)
+            self.assertEqual(len(rows(paths["events"])), 3 + 3 + 2)
 
     def test_empty_ride_and_window(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -174,6 +203,41 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(cal["score"], [2.0])
         pts = [(i, (i * 7) % 13) for i in range(10000)]
         self.assertLessEqual(len(rr.decimate(pts)), rr.MAX_POINTS)
+
+
+class HealthTests(unittest.TestCase):
+    def test_watch_reports_increases_restart_and_margins(self):
+        w = rl.HealthWatch()
+        base = {"uptime_s": 10, "tef": {"ready": True, "diag": {"recoveries": 0, "io_errors": 0}},
+                "qn": {"command_drops": 0}, "stacks": {"radio": 2000}, "heap_min": 50000}
+        self.assertEqual(w.check(base), [])
+        worse = json.loads(json.dumps(base))
+        worse["uptime_s"] = 12
+        worse["tef"] = {"ready": False, "error": "I2C errors", "diag": {"recoveries": 1, "io_errors": 5}}
+        worse["qn"]["command_drops"] = 2
+        worse["stacks"]["radio"] = 300
+        text = "\n".join(w.check(worse))
+        self.assertIn("tuner recoveries +1", text)
+        self.assertIn("tuner I/O errors +5", text)
+        self.assertIn("head-unit commands dropped +2", text)
+        self.assertIn("tuner not ready: I2C errors", text)
+        self.assertIn("task radio: stack margin down to 300", text)
+        self.assertEqual(w.check(worse), [])          # nothing new, stack warned once
+        self.assertIn("device restarted", w.check(dict(worse, uptime_s=1))[0])
+
+    def test_tuning_values_and_dump_key(self):
+        resp = {"saved": True, "params": [{"k": "af_up", "v": 60, "def": 60}, {"k": "x"}, "junk"]}
+        self.assertEqual(rl.tuning_values(resp), {"saved": True, "v": {"af_up": 60, "x": None},
+                                                  "def": {"af_up": 60, "x": None}})
+        self.assertIsNone(rl.dump_key({"sys": {"dump": None}}))
+        self.assertEqual(rl.dump_key({"sys": {"dump": {"elf": "ab", "pc": "0x1"}}}), "ab-0x1")
+
+    def test_counter_increase_across_restart(self):
+        st = [{"time": float(i), "status": {"qn": {"dropped": v}}} for i, v in enumerate([0, 2, 5, 1, 4])]
+        self.assertEqual(rr.counter_increase(st, "qn.dropped"), (8, 1.0, 4.0))
+        hs = [{"time": 1.0, "ev": "lost", "why": "x"}, {"time": 2.5, "ev": "ready"},
+              {"time": 3.0, "ev": "lost", "why": "y"}]
+        self.assertEqual([r[2] for r in rr.outages(hs)], [1.5, None])
 
 
 if __name__ == "__main__":

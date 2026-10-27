@@ -57,6 +57,7 @@ static struct {
     SemaphoreHandle_t dispatch_lock; /* serializes timer/slave command submission */
     bool powered;      /* head unit requested receive mode (slave task only) */
     bool hu_mute;      /* head unit mute (slave task only) */
+    qn_bridge_stats_t stats; /* under mux */
 } b = {.mux = portMUX_INITIALIZER_UNLOCKED};
 
 static inline bool reached(TickType_t now, TickType_t t)
@@ -68,7 +69,9 @@ static void report(esp_err_t err, const char *what)
 {
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "%s: %s", what, esp_err_to_name(err));
-        qn8035_slave_request_reconcile();
+        if (err == ESP_ERR_TIMEOUT) { /* the radio queue was full: replay the model's controls */
+            qn8035_slave_request_reconcile();
+        }
     }
 }
 
@@ -91,6 +94,11 @@ static bool begin_op(op_t op, uint32_t khz, uint32_t generation)
     b.tuned = false;
     b.khz = khz;
     b.t = xTaskGetTickCount();
+    if (op == OP_TUNE) {
+        b.stats.tunes++;
+    } else {
+        b.stats.scans++;
+    }
     portEXIT_CRITICAL(&b.mux);
     return true;
 }
@@ -101,6 +109,7 @@ static void fail_op(uint32_t khz, bool scan, uint32_t generation)
     portENTER_CRITICAL(&b.mux);
     if (b.generation == generation) {
         b.op = OP_NONE;
+        b.stats.refused++;
     }
     portEXIT_CRITICAL(&b.mux);
     qn8035_slave_complete_tune(khz, false, scan, generation);
@@ -122,9 +131,10 @@ static void start_tune(uint32_t khz, uint32_t generation)
     const esp_err_t err = resume ? radio_tune_resume(khz) : radio_tune_keep_programme(khz);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "tune %lu kHz: %s", (unsigned long)khz, esp_err_to_name(err));
-        if (err == ESP_ERR_TIMEOUT || err == ESP_ERR_INVALID_STATE) {
+        if (err == ESP_ERR_TIMEOUT) { /* queue full: the model's replay retries the tune */
             portENTER_CRITICAL(&b.mux);
             b.resume = b.resume || resume;
+            b.stats.queue_retries++;
             portEXIT_CRITICAL(&b.mux);
             qn8035_slave_request_reconcile();
         } else {
@@ -168,8 +178,9 @@ static void dispatch_qn_event(const qn8035_evt_t *e, void *ctx)
         b.hu_mute = false;
         esp_timer_stop(b.tune_timer);
         apply_mute();
-        report(radio_set_force_mono(false), "reset mono");
-        report(radio_set_deemphasis(500), "reset deemphasis");
+        /* Mono and de-emphasis follow the model's reset values (VOL_CTL resets to 75 us), as
+         * after a lost command. */
+        qn8035_slave_request_reconcile();
         break;
     case QN8035_EVT_POWER:
         ESP_LOGI(TAG, "head unit %s the receiver", e->on ? "enabled" : "disabled");
@@ -193,7 +204,9 @@ static void dispatch_qn_event(const qn8035_evt_t *e, void *ctx)
         b.next_generation = e->generation;
         portEXIT_CRITICAL(&b.mux);
         esp_timer_stop(b.tune_timer); /* not running is fine */
-        report(esp_timer_start_once(b.tune_timer, TUNE_COALESCE_US), "tune timer");
+        if (esp_timer_start_once(b.tune_timer, TUNE_COALESCE_US) != ESP_OK) {
+            start_tune(e->khz, e->generation); /* not coalesced, but not lost */
+        }
         break;
     case QN8035_EVT_SEEK: {
         esp_timer_stop(b.tune_timer); /* the scan replaces a tune not started yet */
@@ -208,7 +221,7 @@ static void dispatch_qn_event(const qn8035_evt_t *e, void *ctx)
         const esp_err_t err = radio_scan(e->seek.start_khz, e->seek.stop_khz, e->seek.step_khz);
         if (err != ESP_OK) {
             report(err, "scan");
-            if (err != ESP_ERR_TIMEOUT && err != ESP_ERR_INVALID_STATE) {
+            if (err != ESP_ERR_TIMEOUT) { /* a full queue is retried through the replay */
                 fail_op(e->seek.stop_khz, true, e->generation);
             }
         } else {
@@ -296,6 +309,9 @@ static void on_quality(const radio_quality_t *q)
         if (b.tuned) {
             const bool settled = q && q->valid && q->age >= SETTLED_AGE;
             complete = settled || reached(now, b.t + pdMS_TO_TICKS(SETTLE_TIMEOUT_MS));
+            if (complete && !settled) {
+                b.stats.settle_timeouts++;
+            }
             if (complete && op == OP_TUNE) {
                 /* The head unit's scan steps through tunes and drops a channel on RXCCA_FAIL:
                  * report what our seek would decide on this sample; unsettled data finds nothing. */
@@ -305,6 +321,7 @@ static void on_quality(const radio_quality_t *q)
                                                                                : TUNE_TIMEOUT_MS))) {
             complete = true; /* the radio never tuned it */
             b.found = false;
+            b.stats.timeouts++;
         }
     }
     const uint32_t khz = b.khz;
@@ -409,4 +426,11 @@ esp_err_t qn_bridge_start(const qn8035_slave_config_t *cfg)
     ESP_LOGI(TAG, "resumed: receiver %s%s%s", e->receiving ? "on" : "off",
              e->muted ? ", muted" : "", e->op != QN8035_OP_NONE ? ", finishing a tune" : "");
     return ESP_OK;
+}
+
+void qn_bridge_get_stats(qn_bridge_stats_t *out)
+{
+    portENTER_CRITICAL(&b.mux);
+    *out = b.stats;
+    portEXIT_CRITICAL(&b.mux);
 }

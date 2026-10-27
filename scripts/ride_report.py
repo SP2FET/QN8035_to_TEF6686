@@ -4,8 +4,9 @@
     python scripts/ride_report.py rides/20261026-101500 [--from 10:20:00] [--to 10:45:00]
                                   [--out report.html]
 
-Reads trace.jsonl, status.jsonl and marks.jsonl from the ride directory (missing files are
-fine) and writes report.html (or --out), quality.csv, af.csv and events.csv beside them.
+Reads trace.jsonl, status.jsonl, tuning.jsonl and marks.jsonl from the ride directory (missing
+files are fine) and writes report.html (or --out), quality.csv, af.csv, events.csv and
+health.csv beside them.
 Device time stamps are mapped to PC time per boot segment with the median offset of the
 "clock" lines. Charts are inline SVG; no external resources. Standard library only.
 """
@@ -29,6 +30,26 @@ EV_COLORS = {"switched": "#2a9d3a", "jumped": "#2a9d3a", "worse": "#e08a00",
              "trial": "#888888", "abort": "var(--abort)", "search": "#9467bd",
              "gave_up": "#9467bd"}
 PALETTE = ["#1f77b4", "#e377c2", "#17becf", "#bcbd22", "#9467bd", "#8c564b", "#7f7f7f", "#ff7f0e"]
+HEALTH_COUNTERS = (
+    ("tef.diag.io_errors", "tuner I/O errors"),
+    ("tef.diag.io_retries", "tuner I/O retries"),
+    ("tef.diag.recoveries", "tuner recoveries (unavailable, rebooted)"),
+    ("tef.diag.boot_failures", "tuner boot failures"),
+    ("qn.dropped", "head-unit bus messages dropped"),
+    ("qn.command_drops", "head-unit commands dropped"),
+    ("qn.reconciles", "head-unit control replays"),
+    ("bridge.tunes", "head-unit tunes"),
+    ("bridge.scans", "head-unit scans"),
+    ("bridge.timeouts", "head-unit tunes without a tuner answer"),
+    ("bridge.settle_timeouts", "head-unit tunes reported before settling"),
+    ("bridge.refused", "head-unit tunes refused"),
+    ("bridge.queue_retries", "head-unit tunes retried (radio queue full)"),
+    ("af.mem.writes", "AF memory flash writes"),
+    ("af.mem.errors", "AF memory write errors"),
+    ("sys.crashes", "unexpected resets since power-on"),
+    ("web.select_errors", "httpd select() errors"),
+)
+HEALTH_COLORS = {"lost": "#d62728", "ready": "#2a9d3a", "boot_failed": "#000000"}
 
 
 # ---- loading ----
@@ -50,13 +71,13 @@ def read_jsonl(path):
 
 
 def assign_times(trace):
-    """Return (q, a, e) record lists with "time" (PC epoch seconds), sorted by time."""
+    """Return (q, a, e, h) record lists with "time" (PC epoch seconds), sorted by time."""
     offs = {}
     for r in trace:
         if r.get("k") == "clock" and "now" in r and "pc" in r:
             offs.setdefault(r.get("boot", 1), []).append(r["pc"] - r["now"] / 1000.0)
     med = {b: statistics.median(v) for b, v in offs.items()}
-    out = {"q": [], "a": [], "e": []}
+    out = {"q": [], "a": [], "e": [], "h": []}
     for r in trace:
         k = r.get("k")
         if k not in out:
@@ -71,7 +92,7 @@ def assign_times(trace):
         out[k].append(r)
     for v in out.values():
         v.sort(key=lambda r: r["time"])
-    return out["q"], out["a"], out["e"]
+    return out["q"], out["a"], out["e"], out["h"]
 
 
 def day_time(first, hms):
@@ -144,9 +165,137 @@ def decimate(pts, maxn=MAX_POINTS):
     return out
 
 
+# ---- device health ----
+
+def dig(obj, path):
+    for key in path.split("."):
+        if not isinstance(obj, dict):
+            return None
+        obj = obj.get(key)
+    return obj
+
+
+def hms(t):
+    return "" if t is None else time.strftime("%H:%M:%S", time.localtime(t))
+
+
+def load_statuses(path):
+    """status.jsonl as [{"time", "status"}] sorted by time."""
+    out = [{"time": s["pc"], "status": s["status"]} for s in read_jsonl(path)
+           if isinstance(s.get("pc"), (int, float)) and isinstance(s.get("status"), dict)]
+    out.sort(key=lambda s: s["time"])
+    return out
+
+
+def load_tunings(path):
+    out = [dict(t, time=t["pc"]) for t in read_jsonl(path)
+           if isinstance(t.get("pc"), (int, float)) and isinstance(t.get("v"), dict)]
+    out.sort(key=lambda t: t["time"])
+    return out
+
+
+def counter_increase(statuses, path):
+    """(increase, first time, last time) of a counter; a restart (the counter falls) starts over."""
+    total, first, last, prev = 0, None, None, None
+    for s in statuses:
+        v = dig(s["status"], path)
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            continue
+        if prev is not None and v > prev:
+            total += v - prev
+            first = s["time"] if first is None else first
+            last = s["time"]
+        prev = v
+    return total, first, last
+
+
+def health_rows(statuses):
+    rows = []
+    for path, label in HEALTH_COUNTERS:
+        if not any(isinstance(dig(s["status"], path), (int, float)) for s in statuses):
+            continue
+        total, first, last = counter_increase(statuses, path)
+        rows.append([label, path, total, hms(first), hms(last)])
+    return rows
+
+
+def outages(hs):
+    """[from, why, seconds until ready or None] of each time the tuner was marked unavailable."""
+    rows, open_ = [], None
+    for h in hs:
+        if h.get("ev") == "lost":
+            if open_ is not None:
+                rows.append([hms(open_["time"]), open_.get("why") or "", None])
+            open_ = h
+        elif h.get("ev") == "ready" and open_ is not None:
+            rows.append([hms(open_["time"]), open_.get("why") or "", h["time"] - open_["time"]])
+            open_ = None
+    if open_ is not None:
+        rows.append([hms(open_["time"]), open_.get("why") or "", None])
+    return rows
+
+
+def unavailable_runs(statuses):
+    runs, start = [], None
+    for s in statuses:
+        down = (s["status"].get("tef") or {}).get("ready") is False
+        if down and start is None:
+            start = s["time"]
+        elif not down and start is not None:
+            runs.append((start, s["time"]))
+            start = None
+    if start is not None:
+        runs.append((start, statuses[-1]["time"]))
+    return runs
+
+
+def restarts(statuses):
+    out = []
+    for prev, cur in zip(statuses, statuses[1:]):
+        a, b = prev["status"].get("uptime_s"), cur["status"].get("uptime_s")
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)) and b < a:
+            sysi = cur["status"].get("sys") or {}
+            out.append([hms(cur["time"]), sysi.get("reset", ""), a, b,
+                        "yes" if sysi.get("warm") else "no", sysi.get("crashes", "")])
+    return out
+
+
+def margins(statuses):
+    """The least free heap and stack seen."""
+    rows = []
+    for path, label in (("heap_free", "free heap"), ("heap_min", "least free heap (device)"),
+                        ("heap_largest", "largest free heap block")):
+        vals = [dig(s["status"], path) for s in statuses]
+        vals = [v for v in vals if isinstance(v, (int, float))]
+        if vals:
+            rows.append([label, min(vals)])
+    stacks = {}
+    for s in statuses:
+        for task, free in (s["status"].get("stacks") or {}).items():
+            if isinstance(free, (int, float)):
+                stacks[task] = min(free, stacks.get(task, free))
+    rows += [[f"stack of task {task}", v] for task, v in sorted(stacks.items())]
+    return rows
+
+
+def tuning_rows(tunings):
+    """Values off their default at the first snapshot, then every change."""
+    if not tunings:
+        return []
+    first = tunings[0]
+    defs = first.get("def") or {}
+    rows = [[hms(first["time"]), k, v, f"default {defs.get(k)}"]
+            for k, v in sorted(first["v"].items()) if k in defs and v != defs[k]]
+    for prev, cur in zip(tunings, tunings[1:]):
+        for k, v in sorted(cur["v"].items()):
+            if prev["v"].get(k) != v:
+                rows.append([hms(cur["time"]), k, v, f"was {prev['v'].get(k)}"])
+    return rows
+
+
 # ---- CSV ----
 
-def write_csvs(d, qs, as_, es, marks):
+def write_csvs(d, qs, as_, es, marks, hs=(), statuses=()):
     paths = {}
     qcols = ["time", "boot", "khz", "age_ms", "level_dbuv", "usn_pct", "wam_pct", "offset_khz",
              "bw_khz", "mod_pct", "stereo", "softmute_pct", "highcut_pct", "stereo_blend_pct",
@@ -182,6 +331,9 @@ def write_csvs(d, qs, as_, es, marks):
     rows += [(m["time"], [iso(m["time"]), "mark", "", "", "", "", "", "",
                           m.get("note", f"rating {m['rate']}" if "rate" in m else "")])
              for m in marks]
+    rows += [(h["time"], [iso(h["time"]), "tuner_" + str(h.get("ev")), h.get("f"), "", "", "", "", "",
+                          f'{h.get("why") or ""} io_err={h.get("io_err")} retries={h.get("retries")} '
+                          f'rec={h.get("rec")}']) for h in hs]
     rows.sort(key=lambda x: x[0])
     with open(p, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -189,6 +341,17 @@ def write_csvs(d, qs, as_, es, marks):
         for _, row in rows:
             w.writerow(row)
     paths["events"] = p
+    cols = [("uptime_s", "uptime_s"), ("heap_free", "heap_free"), ("heap_min", "heap_min"),
+            ("tef.ready", "tef_ready"), ("tef.op_status", "op_status"), ("tef.error", "tef_error"),
+            *[(path, path.replace(".", "_")) for path, _ in HEALTH_COUNTERS]]
+    p = d / "health.csv"
+    with open(p, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["time"] + [name for _, name in cols])
+        for s in statuses:
+            vals = [dig(s["status"], path) for path, _ in cols]
+            w.writerow([iso(s["time"])] + ["" if v is None else v for v in vals])
+    paths["health"] = p
     return paths
 
 
@@ -347,7 +510,7 @@ def freq_color(f, freqs):
     return PALETTE[freqs.index(f) % len(PALETTE)]
 
 
-def build_panels(qs, as_, es, t0, t1):
+def build_panels(qs, as_, es, t0, t1, hs=(), statuses=()):
     ts = tuned_settled(qs)
     trial = [q for q in qs if is_trial(q) and is_settled(q)]
     panels = []
@@ -401,6 +564,16 @@ def build_panels(qs, as_, es, t0, t1):
     p = Panel("RDS reject %", t0, t1, 0.0, 100.0, nd=0)
     p.line(pts, "#d62728", "rejected / all groups (2 s)", gap=6.0)
     p.band(runs, "#2a9d3a", "sync")
+    panels.append(p)
+
+    heap = [(s["time"], s["status"]["heap_free"] / 1024) for s in statuses
+            if isinstance(s["status"].get("heap_free"), (int, float))]
+    p = Panel("Heap KB / tuner", t0, t1, *Panel.autoy([v for _, v in heap]), nd=0)
+    p.line(heap, "#1f77b4", "free heap", gap=10.0)
+    p.band(unavailable_runs(statuses), "#d62728", "tuner not ready")
+    p.ticks([(h["time"], HEALTH_COLORS.get(h.get("ev"), "#888"),
+              f'tuner {h.get("ev")} {h.get("why") or ""} I/O errors {h.get("io_err")} '
+              f'retries {h.get("retries")} recoveries {h.get("rec")}') for h in hs])
     panels.append(p)
     return panels
 
@@ -519,7 +692,7 @@ def table(headers, rows):
     return f"<table><tr>{h}</tr>{body}</table>"
 
 
-def render_html(d, qs, as_, es, marks, meta, t0, t1):
+def render_html(d, qs, as_, es, marks, meta, t0, t1, hs=(), statuses=(), tunings=()):
     parts = [f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>Ride {html.escape(d.name)}</title>"
              f"<style>{CSS}</style></head><body><h1>Ride {html.escape(d.name)}</h1>"]
     fw = (meta or {}).get("fw") or {}
@@ -527,7 +700,7 @@ def render_html(d, qs, as_, es, marks, meta, t0, t1):
                  f"records, {len(marks)} marks; firmware {html.escape(str(fw.get('version', '?')))}"
                  + (f"; note: {html.escape(str((meta or {}).get('note') or (meta or {}).get('args', {}).get('note') or ''))}"
                     if meta else "") + "</p>")
-    for p in build_panels(qs, as_, es, t0, t1):
+    for p in build_panels(qs, as_, es, t0, t1, hs, statuses):
         parts.append(p.svg(marks))
     parts.append("<h2>Per tuned frequency</h2>")
     parts.append(table(["MHz", "kind", "time s", "samples", "level mean", "level median", "USN", "WAM",
@@ -558,6 +731,18 @@ def render_html(d, qs, as_, es, marks, meta, t0, t1):
     parts.append("<h2>Marks (mean of the 3 s before)</h2>")
     parts.append(table(["time", "mark", "level", "USN", "WAM", "score", "soft mute %", "high cut %"],
                        mark_rows(qs, marks)))
+    parts.append("<h2>Device health (increase during the window)</h2>")
+    parts.append(table(["counter", "status field", "increase", "first", "last"], health_rows(statuses)))
+    parts.append("<h3>Tuner unavailable</h3>")
+    parts.append(table(["from", "why", "seconds until ready"],
+                       [[a, why, fmt(sec, 1)] for a, why, sec in outages(hs)]))
+    parts.append("<h3>Device restarts</h3>")
+    parts.append(table(["time", "reset reason", "uptime before s", "uptime after s", "warm",
+                        "crashes since power-on"], restarts(statuses)))
+    parts.append("<h3>Memory margins (least seen, bytes)</h3>")
+    parts.append(table(["what", "bytes"], margins(statuses)))
+    parts.append("<h2>Reception tuning (off default at the start, then changes)</h2>")
+    parts.append(table(["time", "key", "value", "default / before"], tuning_rows(tunings)))
     parts.append("</body></html>")
     return "".join(parts)
 
@@ -565,30 +750,33 @@ def render_html(d, qs, as_, es, marks, meta, t0, t1):
 def build_report(d, tfrom=None, tto=None, out=None):
     d = Path(d)
     trace = read_jsonl(d / "trace.jsonl")
-    qs, as_, es = assign_times(trace)
+    qs, as_, es, hs = assign_times(trace)
     marks = [dict(m, time=m["pc"]) for m in read_jsonl(d / "marks.jsonl")
              if m.get("k") == "mark" and isinstance(m.get("pc"), (int, float))]
-    status_pcs = [s["pc"] for s in read_jsonl(d / "status.jsonl") if isinstance(s.get("pc"), (int, float))]
+    statuses = load_statuses(d / "status.jsonl")
+    tunings = load_tunings(d / "tuning.jsonl")
     meta = {}
     if (d / "meta.json").exists():
         try:
             meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
         except ValueError:
             pass
-    alltimes = [r["time"] for r in qs + as_ + es + marks] + status_pcs
+    alltimes = [r["time"] for r in qs + as_ + es + hs + marks + statuses]
     if alltimes:
         first, last = min(alltimes), max(alltimes)
     else:
         first = last = time.time()
     lo = day_time(first, tfrom) if tfrom else first
     hi = day_time(first, tto) if tto else last
-    qs, as_, es, marks = (window(x, lo, hi) for x in (qs, as_, es, marks))
+    qs, as_, es, hs, marks, statuses = (window(x, lo, hi)
+                                        for x in (qs, as_, es, hs, marks, statuses))
     t0, t1 = (lo, hi) if (tfrom or tto) else (first, last)
     if t1 - t0 < 1.0:
         t1 = t0 + 1.0
-    paths = write_csvs(d, qs, as_, es, marks)
+    paths = write_csvs(d, qs, as_, es, marks, hs, statuses)
     report = Path(out) if out else d / "report.html"
-    report.write_text(render_html(d, qs, as_, es, marks, meta, t0, t1), encoding="utf-8")
+    report.write_text(render_html(d, qs, as_, es, marks, meta, t0, t1, hs, statuses, tunings),
+                      encoding="utf-8")
     paths["report"] = report
     return paths
 

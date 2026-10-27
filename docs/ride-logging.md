@@ -37,6 +37,11 @@ A lost Wi-Fi connection is retried every few seconds; the ring covers about 10 s
 samples, so short drop-outs lose nothing (the live line counts `lost` records otherwise). A device
 restart starts a new segment in the files.
 
+Lines starting with `TUNER` (from the trace) and `HEALTH` (from `/api/status`) report the device's
+own problems as they happen: the tuner unavailable and ready again, I/O errors and retries,
+head-unit commands dropped or replayed, head-unit tunes that timed out, restarts, a core dump,
+stack or heap running low, a changed reception tuning. Note what you heard at that moment.
+
 ## After the ride
 
 ```sh
@@ -45,7 +50,7 @@ python scripts/ride_report.py rides/<date-time> --from 17:42:00 --to 17:47:00   
 ```
 
 This writes `report.html` (open it in a browser, no internet needed) and `quality.csv`,
-`af.csv`, `events.csv` next to the recording:
+`af.csv`, `events.csv` and `health.csv` next to the recording:
 
 - **Charts** on one time axis: frequency with AF steps, level (tuned, trial, AF_Update
   candidates), USN/WAM, score, DSP (soft mute, high cut, stereo and high blend), RDS errors. Marks
@@ -55,6 +60,11 @@ This writes `report.html` (open it in a browser, no internet needed) and `qualit
 - **AF_Update calibration**: how far AF_Update levels and scores sit from the settled values of
   the same frequency. This is the number to tune `af_window` with.
 - **Marks** with the mean quality of the 3 s before each.
+- **Device health**: how far each counter rose (tuner I/O errors, retries and recoveries,
+  head-unit drops, replays and tune timeouts, AF memory writes, resets), when the tuner was
+  unavailable and for how long, restarts with their reason, and the least free heap and stack.
+  The last chart shows free heap with the tuner's outages.
+- **Reception tuning**: values off their default at the start, and every change during the ride.
 
 Send the whole `rides/<date-time>/` folder (or just `report.html` and the CSVs) for analysis.
 
@@ -67,6 +77,9 @@ Send the whole `rides/<date-time>/` folder (or just `report.html` and the CSVs) 
 | `status.jsonl` | `/api/status` every 2 s (RDS names, AF list with averages) |
 | `console.log` | the device log, PC time stamps |
 | `marks.jsonl` | marks, ratings, notes |
+| `tuning.jsonl` | the reception tuning at the start, after a restart and after every change |
+| `coredump-*.bin` | a core dump the device held, fetched once (decode with that build's ELF) |
+| `health.csv` | (report) the device's health counters at every status poll |
 
 The record format is described in `scripts/ride_log.py` and in `radio_trace_t`
 ([radio.h](../components/radio/include/radio.h)).

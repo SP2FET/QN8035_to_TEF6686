@@ -222,10 +222,14 @@ esp_err_t radio_mem_store(int slot, const char *name, int *stored)
     ESP_RETURN_ON_FALSE(s.lock, ESP_ERR_INVALID_STATE, TAG, "memory disabled");
     ESP_RETURN_ON_FALSE(slot >= -1 && slot < PRESETS_MAX, ESP_ERR_INVALID_ARG, TAG, "bad slot %d",
                         slot);
+    radio_settings_t cur;
     radio_status_t st;
+    if (!radio_get_settings(&cur)) {
+        return ESP_ERR_INVALID_STATE; /* moving, unsettled, or an AF candidate on trial */
+    }
     radio_get_status(&st);
-    if (!st.tef_ready || !st.q.valid || st.seeking || st.af.trial || st.af.checking_pi) {
-        return ESP_ERR_INVALID_STATE;
+    if (st.band != cur.band || st.freq_khz != cur.khz) {
+        return ESP_ERR_INVALID_STATE; /* it moved in between */
     }
     const char *ps = st.rds.pi_valid && st.rds.ps_segments == PS_COMPLETE ? st.rds.ps : NULL;
 

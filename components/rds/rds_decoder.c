@@ -7,6 +7,7 @@
  * frequency follows. */
 #define RDS_AF_FM_LAST 204
 #define RDS_AF_LFMF    250
+#define RDS_AF_COUNT_0 224 /* 224 + n: a list of n AFs follows, n <= 25 */
 /* Clock time plausibility: Modified Julian Days of 2000-01-01 and 2100-01-01. Stations without a
  * clock send zeros. */
 #define RDS_MJD_2000 51544u
@@ -42,6 +43,8 @@ void rds_af_clear(rds_state_t *s)
     s->af_count = 0;
     s->af_lfmf = false;
     s->af_expected = 0;
+    s->af_cycle_n = 0;
+    s->af_cycle_ok = false;
     s->af_seen_n = 0;
     s->af_list_complete = false;
 }
@@ -80,8 +83,27 @@ void rds_process_pi(rds_state_t *s, uint16_t pi, uint8_t err)
     update_pi(s, pi, err);
 }
 
-/* Block C of a 0A group: two AF codes. */
-static void process_af(rds_state_t *s, uint16_t c)
+/* Appends code to a list of up to RDS_AF_MAX unique codes; false if it was there or full. */
+static bool add_code(uint8_t *list, uint8_t *n, uint8_t code)
+{
+    if (*n >= RDS_AF_MAX || memchr(list, code, *n) != NULL) {
+        return false;
+    }
+    list[(*n)++] = code;
+    return true;
+}
+
+static void complete_cycle(rds_state_t *s)
+{
+    memcpy(s->af, s->af_cycle, s->af_cycle_n);
+    s->af_count = s->af_cycle_n;
+    s->af_list_complete = true;
+}
+
+/* Block C of a 0A group: two AF codes. clean: no corrected bits. Only an announcement received
+ * entirely clean may replace the list: a miscorrected count code would announce a short or an
+ * empty one. */
+static void process_af(rds_state_t *s, uint16_t c, bool clean)
 {
     const uint8_t codes[2] = {(uint8_t)(c >> 8), (uint8_t)(c & 0xFF)};
     for (unsigned i = 0; i < 2; i++) {
@@ -90,17 +112,20 @@ static void process_af(rds_state_t *s, uint16_t c)
             s->af_lfmf = false;
         } else if (code == RDS_AF_LFMF) {
             s->af_lfmf = true;
-        } else if (code >= 224 && code <= 249) {
-            s->af_count = 0;
-            s->af_expected = code - 224;
-            s->af_list_complete = code == 224;
+        } else if (code >= RDS_AF_COUNT_0 && code <= RDS_AF_COUNT_0 + RDS_AF_MAX) {
+            s->af_cycle_n = 0;
+            s->af_expected = (uint8_t)(code - RDS_AF_COUNT_0);
+            s->af_cycle_ok = clean;
+            if (clean && s->af_expected == 0) {
+                complete_cycle(s); /* "no AFs" */
+            }
         } else if (code >= 1 && code <= RDS_AF_FM_LAST) {
             s->af_seen[s->af_seen_n++] = code;
-            if (s->af_count < RDS_AF_MAX && memchr(s->af, code, s->af_count) == NULL) {
-                s->af[s->af_count++] = code;
-                if (s->af_expected && s->af_count == s->af_expected) {
-                    s->af_list_complete = true;
-                }
+            add_code(s->af, &s->af_count, code);
+            s->af_cycle_ok = s->af_cycle_ok && clean;
+            if (add_code(s->af_cycle, &s->af_cycle_n, code) && s->af_cycle_ok &&
+                s->af_cycle_n == s->af_expected) {
+                complete_cycle(s);
             }
         }
     }
@@ -166,7 +191,7 @@ bool rds_process_group(rds_state_t *s, const uint16_t blk[4], const uint8_t err[
         process_ct(s, blk);
     }
     if (type == 0 && !version_b && err[2] <= RDS_ERR_SMALL) {
-        process_af(s, blk[2]);
+        process_af(s, blk[2], err[2] == RDS_ERR_NONE);
     }
     if (type == 0 && err[3] <= RDS_ERR_SMALL) {
         const unsigned seg = b & 0x3u;

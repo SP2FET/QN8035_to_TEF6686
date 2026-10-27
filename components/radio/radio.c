@@ -38,7 +38,9 @@ static const char *TAG = "radio";
 #define MAX_IO_ERRORS       5
 #define IO_CLEAR_MS         1000
 #define WRITE_RETRY_MS      250
-#define SEEK_TIMEOUT_MS     180000
+/* After a boot's tune, until FM/AM shows: the health check's grace (SEEK_MEASURE_TIMEOUT_MS). */
+#define BOOT_STATE_POLL_MS  10
+#define BOOT_STATE_POLLS    15
 #define PRESET_RDS_FLUSH_MS 35
 /* Longest wait of the task loop: the task watchdog (sdkconfig.defaults: 5 s, then a panic reset)
  * watches it. A stuck tuner transfer would otherwise leave the TEF playing its last station and
@@ -53,6 +55,9 @@ static const char *TAG = "radio";
 #define SEEK_AM_SETTLE_MS        70  /* 60 ms + the 10 ms mute slope of the first step */
 #define SEEK_MEASURE_TIMEOUT_MS  150
 #define SEEK_POLL_MS             5
+/* A seek's overall deadline: every channel may run into the measure timeout. */
+#define SEEK_STEP_BUDGET_MS      (SEEK_MEASURE_TIMEOUT_MS + 2 * SEEK_POLL_MS)
+#define SEEK_SLACK_MS            1000
 /* Programme audio moves a single offset reading by several kHz (a clean 70 dBuV station read
  * 8.7 kHz where others read 2-3), so offset is judged on a mean over ~45 ms. */
 #define SEEK_OFFSET_SAMPLES      10
@@ -296,9 +301,26 @@ static uint32_t next_channel(band_range_t r, uint32_t khz, int dir)
 
 static af_params_t af_params(void);
 
+/* Health records in the trace give a ride recording the exact time of each outage. */
+static void trace_health(radio_health_ev_t ev, const char *why)
+{
+    radio_trace_t t = {.t_ms = now_ms(), .kind = RADIO_TRACE_HEALTH};
+    lock();
+    t.khz = s.status.freq_khz;
+    t.h.event = (uint8_t)ev;
+    t.h.op_state = (uint8_t)s.status.op_state;
+    t.h.io_errors = s.status.diag.io_errors;
+    t.h.io_retries = s.status.diag.io_retries;
+    t.h.recoveries = s.status.diag.recoveries;
+    strlcpy(t.h.why, why ? why : "", sizeof(t.h.why));
+    trace_push(&s.trace, &t);
+    unlock();
+}
+
 static void set_not_ready(const char *why)
 {
     const bool trial = s.af.st.trial;
+    const bool was_ready = s.status.tef_ready;
     const af_params_t p = af_params();
     s.seek.active = false;
     s.af.verifying = false;
@@ -316,7 +338,15 @@ static void set_not_ready(const char *why)
     s.status.af.checking_pi = false;
     s.status.af.probation = false;
     strlcpy(s.status.error, why, sizeof(s.status.error));
+    if (was_ready) {
+        s.status.diag.recoveries++;
+        s.status.diag.last_recovery_ms = now_ms();
+        strlcpy(s.status.diag.last_recovery, why, sizeof(s.status.diag.last_recovery));
+    }
     unlock();
+    if (was_ready) {
+        trace_health(RADIO_HEALTH_LOST, why);
+    }
     s.next_boot = xTaskGetTickCount() + pdMS_TO_TICKS(REBOOT_RETRY_MS);
 }
 
@@ -331,6 +361,9 @@ static bool io_ok(esp_err_t err, const char *what)
         return true;
     }
     s.last_io_error = xTaskGetTickCount();
+    lock();
+    s.status.diag.io_errors++;
+    unlock();
     if (++s.io_errors == 1) {
         ESP_LOGW(TAG, "%s: %s", what, esp_err_to_name(err));
     }
@@ -341,16 +374,34 @@ static bool io_ok(esp_err_t err, const char *what)
     return false;
 }
 
-/* Settings retain the requested values, but ready stays false until all are reapplied. */
-static bool write_ok(esp_err_t err, const char *what)
+/* The first try of a command or flush read. A single NACK on the bus (some modules have only
+ * the internal pull-ups) is retried at once instead of costing an audible tuner reboot: the
+ * commands and reads retried are idempotent. Only a failed retry counts in io_ok. */
+static bool io_first(esp_err_t err)
 {
-    if (io_ok(err, what)) {
-        return true;
+    if (err == ESP_OK) {
+        return io_ok(err, NULL);
     }
-    set_not_ready(what);
+    lock();
+    s.status.diag.io_retries++;
+    unlock();
+    return false;
+}
+
+/* After a failed retry: unavailable until a reboot reapplies the requested settings, which
+ * comes soon, not after a failed boot's backoff. Always false. */
+static bool recover_soon(const char *why)
+{
+    if (s.status.tef_ready) {
+        set_not_ready(why);
+    }
     s.next_boot = xTaskGetTickCount() + pdMS_TO_TICKS(WRITE_RETRY_MS);
     return false;
 }
+
+/* call is evaluated a second time when the first try fails. */
+#define TEF_TRY(call, what)   (io_first(call) || io_ok((call), (what)))
+#define TEF_WRITE(call, what) (TEF_TRY(call, what) || recover_soon(what))
 
 static esp_err_t tef_tune(radio_band_t band, uint32_t khz, tef6686_tune_mode_t mode)
 {
@@ -702,10 +753,12 @@ static void af_follow_rds(void)
         af_seed();
     }
     af_listed(&s.af.st, r->af_seen, r->af_seen_n, now_ms());
+    /* r->af: the transmitter's codes so far, replaced by a completed announcement. A list longer
+     * than the memory keeps its first codes instead of churning group by group. */
     lock();
     const int slot = r->af_list_complete
         ? af_mem_replace_list(&s.mem, r->pi, s.status.freq_khz, r->af, r->af_count)
-        : af_mem_learn(&s.mem, r->pi, s.status.freq_khz, r->af_seen, r->af_seen_n);
+        : af_mem_learn(&s.mem, r->pi, s.status.freq_khz, r->af, r->af_count);
     unlock();
     if (slot >= 0) {
         ESP_LOGD(TAG, "AF memory: PI %04X changed (slot %d)", r->pi, slot);
@@ -806,16 +859,14 @@ static bool rds_flush_wait(unsigned delay_ms)
     vTaskDelay(pdMS_TO_TICKS(delay_ms));
     for (unsigned i = 0; i <= RDS_BUFFER_GROUPS; i++) {
         tef6686_rds_t stale;
-        if (!io_ok(tef6686_fm_get_rds(s.tef, &stale), "rds flush")) {
-            set_not_ready("RDS flush failed");
-            return false;
+        if (!TEF_TRY(tef6686_fm_get_rds(s.tef, &stale), "rds flush")) {
+            return recover_soon("RDS flush failed");
         }
         if (!(stale.status & TEF6686_RDS_DATA_AVAILABLE)) {
             return true;
         }
     }
-    set_not_ready("RDS buffer did not drain");
-    return false;
+    return recover_soon("RDS buffer did not drain");
 }
 
 static bool rds_flush(void)
@@ -829,7 +880,7 @@ static void af_verify_begin(uint32_t khz, int16_t level_avg)
 {
     const af_params_t p = af_params();
     poll_rds(); /* the station's last group still counts as its own */
-    if (!s.status.tef_ready || !write_ok(tef_tune(RADIO_BAND_FM, khz, TEF6686_TUNE_CHECK), "af check")) {
+    if (!s.status.tef_ready || !TEF_WRITE(tef_tune(RADIO_BAND_FM, khz, TEF6686_TUNE_CHECK), "af check")) {
         return;
     }
     if (!rds_flush()) {
@@ -851,7 +902,7 @@ static void af_verify_begin(uint32_t khz, int16_t level_avg)
 /* Back to the tuned station. */
 static bool af_jump_back(void)
 {
-    if (!write_ok(tef_tune(RADIO_BAND_FM, s.af.origin, TEF6686_TUNE_JUMP), "af return") ||
+    if (!TEF_WRITE(tef_tune(RADIO_BAND_FM, s.af.origin, TEF6686_TUNE_JUMP), "af return") ||
         !rds_flush()) {
         lock();
         s.status.freq_khz = s.af.origin; /* recovery must return here even after a trial ended */
@@ -988,7 +1039,7 @@ static void af_trial_cancel(void)
 
 static void af_accept(void)
 {
-    if (!write_ok(tef_tune(RADIO_BAND_FM, 0, TEF6686_TUNE_END), "af end")) {
+    if (!TEF_WRITE(tef_tune(RADIO_BAND_FM, 0, TEF6686_TUNE_END), "af end")) {
         return;
     }
     s.af.verifying = false;
@@ -1003,7 +1054,7 @@ static void af_trial_jump(uint32_t khz, int16_t level_avg)
     s.af.cand = khz;
     s.af.origin = s.status.freq_khz;
     s.af.cand_score = level_avg;
-    if (!write_ok(tef_tune(RADIO_BAND_FM, khz, TEF6686_TUNE_JUMP), "af jump")) {
+    if (!TEF_WRITE(tef_tune(RADIO_BAND_FM, khz, TEF6686_TUNE_JUMP), "af jump")) {
         return;
     }
     if (!rds_flush()) { /* an old group must not confirm the candidate */
@@ -1216,7 +1267,7 @@ static void keep_programme(uint32_t khz)
 static void tune_to(radio_band_t band, uint32_t khz, bool by_scan, bool found)
 {
     const bool band_changed = band != s.status.band;
-    if (!write_ok(tef_tune(band, khz, TEF6686_TUNE_PRESET), "tune")) {
+    if (!TEF_WRITE(tef_tune(band, khz, TEF6686_TUNE_PRESET), "tune")) {
         lock();
         s.status.band = band;
         s.status.freq_khz = khz;
@@ -1247,7 +1298,7 @@ static void tune_to(radio_band_t band, uint32_t khz, bool by_scan, bool found)
     af_restart();
     quality_soon();
     if (band_changed) {
-        if (!write_ok(apply_bandwidth(), "bandwidth")) {
+        if (!TEF_WRITE(apply_bandwidth(), "bandwidth")) {
             return;
         }
     }
@@ -1268,6 +1319,7 @@ static void step(int dir)
 static void seek_begin(int dir, bool wrap, uint32_t start, uint32_t stop, uint32_t step_khz,
                        band_range_t r)
 {
+    const uint32_t steps = (r.max - r.min) / step_khz + 1;
     seek_t *k = &s.seek;
     *k = (seek_t){
         .active = true,
@@ -1280,8 +1332,9 @@ static void seek_begin(int dir, bool wrap, uint32_t start, uint32_t stop, uint32
         .step = step_khz,
         .min = r.min,
         .max = r.max,
-        .steps_left = (r.max - r.min) / step_khz + 1,
-        .deadline = xTaskGetTickCount() + pdMS_TO_TICKS(SEEK_TIMEOUT_MS),
+        .steps_left = steps,
+        .deadline = xTaskGetTickCount() +
+                    pdMS_TO_TICKS(steps * SEEK_STEP_BUDGET_MS + SEEK_SLACK_MS),
     };
     if (wrap) {
         const uint32_t next = next_channel(r, s.status.freq_khz, dir);
@@ -1363,7 +1416,7 @@ static void seek_poll(void)
             return;
         }
         k->cur = (uint32_t)next;
-        if (!write_ok(tef_tune(s.status.band, k->cur, TEF6686_TUNE_SEARCH), "seek tune")) {
+        if (!TEF_WRITE(tef_tune(s.status.band, k->cur, TEF6686_TUNE_SEARCH), "seek tune")) {
             return;
         }
         k->measuring = true;
@@ -1609,22 +1662,34 @@ static void boot_tef(void)
     if (err == ESP_OK) {
         err = tef6686_get_identification(s.tef, &id);
     }
+    const tef6686_op_state_t expected =
+        s.status.band == RADIO_BAND_FM ? TEF6686_STATE_FM : TEF6686_STATE_AM;
     if (err == ESP_OK) {
         err = tef6686_get_operation_state(s.tef, &st);
     }
-    if (err == ESP_OK && st != (s.status.band == RADIO_BAND_FM ? TEF6686_STATE_FM
-                                                             : TEF6686_STATE_AM)) {
+    /* The tune just sent takes the tuner out of active standby; allow the health check's grace
+     * before calling the boot failed. */
+    for (unsigned i = 0; err == ESP_OK && st != expected && i < BOOT_STATE_POLLS; i++) {
+        vTaskDelay(pdMS_TO_TICKS(BOOT_STATE_POLL_MS));
+        err = tef6686_get_operation_state(s.tef, &st);
+    }
+    if (err == ESP_OK && st != expected) {
         err = ESP_ERR_INVALID_STATE;
     }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "tuner init failed (%s), retrying in %d s", esp_err_to_name(err),
-                 REBOOT_RETRY_MS / 1000);
+        ESP_LOGE(TAG, "tuner init failed (%s, state %d), retrying in %d s", esp_err_to_name(err),
+                 (int)st, REBOOT_RETRY_MS / 1000);
         set_not_ready(esp_err_to_name(err));
+        lock();
+        s.status.diag.boot_failures++;
+        unlock();
+        trace_health(RADIO_HEALTH_BOOT_FAILED, esp_err_to_name(err));
         return;
     }
 
     s.io_errors = 0;
     lock();
+    s.status.diag.boots++;
     s.status.tef_ready = true;
     s.status.ident = id;
     s.status.op_state = st;
@@ -1638,6 +1703,7 @@ static void boot_tef(void)
     ESP_LOGI(TAG, "tuner ready: %s, patch %s, %s %lu kHz", tef6686_variant_name(id.device),
              s.status.patch, s.status.band == RADIO_BAND_FM ? "FM" : "AM",
              (unsigned long)s.status.freq_khz);
+    trace_health(RADIO_HEALTH_READY, s.status.patch);
 
     radio_evt_t evt = {.type = RADIO_EVT_TUNED,
                        .tuned = {.band = s.status.band, .khz = s.status.freq_khz, .found = true}};
@@ -1658,7 +1724,7 @@ static void handle_tuning(uint16_t id, int16_t value)
         return; /* applied by the next successful boot */
     }
     if (p->cmd != TUNING_HOST) {
-        write_ok(send_tuning_cmd(p->cmd), "tuning");
+        (void)TEF_WRITE(send_tuning_cmd(p->cmd), "tuning");
     }
     publish_af();
 }
@@ -1751,7 +1817,7 @@ static void handle_cmd(const radio_cmd_t *c)
         s.status.volume = c->volume;
         unlock();
         if (ready) {
-            write_ok(tef6686_set_volume(s.tef, c->volume), "volume");
+            (void)TEF_WRITE(tef6686_set_volume(s.tef, c->volume), "volume");
         }
         break;
     case CMD_MUTE:
@@ -1759,7 +1825,7 @@ static void handle_cmd(const radio_cmd_t *c)
         s.status.mute = c->mute;
         unlock();
         if (ready) {
-            write_ok(tef6686_set_mute(s.tef, c->mute), "mute");
+            (void)TEF_WRITE(tef6686_set_mute(s.tef, c->mute), "mute");
         }
         break;
     case CMD_BANDWIDTH:
@@ -1780,13 +1846,13 @@ static void handle_cmd(const radio_cmd_t *c)
         }
         unlock();
         if (ready) {
-            write_ok(apply_bandwidth(), "bandwidth");
+            (void)TEF_WRITE(apply_bandwidth(), "bandwidth");
         }
         break;
     case CMD_DEEMPHASIS:
         s.cfg.fm_deemphasis = c->deemphasis;
         if (ready) {
-            write_ok(tef6686_fm_set_deemphasis(s.tef, c->deemphasis), "deemphasis");
+            (void)TEF_WRITE(tef6686_fm_set_deemphasis(s.tef, c->deemphasis), "deemphasis");
         }
         break;
     case CMD_FORCE_MONO:
@@ -1794,7 +1860,7 @@ static void handle_cmd(const radio_cmd_t *c)
         s.status.force_mono = c->mono;
         unlock();
         if (ready) {
-            write_ok(send_tuning_cmd(tuning_params[TUNING_ST_MIN_MODE].cmd), "force mono");
+            (void)TEF_WRITE(send_tuning_cmd(tuning_params[TUNING_ST_MIN_MODE].cmd), "force mono");
         }
         break;
     case CMD_TUNING:
@@ -1807,7 +1873,7 @@ static void handle_cmd(const radio_cmd_t *c)
         unlock();
         ESP_LOGI(TAG, "tuning: all values replaced");
         if (ready) {
-            write_ok(apply_tuning(), "tuning"); /* FM Set_Bandwidth included */
+            (void)TEF_WRITE(apply_tuning(), "tuning"); /* FM Set_Bandwidth included */
         }
         publish_af();
         break;
@@ -2141,18 +2207,27 @@ esp_err_t radio_wait_commands(uint32_t timeout_ms)
     }
 }
 
-bool radio_diagnostics_passed(void)
+const char *radio_diagnostics_problem(void)
 {
     if (!s.lock) {
-        return false;
+        return "radio not started";
     }
     lock();
-    const bool ok = s.status.tef_ready && s.measured &&
-                    (s.status.op_state == (s.status.band == RADIO_BAND_FM ? TEF6686_STATE_FM
-                                                                        : TEF6686_STATE_AM)) &&
-                    !reached(xTaskGetTickCount(), s.last_quality + pdMS_TO_TICKS(1000));
+    const tef6686_op_state_t expected =
+        s.status.band == RADIO_BAND_FM ? TEF6686_STATE_FM : TEF6686_STATE_AM;
+    const char *why = !s.status.tef_ready              ? "tuner not ready"
+                      : !s.measured                     ? "no settled quality yet"
+                      : s.status.op_state != expected   ? "unexpected operation state"
+                      : reached(xTaskGetTickCount(), s.last_quality + pdMS_TO_TICKS(1000))
+                          ? "quality not fresh"
+                          : NULL;
     unlock();
-    return ok;
+    return why;
+}
+
+bool radio_diagnostics_passed(void)
+{
+    return radio_diagnostics_problem() == NULL;
 }
 
 void radio_get_tuning(tuning_t *out)
@@ -2178,6 +2253,24 @@ void radio_get_status(radio_status_t *out)
     unlock();
 }
 
+static void settings_locked(radio_settings_t *out)
+{
+    out->band = s.status.band;
+    out->khz = s.status.freq_khz;
+    out->volume = s.status.volume;
+    out->mute = s.status.mute;
+    out->bw_auto = s.status.bw_auto;
+    out->bw = s.status.bw;
+}
+
+/* The frequency may still change: not settled, or an AF candidate on check, trial or PI watch. */
+static bool moving_locked(void)
+{
+    return !s.status.tef_ready || !s.status.q.valid || s.status.q.age < SEEK_SETTLED_QUALITY_AGE ||
+           s.status.seeking || s.status.af.trial || s.status.af.checking_pi ||
+           s.status.af.probation;
+}
+
 bool radio_get_settings(radio_settings_t *out)
 {
     memset(out, 0, sizeof(*out));
@@ -2185,17 +2278,25 @@ bool radio_get_settings(radio_settings_t *out)
         return false;
     }
     lock();
-    out->band = s.status.band;
-    out->khz = s.status.freq_khz;
-    out->volume = s.status.volume;
-    out->mute = s.status.mute;
-    out->bw_auto = s.status.bw_auto;
-    out->bw = s.status.bw;
-    const bool moving = !s.status.tef_ready || !s.status.q.valid ||
-                        s.status.q.age < SEEK_SETTLED_QUALITY_AGE ||
-                        s.status.seeking || s.status.af.trial || s.status.af.checking_pi;
+    settings_locked(out);
+    const bool moving = moving_locked();
     unlock();
     return !moving;
+}
+
+bool radio_get_restart_settings(radio_settings_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (s.lock == NULL) {
+        return false;
+    }
+    lock();
+    settings_locked(out);
+    /* Unavailable: the requested settings are what the next boot applies (set_not_ready ended any
+     * seek, check or trial). */
+    const bool ok = !s.status.tef_ready || !moving_locked();
+    unlock();
+    return ok;
 }
 
 size_t radio_get_trace(uint32_t since, radio_trace_t *out, size_t max, uint32_t *first,

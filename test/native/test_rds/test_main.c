@@ -398,6 +398,30 @@ static void test_af_announced_list_replaces_old_entries(void)
     TEST_ASSERT_EQUAL_UINT8(0, s.af_count);
 }
 
+static void test_af_corrected_announcement_never_replaces(void)
+{
+    const uint8_t small[4] = {0, 0, RDS_ERR_SMALL, 0};
+    af_group(0x0102, OK);    /* codes 1, 2 */
+    af_group(0xE0CD, small); /* a corrected "no AFs" */
+    TEST_ASSERT_FALSE(s.af_list_complete);
+    TEST_ASSERT_EQUAL_UINT8(2, s.af_count);
+    af_group(0xE203, OK);    /* a clean announcement of two: code 3 */
+    af_group(0x04CD, small); /* its second code corrected */
+    TEST_ASSERT_FALSE(s.af_list_complete);
+    TEST_ASSERT_EQUAL_UINT8(4, s.af_count);
+}
+
+static void test_af_long_list_keeps_accumulating(void)
+{
+    for (unsigned i = 0; i < 20; i++) { /* method B style: announcements never complete */
+        af_group((uint16_t)(0xEB00 | (2 * i + 1)), OK);
+        af_group((uint16_t)(((2 * i + 2) << 8) | 205), OK);
+    }
+    TEST_ASSERT_FALSE(s.af_list_complete);
+    TEST_ASSERT_EQUAL_UINT8(RDS_AF_MAX, s.af_count);
+    TEST_ASSERT_EQUAL_UINT8(1, s.af[0]);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -409,6 +433,8 @@ int main(void)
     RUN_TEST(test_unprintable_characters);
     RUN_TEST(test_af_basic_and_dedup);
     RUN_TEST(test_af_announced_list_replaces_old_entries);
+    RUN_TEST(test_af_corrected_announcement_never_replaces);
+    RUN_TEST(test_af_long_list_keeps_accumulating);
     RUN_TEST(test_af_clear);
     RUN_TEST(test_af_lfmf_skipped);
     RUN_TEST(test_af_bad_block_c_and_0b);

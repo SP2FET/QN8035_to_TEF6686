@@ -34,11 +34,11 @@ class FirmwareIntegrationTests(unittest.TestCase):
     def test_radio_recovery_and_command_ordering(self):
         pure = ["af/af.c", "af/af_mem.c", "rds/rds_decoder.c", "tuning/tuning.c", "trace/trace.c"]
         out = self.compile_run([FIXTURES / "radio_test.c", *[ROOT / "components" / p for p in pure]])
-        self.assertEqual(out.count("PASS "), 15, out)
+        self.assertEqual(out.count("PASS "), 22, out)
 
     def test_bridge_restart_and_deadlines(self):
         out = self.compile_run([FIXTURES / "bridge_test.c"])
-        self.assertEqual(out.count("PASS "), 4, out)
+        self.assertEqual(out.count("PASS "), 6, out)
 
     def test_af_persistence_and_schema_reboot(self):
         out = self.compile_run([FIXTURES / "af_store_test.c", ROOT / "components/af/af.c",

@@ -54,6 +54,7 @@ typedef struct {
     uint32_t reads;
     uint32_t dropped; /**< bus messages or trace records lost */
     uint32_t command_drops; /**< control messages requiring reconciliation */
+    uint32_t reconciles;    /**< replays of the model's controls (lost or refused commands, reset) */
     char last[48];    /**< last transaction, e.g. "W 00 <- 13" */
 } qn8035_slave_stats_t;
 

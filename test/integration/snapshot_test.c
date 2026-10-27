@@ -27,7 +27,7 @@ bool qn8035_slave_snapshot(qn8035_emu_t *out) {
     out->tuned_ch = 700;
     return true;
 }
-bool radio_get_settings(radio_settings_t *out) {
+bool radio_get_restart_settings(radio_settings_t *out) {
     memset(out, 0, sizeof(*out));
     out->khz = 95000;
     return mode != 2;

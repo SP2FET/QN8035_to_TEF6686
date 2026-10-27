@@ -17,9 +17,9 @@ static size_t strlcpy(char *d,const char *s,size_t n) { size_t l=strlen(s); if(n
 TickType_t mock_tick;
 static uint32_t hw_khz;
 static tef6686_tune_mode_t hw_mode;
-static bool fail_jump, fail_mute, hw_muted;
-static bool fail_end;
-static bool fail_stereo;
+/* Injected failures: each counter fails that many calls in a row. */
+static unsigned fail_jump, fail_end, fail_mute, fail_rds, state_lag;
+static bool hw_muted, fail_stereo;
 static tef6686_op_state_t mock_state=TEF6686_STATE_FM;
 static tef6686_rds_t next_rds;
 static radio_cmd_t queued[8];
@@ -27,12 +27,12 @@ static unsigned nq;
 int xQueueSend(QueueHandle_t q,const void *p,TickType_t t) { if(nq==8)return 0;queued[nq++]=*(const radio_cmd_t *)p;return 1; }
 esp_err_t tef6686_command(tef6686_handle_t d,uint8_t m,uint8_t c,const uint16_t *p,size_t n){return ESP_OK;}
 esp_err_t tef6686_tune(tef6686_handle_t d,tef6686_band_t b,tef6686_tune_mode_t m,uint16_t f){
-    if(m==TEF6686_TUNE_JUMP && fail_jump){fail_jump=false;return ESP_FAIL;}
-    if(m==TEF6686_TUNE_END && fail_end){fail_end=false;return ESP_FAIL;}
+    if(m==TEF6686_TUNE_JUMP && fail_jump){fail_jump--;return ESP_FAIL;}
+    if(m==TEF6686_TUNE_END && fail_end){fail_end--;return ESP_FAIL;}
     if(m!=TEF6686_TUNE_END)hw_khz=b==TEF6686_BAND_FM?f*10:f;
     hw_mode=m;return ESP_OK;
 }
-esp_err_t tef6686_fm_get_rds(tef6686_handle_t d,tef6686_rds_t *r){*r=next_rds;next_rds.status=0;return ESP_OK;}
+esp_err_t tef6686_fm_get_rds(tef6686_handle_t d,tef6686_rds_t *r){if(fail_rds){fail_rds--;return ESP_FAIL;}*r=next_rds;next_rds.status=0;return ESP_OK;}
 esp_err_t tef6686_get_quality(tef6686_handle_t d,tef6686_band_t b,tef6686_quality_t *q){memset(q,0,sizeof(*q));q->status=1000;q->level=500;return ESP_OK;}
 esp_err_t tef6686_get_quality_data(tef6686_handle_t d,tef6686_band_t b,tef6686_quality_t *q){return tef6686_get_quality(d,b,q);}
 esp_err_t tef6686_fm_get_stereo(tef6686_handle_t d,bool *v){if(fail_stereo)return ESP_FAIL;*v=true;return ESP_OK;}
@@ -41,11 +41,11 @@ esp_err_t tef6686_set_bandwidth(tef6686_handle_t d,tef6686_band_t b,bool a,uint1
 esp_err_t tef6686_fm_set_deemphasis(tef6686_handle_t d,uint16_t t){return ESP_OK;}
 esp_err_t tef6686_fm_set_rds(tef6686_handle_t d,bool e){return ESP_OK;}
 esp_err_t tef6686_set_volume(tef6686_handle_t d,int16_t v){return ESP_OK;}
-esp_err_t tef6686_set_mute(tef6686_handle_t d,bool v){if(fail_mute){fail_mute=false;return ESP_FAIL;}hw_muted=v;return ESP_OK;}
+esp_err_t tef6686_set_mute(tef6686_handle_t d,bool v){if(fail_mute){fail_mute--;return ESP_FAIL;}hw_muted=v;return ESP_OK;}
 esp_err_t tef6686_audio_enable_dac(tef6686_handle_t d){return ESP_OK;}
 esp_err_t tef6686_boot(tef6686_handle_t d){return ESP_OK;}
 esp_err_t tef6686_get_identification(tef6686_handle_t d,tef6686_ident_t *v){memset(v,0,sizeof(*v));return ESP_OK;}
-esp_err_t tef6686_get_operation_state(tef6686_handle_t d,tef6686_op_state_t *v){*v=mock_state;return ESP_OK;}
+esp_err_t tef6686_get_operation_state(tef6686_handle_t d,tef6686_op_state_t *v){if(state_lag){state_lag--;*v=TEF6686_STATE_STANDBY;return ESP_OK;}*v=mock_state;return ESP_OK;}
 const char *tef6686_patch_name(tef6686_handle_t d){return "mock";}
 const char *tef6686_variant_name(uint16_t d){return "mock";}
 esp_err_t tef6686_new(const tef6686_config_t *c,tef6686_handle_t *d){*d=(void *)1;return ESP_OK;}
@@ -58,30 +58,44 @@ static void init(void){
     s.cfg.fm_min_khz=87500;s.cfg.fm_max_khz=108000;s.cfg.fm_step_khz=100;s.cfg.am_step_khz=9;
     s.af.origin=90000;hw_khz=90000;hw_mode=TEF6686_TUNE_PRESET;
     mock_tick=1000;nq=0;memset(&next_rds,0,sizeof(next_rds));
-    mock_state=TEF6686_STATE_FM;fail_jump=fail_mute=fail_stereo=fail_end=false;
+    mock_state=TEF6686_STATE_FM;fail_jump=fail_end=fail_mute=fail_rds=state_lag=0;fail_stereo=false;
     s.last_quality=mock_tick;
     s.measured=true;
     af_reset(&s.af.st,90000,mock_tick);
 }
 int main(void){
-    init();s.af.verifying=true;s.af.cand=95000;hw_khz=95000;hw_mode=TEF6686_TUNE_CHECK;fail_jump=true;
+    const uint8_t clean[4]={0};
+    radio_settings_t rs;
+
+    init();s.af.verifying=true;s.af.cand=95000;hw_khz=95000;hw_mode=TEF6686_TUNE_CHECK;fail_jump=2;
     af_abort();
     assert(!s.status.tef_ready && hw_khz==95000 && s.status.freq_khz==90000);
+    assert(s.status.diag.recoveries==1 && s.status.diag.io_retries==1);
     boot_tef();
     assert(s.status.tef_ready && hw_khz==90000 && hw_mode==TEF6686_TUNE_PRESET);
     puts("PASS failed AF return enters recovery and restores original station");
 
-    init();s.af.verifying=true;s.af.cand=95000;fail_end=true;
+    init();s.af.verifying=true;s.af.cand=95000;hw_khz=95000;hw_mode=TEF6686_TUNE_CHECK;fail_jump=1;
+    af_abort();
+    assert(s.status.tef_ready && hw_khz==90000 && !s.af.verifying && s.status.diag.io_retries==1);
+    puts("PASS a single failed AF return is retried at once");
+
+    init();s.af.verifying=true;s.af.cand=95000;fail_end=2;
     af_accept();
     assert(!s.status.tef_ready && !s.af.st.trial);
     puts("PASS failed AF End does not accept a muted candidate");
 
-    init();hw_muted=true;fail_mute=true;
+    init();hw_muted=true;fail_mute=2;
     handle_cmd(&(radio_cmd_t){.type=CMD_MUTE,.mute=false});
     assert(!s.status.tef_ready && hw_muted);
     boot_tef();
     assert(!s.status.mute && !hw_muted && s.status.tef_ready);
     puts("PASS failed unmute is reapplied by recovery");
+
+    init();hw_muted=true;fail_mute=1;
+    handle_cmd(&(radio_cmd_t){.type=CMD_MUTE,.mute=false});
+    assert(s.status.tef_ready && !hw_muted && s.status.diag.io_retries==1 && !s.status.diag.recoveries);
+    puts("PASS a single failed command is retried without a tuner reboot");
 
     init();s.af.pi=0x1234;s.af.pi_known=true;s.af.pi_mem=false;
     next_rds=(tef6686_rds_t){.status=TEF6686_RDS_DATA_AVAILABLE|TEF6686_RDS_SYNC,.block={0x1234,0,0x0102,0x4142}};
@@ -91,6 +105,15 @@ int main(void){
     poll_rds();
     assert(af_mem_lookup(&s.mem,95000,&pi) && pi==0x5678);
     puts("PASS normal retune drains stale RDS before learning the new PI");
+
+    init();fail_rds=2;
+    tune_to(RADIO_BAND_FM,95000,false,true);
+    assert(!s.status.tef_ready && s.status.freq_khz==95000 && s.next_boot-mock_tick==WRITE_RETRY_MS);
+    assert(s.status.diag.recoveries==1 && !strcmp(s.status.diag.last_recovery,"RDS flush failed"));
+    init();fail_rds=1;
+    tune_to(RADIO_BAND_FM,95000,false,true);
+    assert(s.status.tef_ready && s.status.diag.io_retries==1);
+    puts("PASS a failed flush read is retried, then recovers in 250 ms rather than 5 s");
 
     init();s.af.pi=0xD412;s.af.pi_known=true;s.tuning.v[TUNING_AF_REG]=0;
     s.af.st.trial=true;s.af.st.trial_khz=95000;s.status.freq_khz=95000;
@@ -109,7 +132,6 @@ int main(void){
     init();s.af.pi=0x1234;s.af.pi_known=true;
     af_mem_learn(&s.mem,0x1234,87600,NULL,0);
     const uint16_t af_group[4]={0x1234,0,0x01CD,0x4142},other[4]={0x1234,0x2000,0,0};
-    const uint8_t clean[4]={0};
     rds_process_group(&s.status.rds,af_group,clean);af_follow_rds();
     const uint32_t listed=s.af.st.e[0].listed_ms;
     assert(af_entry_trusted(&s.af.st.e[0],s.af.st.lists,mock_tick));
@@ -118,6 +140,17 @@ int main(void){
     assert(s.af.st.e[0].listed_ms==listed);
     assert(!af_entry_trusted(&s.af.st.e[0],s.af.st.lists,mock_tick));
     puts("PASS non-AF RDS groups do not renew stale AF trust");
+
+    init();s.af.pi=0x1234;s.af.pi_known=true;s.status.freq_khz=107900;
+    for(unsigned round=0;round<2;round++){
+        for(unsigned i=0;i<20;i++){
+            const uint16_t g[4]={0x1234,0,(uint16_t)(((2*i+1)<<8)|(2*i+2)),0x4142};
+            rds_process_group(&s.status.rds,g,clean);af_follow_rds();
+        }
+    }
+    uint8_t codes[AF_MEM_CODES];
+    assert(af_mem_list(&s.mem,107900,0x1234,codes)==AF_MEM_CODES && codes[0]==1);
+    puts("PASS a list longer than the AF memory keeps its first codes instead of churning");
 
     init();
     assert(radio_tune(RADIO_BAND_AM,999)==ESP_OK);
@@ -155,10 +188,27 @@ int main(void){
     mock_tick=s.seek.deadline;seek_poll();assert(!s.seek.active);
     puts("PASS seek has an overall deadline");
 
+    init();seek_begin(1,true,0,0,5,(band_range_t){2300,27000,5});
+    assert(s.seek.deadline-mock_tick>4941u*SEEK_STEP_BUDGET_MS);
+    puts("PASS a long seek's deadline covers every channel's measure timeout");
+
     init();assert(radio_diagnostics_passed());
     mock_tick+=1000;assert(!radio_diagnostics_passed());
-    init();s.status.tef_ready=false;assert(!radio_diagnostics_passed());
+    assert(!strcmp(radio_diagnostics_problem(),"quality not fresh"));
+    init();s.status.tef_ready=false;assert(!strcmp(radio_diagnostics_problem(),"tuner not ready"));
     puts("PASS OTA diagnostics reject stale quality and unavailable tuner");
+
+    init();s.status.tef_ready=false;state_lag=3;boot_tef();
+    assert(s.status.tef_ready && s.status.diag.boots==1);
+    init();s.status.tef_ready=false;state_lag=1000;boot_tef();
+    assert(!s.status.tef_ready && s.status.diag.boot_failures==1);
+    puts("PASS boot waits briefly for the FM/AM state before failing");
+
+    init();s.status.tef_ready=false;s.status.freq_khz=95000;
+    assert(!radio_get_settings(&rs) && radio_get_restart_settings(&rs) && rs.khz==95000);
+    init();s.status.af.trial=true;assert(!radio_get_restart_settings(&rs));
+    init();s.status.af.probation=true;assert(!radio_get_settings(&rs) && !radio_get_restart_settings(&rs));
+    puts("PASS restart settings follow the recovery target but never a moving frequency");
 
     init();assert(radio_set_volume(-100)==ESP_OK);
     assert(radio_wait_commands(10)==ESP_ERR_TIMEOUT);

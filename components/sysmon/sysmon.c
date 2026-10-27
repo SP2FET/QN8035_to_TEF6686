@@ -270,7 +270,7 @@ static void snapshot(void)
     qn8035_emu_t before, after;
     for (unsigned attempt = 0; attempt < 3; attempt++) {
         const bool qn = qn8035_slave_snapshot(&before);
-        const bool settled = radio_get_settings(&rs);
+        const bool settled = radio_get_restart_settings(&rs);
         const bool qn_after = qn8035_slave_snapshot(&after);
         if (qn != qn_after || (qn &&
             (before.revision != after.revision || before.op != after.op ||

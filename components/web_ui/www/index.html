@@ -437,11 +437,11 @@ function render(s){
   txt('clk',s.clock_set==null?null:s.clock_set?'from RDS':'not set (no RDS clock yet)');
   $('tps').textContent=rds.ps||'';
   txt('ps',rds.ps);txt('rt',rds.rt);txt('rg',rds.groups);txt('re',rds.errors);
-  txt('tstate',(tef.ready?'ready':'not ready')+' / '+(tef.state||'—')+' / op '+(tef.op_status==null?'—':tef.op_status));
+  txt('tstate',(tef.ready?'ready':'not ready')+' / '+(tef.state||'—')+' / op '+(tef.op_status==null?'—':tef.op_status)+(tef.diag?' / I2C errors '+tef.diag.io_errors+', retries '+tef.diag.io_retries+', recoveries '+tef.diag.recoveries:''));
   txt('tvar',tef.variant);txt('tid',[tef.device,tef.hw,tef.sw].map(hex).join(' / '));
   txt('tpatch',tef.patch);
   const te=$('terr');te.textContent=tef.error||'—';te.classList.toggle('err',!!tef.error);
-  txt('qn',s.qn?(qn.enabled?'on':'off')+', writes '+qn.writes+', reads '+qn.reads+', last '+(qn.last||'—'):null);
+  txt('qn',s.qn?(qn.enabled?'on':'off')+', writes '+qn.writes+', reads '+qn.reads+', last '+(qn.last||'—')+(qn.command_drops||qn.reconciles?', drops '+qn.command_drops+', replays '+qn.reconciles:''):null);
   const fw=s.fw;
   txt('fwv',fw?fw.version+', built '+fw.built+', IDF '+fw.idf:null);
   txt('fws',fw?fw.partition+', '+(fw.ota_state==='pending'?'on probation (confirms 30 s after boot)':fw.ota_state):null);

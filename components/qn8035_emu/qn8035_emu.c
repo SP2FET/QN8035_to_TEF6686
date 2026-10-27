@@ -300,6 +300,7 @@ static void QN_IRAM on_vol_ctl(qn8035_emu_t *emu, uint8_t old, evt_sink_t *sink)
         const int ana_db = ((int)(v & QN8035_VOL_GAIN_ANA_MASK) - 7) * 6;
         int dig = (v & QN8035_VOL_GAIN_DIG_MASK) >> QN8035_VOL_GAIN_DIG_SHIFT;
         dig = dig > 5 ? 5 : dig;
+        emu->volume_set = true;
         emit(sink, (qn8035_evt_t){.type = QN8035_EVT_VOLUME, .db = (int8_t)(ana_db - dig)});
     }
 }
@@ -387,11 +388,13 @@ size_t QN_IRAM qn8035_emu_controls(const qn8035_emu_t *emu, qn8035_evt_t *out, s
                               .on = (r[QN8035_REG_SYSTEM1] & QN8035_SYSTEM1_FORCE_MO) != 0});
     emit(&sink, (qn8035_evt_t){.type = QN8035_EVT_DEEMPHASIS,
                               .us = r[QN8035_REG_VOL_CTL] & QN8035_VOL_TC ? 75 : 50});
-    const uint8_t v = r[QN8035_REG_VOL_CTL];
-    const int ana = ((int)(v & QN8035_VOL_GAIN_ANA_MASK) - 7) * 6;
-    int dig = (v & QN8035_VOL_GAIN_DIG_MASK) >> QN8035_VOL_GAIN_DIG_SHIFT;
-    emit(&sink, (qn8035_evt_t){.type = QN8035_EVT_VOLUME,
-                              .db = (int8_t)(ana - (dig > 5 ? 5 : dig))});
+    if (emu->volume_set) { /* until then the tuner keeps its configured start volume */
+        const uint8_t v = r[QN8035_REG_VOL_CTL];
+        const int ana = ((int)(v & QN8035_VOL_GAIN_ANA_MASK) - 7) * 6;
+        const int dig = (v & QN8035_VOL_GAIN_DIG_MASK) >> QN8035_VOL_GAIN_DIG_SHIFT;
+        emit(&sink, (qn8035_evt_t){.type = QN8035_EVT_VOLUME,
+                                  .db = (int8_t)(ana - (dig > 5 ? 5 : dig))});
+    }
     if (emu->receiving && emu->op == QN8035_OP_TUNE) {
         emit(&sink, (qn8035_evt_t){.type = QN8035_EVT_TUNE, .khz = emu->op_khz,
                                   .generation = emu->op_generation});

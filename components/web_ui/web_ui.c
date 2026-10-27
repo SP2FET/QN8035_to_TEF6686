@@ -24,6 +24,7 @@
 #include "af_store.h"
 #include "log_stream.h"
 #include "qn8035_slave.h"
+#include "qn_bridge.h"
 #include "radio.h"
 #include "radio_mem.h"
 #include "sysmon.h"
@@ -277,19 +278,59 @@ static void jb_af(jbuf_t *j, const radio_af_status_t *a)
     jb_printf(j, "]},");
 }
 
+/* Least free stack each task has had (bytes on ESP-IDF): a shrinking margin shows before an
+ * overflow does. Tasks that do not exist in this build are left out. */
+static void jb_stacks(jbuf_t *j)
+{
+    static const char *const names[] = {"radio", "qn_slave", "qn_trace", "sysmon", "af_store",
+                                        "radio_mem", "log_pump", "httpd", "esp_timer", "tiT",
+                                        "wifi", "IDLE"};
+    jb_printf(j, "\"stacks\":{");
+    const char *sep = "";
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        TaskHandle_t t = xTaskGetHandle(names[i]);
+        if (t) {
+            jb_printf(j, "%s\"%s\":%u", sep, names[i], (unsigned)uxTaskGetStackHighWaterMark(t));
+            sep = ",";
+        }
+    }
+    jb_printf(j, "},");
+}
+
+static const char *health_ev_name(uint8_t ev)
+{
+    switch (ev) {
+    case RADIO_HEALTH_LOST:
+        return "lost";
+    case RADIO_HEALTH_READY:
+        return "ready";
+    case RADIO_HEALTH_BOOT_FAILED:
+        return "boot_failed";
+    default:
+        return "?";
+    }
+}
+
 static esp_err_t status_get(httpd_req_t *req)
 {
     /* httpd runs all handlers in its one task, so static buffers are safe
      * and keep the 2 kB off its stack. */
-    static radio_status_t st;
+    /* ~2.6 kB, from the heap once: the static DRAM segment is full. */
+    static radio_status_t *st;
     static char buf[STATUS_BUF_SIZE];
     qn8035_slave_stats_t qn;
-    radio_get_status(&st);
+    if (st == NULL && (st = malloc(sizeof(*st))) == NULL) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+    }
+    radio_get_status(st);
     qn8035_slave_get_stats(&qn);
 
     jbuf_t j = {.buf = buf, .size = sizeof(buf)};
-    jb_printf(&j, "{\"uptime_s\":%" PRIu32 ",\"heap_free\":%" PRIu32 ",",
-              (uint32_t)(esp_timer_get_time() / 1000000), esp_get_free_heap_size());
+    jb_printf(&j, "{\"uptime_s\":%" PRIu32 ",\"heap_free\":%" PRIu32 ",\"heap_min\":%" PRIu32
+                  ",\"heap_largest\":%u,",
+              (uint32_t)(esp_timer_get_time() / 1000000), esp_get_free_heap_size(),
+              esp_get_minimum_free_heap_size(),
+              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
     /* elf_sha256 (first 8 bytes) lets scripts/ota_upload.py tell which build runs. */
     const esp_app_desc_t *app = esp_app_get_description();
@@ -344,27 +385,41 @@ static esp_err_t status_get(httpd_req_t *req)
     jb_printf(&j, "},\"web\":{\"select_errors\":%" PRIu32 ",\"select_errno\":%d},", s_sel.count,
               s_sel.err);
 
-    jb_printf(&j, "\"tef\":{\"ready\":%s,\"op_status\":%d,\"state\":", b(st.tef_ready),
-              (int)st.op_state);
-    jb_str(&j, st.tef_ready ? state_name(st.op_state) : "not ready");
-    jb_printf(&j, ",\"device\":%u,\"hw\":%u,\"sw\":%u,\"variant\":", st.ident.device,
-              st.ident.hw_version, st.ident.sw_version);
-    jb_str(&j, st.ident.device ? tef6686_variant_name(st.ident.device) : "");
+    jb_printf(&j, "\"tef\":{\"ready\":%s,\"op_status\":%d,\"state\":", b(st->tef_ready),
+              (int)st->op_state);
+    jb_str(&j, st->tef_ready ? state_name(st->op_state) : "not ready");
+    jb_printf(&j, ",\"device\":%u,\"hw\":%u,\"sw\":%u,\"variant\":", st->ident.device,
+              st->ident.hw_version, st->ident.sw_version);
+    jb_str(&j, st->ident.device ? tef6686_variant_name(st->ident.device) : "");
     jb_printf(&j, ",\"patch\":");
-    jb_str(&j, st.patch ? st.patch : "none");
+    jb_str(&j, st->patch ? st->patch : "none");
     jb_printf(&j, ",\"error\":");
-    jb_str(&j, st.error);
-    jb_printf(&j, "},\"am_step_khz\":%" PRIu32 ",", st.am_step_khz);
+    jb_str(&j, st->error);
+    const radio_diag_t *dg = &st->diag;
+    jb_printf(&j,
+              ",\"diag\":{\"io_errors\":%" PRIu32 ",\"io_retries\":%" PRIu32
+              ",\"recoveries\":%" PRIu32 ",\"boots\":%" PRIu32 ",\"boot_failures\":%" PRIu32
+              ",\"last_recovery\":",
+              dg->io_errors, dg->io_retries, dg->recoveries, dg->boots, dg->boot_failures);
+    jb_str(&j, dg->last_recovery);
+    if (dg->recoveries) {
+        const uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+        jb_printf(&j, ",\"last_recovery_age_s\":%" PRIu32 "}",
+                  (now_ms - dg->last_recovery_ms) / 1000);
+    } else {
+        jb_printf(&j, ",\"last_recovery_age_s\":null}");
+    }
+    jb_printf(&j, "},\"am_step_khz\":%" PRIu32 ",", st->am_step_khz);
 
-    const bool fm = st.band == RADIO_BAND_FM;
+    const bool fm = st->band == RADIO_BAND_FM;
     jb_printf(&j,
               "\"band\":\"%s\",\"freq_khz\":%" PRIu32 ",\"seeking\":%s,\"mute\":%s,"
               "\"volume_db\":%.1f,\"bw_auto\":%s,\"bw_khz\":%.1f,\"force_mono\":%s,"
               "\"clock_set\":%s,",
-              fm ? "FM" : "AM", st.freq_khz, b(st.seeking), b(st.mute), st.volume / 10.0,
-              b(st.bw_auto), st.bw / 10.0, b(st.force_mono), b(st.clock_set));
+              fm ? "FM" : "AM", st->freq_khz, b(st->seeking), b(st->mute), st->volume / 10.0,
+              b(st->bw_auto), st->bw / 10.0, b(st->force_mono), b(st->clock_set));
 
-    const radio_quality_t *q = &st.q;
+    const radio_quality_t *q = &st->q;
     jb_printf(&j, "\"q\":{\"valid\":%s,\"level\":%.1f,\"offset\":%.1f,\"bw\":%.1f,\"mod\":%.1f,",
               b(q->valid), q->level / 10.0, q->offset / 10.0, q->bandwidth / 10.0,
               q->modulation / 10.0);
@@ -378,29 +433,29 @@ static esp_err_t status_get(httpd_req_t *req)
         jb_printf(&j, "\"usn\":null,\"wam\":null,\"stereo\":null,\"dsp\":null,\"noise\":%.1f},",
                   q->usn / 10.0);
     }
-    jb_af(&j, &st.af);
+    jb_af(&j, &st->af);
 
-    jb_printf(&j, "\"rds\":{\"sync\":%s,\"pi\":", b(st.rds_sync));
-    if (st.rds.pi_valid) {
-        jb_printf(&j, "\"%04X\"", st.rds.pi);
+    jb_printf(&j, "\"rds\":{\"sync\":%s,\"pi\":", b(st->rds_sync));
+    if (st->rds.pi_valid) {
+        jb_printf(&j, "\"%04X\"", st->rds.pi);
     } else {
         jb_printf(&j, "\"\"");
     }
     jb_printf(&j, ",\"ps\":");
-    jb_str(&j, st.rds.ps);
+    jb_str(&j, st->rds.ps);
     jb_printf(&j, ",\"rt\":");
-    jb_str(&j, st.rds.rt);
-    jb_printf(&j, ",\"groups\":%" PRIu32 ",\"errors\":%" PRIu32 ",\"pty\":", st.rds.groups,
-              st.rds.rejected);
-    if (st.rds.pty_valid) {
-        jb_printf(&j, "%u", st.rds.pty);
+    jb_str(&j, st->rds.rt);
+    jb_printf(&j, ",\"groups\":%" PRIu32 ",\"errors\":%" PRIu32 ",\"pty\":", st->rds.groups,
+              st->rds.rejected);
+    if (st->rds.pty_valid) {
+        jb_printf(&j, "%u", st->rds.pty);
     } else {
         jb_printf(&j, "null");
     }
-    jb_printf(&j, ",\"tp\":%s,\"ta\":%s,\"ct\":", b(st.rds.tp), b(st.rds.ta));
-    if (st.rds.ct.valid) {
-        jb_printf(&j, "{\"unix\":%" PRId64 ",\"off_min\":%d}", rds_ct_unix(&st.rds.ct),
-                  st.rds.ct.offset * 30);
+    jb_printf(&j, ",\"tp\":%s,\"ta\":%s,\"ct\":", b(st->rds.tp), b(st->rds.ta));
+    if (st->rds.ct.valid) {
+        jb_printf(&j, "{\"unix\":%" PRId64 ",\"off_min\":%d}", rds_ct_unix(&st->rds.ct),
+                  st->rds.ct.offset * 30);
     } else {
         jb_printf(&j, "null");
     }
@@ -409,8 +464,17 @@ static esp_err_t status_get(httpd_req_t *req)
     jb_printf(&j, "\"qn\":{\"enabled\":%s,\"writes\":%" PRIu32 ",\"reads\":%" PRIu32 ",\"last\":",
               b(qn.running), qn.writes, qn.reads);
     jb_str(&j, qn.last);
-    jb_printf(&j, ",\"dropped\":%" PRIu32 ",\"command_drops\":%" PRIu32,
-              qn.dropped, qn.command_drops);
+    jb_printf(&j, ",\"dropped\":%" PRIu32 ",\"command_drops\":%" PRIu32 ",\"reconciles\":%" PRIu32,
+              qn.dropped, qn.command_drops, qn.reconciles);
+    jb_printf(&j, "},");
+    jb_stacks(&j);
+    qn_bridge_stats_t br;
+    qn_bridge_get_stats(&br);
+    /* left open: the memory channels part closes it */
+    jb_printf(&j,
+              "\"bridge\":{\"tunes\":%" PRIu32 ",\"scans\":%" PRIu32 ",\"timeouts\":%" PRIu32
+              ",\"settle_timeouts\":%" PRIu32 ",\"refused\":%" PRIu32 ",\"queue_retries\":%" PRIu32,
+              br.tunes, br.scans, br.timeouts, br.settle_timeouts, br.refused, br.queue_retries);
 
     radio_mem_info_t mem;
     radio_mem_get(NULL, &mem);
@@ -589,6 +653,13 @@ static void jb_trace(jbuf_t *j, uint32_t seq, const radio_trace_t *r)
         jb_int(j, r->a.level_avg);
         jb_printf(j, ",\"need\":");
         jb_int(j, r->a.need);
+    } else if (r->kind == RADIO_TRACE_HEALTH) {
+        jb_printf(j,
+                  "\"k\":\"h\",\"f\":%" PRIu32 ",\"ev\":\"%s\",\"op\":%u,\"io_err\":%" PRIu32
+                  ",\"retries\":%" PRIu32 ",\"rec\":%" PRIu32 ",\"why\":",
+                  r->khz, health_ev_name(r->h.event), r->h.op_state, r->h.io_errors,
+                  r->h.io_retries, r->h.recoveries);
+        jb_str(j, r->h.why);
     } else {
         const radio_af_event_t *e = &r->e;
         jb_printf(j,

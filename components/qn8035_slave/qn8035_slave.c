@@ -235,6 +235,9 @@ static void slave_task(void *arg)
             const size_t n = qn8035_emu_controls(&model, evts, QN8035_EMU_MAX_EVENTS);
             reconciled = model.revision;
             have_reconciled = true;
+            xSemaphoreTake(s.lock, portMAX_DELAY);
+            s.stats.reconciles++;
+            xSemaphoreGive(s.lock);
             for (size_t i = 0; i < n; i++) {
                 s.cb(&evts[i], s.cb_ctx);
             }

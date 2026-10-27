@@ -4,6 +4,34 @@ The firmware uses Semantic Versioning. Development releases use 0.x versions and
 change interfaces between minor versions. Versions and Git tags are recorded here;
 target builds and host tests do not establish hardware compatibility.
 
+## 0.6.2 - 2026-10-27
+
+Follow-up review of 0.6.1, recorded in `docs/review-fixes-20261027.md` (FU-01..FU-08).
+
+### Fixed
+
+- AF memory learns from the transmitter's list so far again, not just the last group's codes:
+  a list longer than the 25 codes a channel keeps (method B networks) no longer collapses to two
+  codes on every overflow. A completed announcement still replaces the stored list, now only
+  when it was announced and received in error-free blocks.
+- A failed tuner command or RDS flush read is retried once at once before the tuner counts as
+  unavailable; a failed flush read now recovers after 250 ms like a command, not after 5 s.
+- Boot waits up to 150 ms for the FM/AM state after its tune. OTA confirmation gives the
+  diagnostics a 60 s window after the 30 s probation and logs what failed before rolling back.
+- The bridge replays the model only when the radio queue was full; a refused tune or scan fails
+  at once. A head-unit reset replays the model's reset controls (VOL_CTL resets to 75 us) instead
+  of assuming 50 us. Replays leave the volume alone until the head unit set the gains.
+- The warm-restart snapshot follows the head unit while the tuner is unavailable. Presets and the
+  snapshot also wait out a jump's PI watch. The seek deadline scales with the channel count.
+
+### Added
+
+- Ride diagnostics: `/api/status` has tuner I/O and recovery counters (`tef.diag`), head-unit
+  operation outcomes (`bridge`), slave replays (`qn.reconciles`), heap low-water marks and stack
+  margins (`stacks`); the trace has tuner health records (`k` = `h`). `ride_log.py` 1.1 prints
+  them live and saves the reception tuning and any core dump; `ride_report.py` adds a heap/tuner
+  chart, health tables and `health.csv`.
+
 ## 0.6.1 - 2026-10-27
 
 ### Fixed

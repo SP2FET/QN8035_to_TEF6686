@@ -53,6 +53,9 @@ static esp_err_t init_power(void)
 /* Minimum probation before essential tuner/slave diagnostics decide confirmation;
  * failure rolls back via BOOTLOADER_APP_ROLLBACK_ENABLE. */
 #define OTA_PROBATION_S 30
+/* Then the diagnostics have this long to pass once: a tuner reboot in progress (about a second)
+ * must not roll back a good image. */
+#define OTA_DIAG_WINDOW_S 60
 
 #if CONFIG_BRIDGE_TEF_REFCLK_4M
 #define TEF_REFCLK_HZ 4000000
@@ -158,6 +161,21 @@ static esp_err_t init_tef_bus(i2c_master_bus_handle_t *bus)
 }
 
 /* Blocks the main task (which has nothing else to do) for the probation time. */
+/* Essential diagnostics: the tuner path, and the head-unit slave in the car build. NULL if they
+ * pass, else what failed. */
+static const char *ota_diagnostics_problem(void)
+{
+    const char *why = radio_diagnostics_problem();
+#if CONFIG_BRIDGE_QN_EMU_ENABLE
+    qn8035_slave_stats_t qn;
+    qn8035_slave_get_stats(&qn);
+    if (why == NULL && !qn.running) {
+        why = "head-unit slave not running";
+    }
+#endif
+    return why;
+}
+
 static void confirm_ota_image(void)
 {
     esp_ota_img_states_t state;
@@ -168,14 +186,14 @@ static void confirm_ota_image(void)
     ESP_LOGW(TAG, "new firmware on probation: checking health in %d s, a reset before that rolls back",
              OTA_PROBATION_S);
     vTaskDelay(pdMS_TO_TICKS(OTA_PROBATION_S * 1000));
-    bool healthy = radio_diagnostics_passed();
-#if CONFIG_BRIDGE_QN_EMU_ENABLE
-    qn8035_slave_stats_t qn;
-    qn8035_slave_get_stats(&qn);
-    healthy = healthy && qn.running;
-#endif
-    if (!healthy) {
-        ESP_LOGE(TAG, "new firmware failed essential radio diagnostics; rolling back");
+    const char *why = ota_diagnostics_problem();
+    for (unsigned waited = 0; why != NULL && waited < OTA_DIAG_WINDOW_S; waited++) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        why = ota_diagnostics_problem();
+    }
+    if (why != NULL) {
+        ESP_LOGE(TAG, "new firmware failed essential diagnostics for %d s (%s); rolling back",
+                 OTA_DIAG_WINDOW_S, why);
         const esp_err_t rollback = esp_ota_mark_app_invalid_rollback_and_reboot();
         ESP_LOGE(TAG, "rollback could not restart (%s); image remains unconfirmed",
                  esp_err_to_name(rollback));

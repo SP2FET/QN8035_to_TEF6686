@@ -135,12 +135,24 @@ typedef struct {
     radio_af_event_t ev[RADIO_AF_EVENTS]; /**< the last tries, newest first */
 } radio_af_status_t;
 
+/** Tuner I/O and recovery counters since radio_start(). */
+typedef struct {
+    uint32_t io_errors;        /**< failed transfers (a command's failed retry counts once) */
+    uint32_t io_retries;       /**< commands and flush reads that needed their one retry */
+    uint32_t recoveries;       /**< times the tuner was marked unavailable after being ready */
+    uint32_t boots;            /**< successful tuner boots, the first included */
+    uint32_t boot_failures;
+    uint32_t last_recovery_ms; /**< radio clock of the last recovery (radio_af_status_t.now_ms) */
+    char last_recovery[32];    /**< its reason, "" if none */
+} radio_diag_t;
+
 typedef struct {
     bool tef_ready;
     tef6686_op_state_t op_state;
     tef6686_ident_t ident;
     const char *patch;   /**< static string */
     char error[64];      /**< last init/IO problem, "" when healthy */
+    radio_diag_t diag;   /**< tuner I/O and recovery counters since start */
 
     radio_band_t band;
     uint32_t freq_khz;   /**< playing frequency when ready; recovery target otherwise */
@@ -209,7 +221,15 @@ typedef enum {
     RADIO_TRACE_QUALITY = 0, /**< every quality sample of what plays (~100 ms) */
     RADIO_TRACE_AF_MEASURE,  /**< every AF_Update measurement */
     RADIO_TRACE_AF_EVENT,    /**< every AF step (radio_af_event_t) */
+    RADIO_TRACE_HEALTH,      /**< the tuner became unavailable, ready again, or failed to boot */
 } radio_trace_kind_t;
+
+/** radio_trace_t.h.event. */
+typedef enum {
+    RADIO_HEALTH_LOST = 0,    /**< marked unavailable (why); a reboot reapplies the settings */
+    RADIO_HEALTH_READY,       /**< a boot succeeded */
+    RADIO_HEALTH_BOOT_FAILED, /**< a boot failed (why); retried 5 s later */
+} radio_health_ev_t;
 
 /** AF state bits of a quality record. */
 #define RADIO_TRACE_AF_ACTIVE    (1u << 0)
@@ -250,6 +270,12 @@ typedef struct {
             uint8_t streak;
         } a;
         radio_af_event_t e;
+        struct {
+            uint8_t event;      /**< radio_health_ev_t */
+            uint8_t op_state;   /**< tef6686_op_state_t last read */
+            uint32_t io_errors, io_retries, recoveries; /**< radio_diag_t then */
+            char why[24];
+        } h;
     };
 } radio_trace_t;
 
@@ -312,13 +338,19 @@ esp_err_t radio_set_tuning_all(const tuning_t *t);
 esp_err_t radio_wait_commands(uint32_t timeout_ms);
 /** Essential tuner diagnostics, independent of whether an RF station/RDS is received. */
 bool radio_diagnostics_passed(void);
+/** NULL if radio_diagnostics_passed(), else what failed (static string). */
+const char *radio_diagnostics_problem(void);
 /** The values in effect (a queued change shows once the radio task applied it). */
 void radio_get_tuning(tuning_t *out);
 
 void radio_get_status(radio_status_t *out);
 /** Settled settings suitable for persistence. False before start, while unavailable, seeking,
- * checking/trialling an AF, or before a valid settled quality sample. */
+ * checking/trialling an AF or watching a jump's PI (probation), or before a valid settled
+ * quality sample. */
 bool radio_get_settings(radio_settings_t *out);
+/** The settings a warm restart should resume: as radio_get_settings, but also true while the
+ * tuner is unavailable (then the requested ones, which the next boot applies). */
+bool radio_get_restart_settings(radio_settings_t *out);
 
 /**
  * Trace records from sequence number since on (trace.h): copies up to max into out, oldest

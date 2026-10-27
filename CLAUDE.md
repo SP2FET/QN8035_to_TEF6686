@@ -183,7 +183,8 @@ stamps show uptime until then, the station's local time after.
 - **Errors:** `ESP_RETURN_ON_ERROR`/`ESP_RETURN_ON_FALSE` in init paths; `ESP_ERROR_CHECK` only
   for unrecoverable start-up in `app_main`. Runtime I/O errors are counted and recovered (`radio`
   re-boots the tuner after 5 errors without a full clean second or on an unexpected operation
-  state). Failed writes invalidate readiness and reapply requested settings on reboot. Never
+  state). Commands and RDS flush reads get one immediate retry; a failed retry invalidates
+  readiness and the reboot (250 ms later) reapplies the requested settings. Never
   turn a failed read into a plausible value.
 - **Every wait has a deadline.** Stack sizes are in **bytes**. Tick comparisons are wrap-safe
   (`(int32_t)(now - t) >= 0`). Watched tasks reset the watchdog every loop and wait ≤ 1 s.
