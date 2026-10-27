@@ -4,6 +4,26 @@ The firmware uses Semantic Versioning. Development releases use 0.x versions and
 change interfaces between minor versions. Versions and Git tags are recorded here;
 target builds and host tests do not establish hardware compatibility.
 
+## 0.6.3 - 2026-10-27
+
+A page load over the access point sometimes stalled and the phone dropped the connection; it then
+refused to reconnect ("wrong password") until a reset. Rides recorded ~24 kB of free heap (low
+16.5 kB): too little for Wi-Fi, which allocates every received frame, the key handshake's
+included. Connections of the client that left kept their unsent data in the heap for minutes.
+
+### Fixed
+
+- Wi-Fi's speed-ups no longer take IRAM (`CONFIG_ESP_WIFI_IRAM_OPT`, `_RX_IRAM_OPT` off): on
+  the S2 that SRAM goes to the heap instead, 22.6 kB more.
+- When a client leaves the access point, httpd resets its connections (RST, `SO_LINGER` 0):
+  their unsent data is freed at once instead of being retransmitted for minutes.
+  `/api/status` `web.conn_resets` counts them.
+
+### Added
+
+- The `wifi` log shows the reason a client left (15: key handshake timed out) and the free heap
+  when one joins or leaves.
+
 ## 0.6.2 - 2026-10-27
 
 Follow-up review of 0.6.1, recorded in `docs/review-fixes-20261027.md` (FU-01..FU-08).

@@ -1,12 +1,15 @@
 #include "net_wifi.h"
 
+#include <inttypes.h>
 #include <string.h>
 
 #include "esp_check.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 
@@ -15,6 +18,8 @@ static const char *TAG = "wifi";
 #define STA_RETRY_US (10 * 1000 * 1000)
 
 static esp_timer_handle_t s_retry_timer;
+static esp_netif_t *s_ap_netif;
+static void (*s_on_client_left)(uint32_t ip);
 
 static void retry_connect(void *arg)
 {
@@ -27,14 +32,30 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     (void)arg;
     (void)base;
     switch (id) {
+    /* The free heap goes with both: Wi-Fi allocates every received frame and the key handshake's
+     * frames from it, and with none left a phone reports a wrong password (reason 15, handshake
+     * timeout). */
     case WIFI_EVENT_AP_STACONNECTED: {
         const wifi_event_ap_staconnected_t *e = data;
-        ESP_LOGI(TAG, "client " MACSTR " joined", MAC2STR(e->mac));
+        ESP_LOGI(TAG, "client " MACSTR " joined; heap %" PRIu32 " free, largest block %u",
+                 MAC2STR(e->mac), esp_get_free_heap_size(),
+                 heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
         break;
     }
     case WIFI_EVENT_AP_STADISCONNECTED: {
         const wifi_event_ap_stadisconnected_t *e = data;
-        ESP_LOGI(TAG, "client " MACSTR " left", MAC2STR(e->mac));
+        /* The lease outlives the association (a client coming back gets the same address). */
+        esp_netif_pair_mac_ip_t lease = {.ip.addr = 0};
+        memcpy(lease.mac, e->mac, sizeof(lease.mac));
+        if (esp_netif_dhcps_get_clients_by_mac(s_ap_netif, 1, &lease) != ESP_OK) {
+            lease.ip.addr = 0;
+        }
+        ESP_LOGI(TAG, "client " MACSTR " (" IPSTR ") left (reason %u); heap %" PRIu32
+                 " free, largest block %u", MAC2STR(e->mac), IP2STR(&lease.ip), e->reason,
+                 esp_get_free_heap_size(), heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
+        if (s_on_client_left && lease.ip.addr != 0) {
+            s_on_client_left(lease.ip.addr);
+        }
         break;
     }
     case WIFI_EVENT_STA_START:
@@ -75,7 +96,9 @@ esp_err_t net_wifi_start(const net_wifi_config_t *cfg)
     ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "netif");
     esp_err_t err = esp_event_loop_create_default();
     ESP_RETURN_ON_FALSE(err == ESP_OK || err == ESP_ERR_INVALID_STATE, err, TAG, "event loop");
-    ESP_RETURN_ON_FALSE(esp_netif_create_default_wifi_ap(), ESP_FAIL, TAG, "ap netif");
+    s_ap_netif = esp_netif_create_default_wifi_ap();
+    ESP_RETURN_ON_FALSE(s_ap_netif, ESP_FAIL, TAG, "ap netif");
+    s_on_client_left = cfg->on_client_left;
     if (sta) {
         ESP_RETURN_ON_FALSE(esp_netif_create_default_wifi_sta(), ESP_FAIL, TAG, "sta netif");
         const esp_timer_create_args_t targs = {.callback = retry_connect, .name = "wifi_retry"};

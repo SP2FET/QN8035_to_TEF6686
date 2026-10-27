@@ -21,6 +21,9 @@ typedef struct {
     const char *sta_ssid;    /**< NULL or "" disables station mode */
     const char *sta_password;
     uint8_t tx_power_dbm;    /**< 2..20; 0 keeps the driver's maximum (20 dBm) */
+    /** A client with the DHCP lease `ip` (IPv4, network byte order) left the SoftAP. Runs in the
+     *  default event task: only signal. Not called for a client without a lease. May be NULL. */
+    void (*on_client_left)(uint32_t ip);
 } net_wifi_config_t;
 
 esp_err_t net_wifi_start(const net_wifi_config_t *cfg);

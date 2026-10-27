@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/param.h>
+#include <sys/socket.h>
 
 #include "esp_app_desc.h"
 #include "esp_check.h"
@@ -23,6 +24,7 @@
 #include "freertos/task.h"
 #include "af_store.h"
 #include "log_stream.h"
+#include "net_wifi.h"
 #include "qn8035_slave.h"
 #include "qn_bridge.h"
 #include "radio.h"
@@ -65,6 +67,7 @@ extern const char index_html_end[] asm("_binary_index_html_end");
 #define SELECT_LOG_MS         10000
 
 static httpd_handle_t s_server;
+static uint32_t s_conn_resets; /* httpd task only */
 
 /*
  * Log pump. Everything before s_pump_pos has been broadcast (to whoever was
@@ -382,7 +385,8 @@ static esp_err_t status_get(httpd_req_t *req)
     } else {
         jb_printf(&j, "null");
     }
-    jb_printf(&j, "},\"web\":{\"select_errors\":%" PRIu32 ",\"select_errno\":%d},", s_sel.count,
+    jb_printf(&j, "},\"web\":{\"conn_resets\":%" PRIu32 ",\"select_errors\":%" PRIu32
+                  ",\"select_errno\":%d},", s_conn_resets, s_sel.count,
               s_sel.err);
 
     jb_printf(&j, "\"tef\":{\"ready\":%s,\"op_status\":%d,\"state\":", b(st->tef_ready),
@@ -1113,6 +1117,107 @@ static void log_pump_task(void *arg)
                 break;
             }
         }
+    }
+}
+
+/* ---- connections of departed clients ------------------------------------- */
+
+/* httpd's socket is IPv6 when lwIP has it: IPv4 peers show as v4-mapped addresses. */
+static bool peer_ipv4(int fd, uint32_t *ip)
+{
+    struct sockaddr_storage sa;
+    socklen_t len = sizeof(sa);
+    if (getpeername(fd, (struct sockaddr *)&sa, &len) != 0) {
+        return false;
+    }
+    if (sa.ss_family == AF_INET) {
+        *ip = ((const struct sockaddr_in *)&sa)->sin_addr.s_addr;
+        return true;
+    }
+#if CONFIG_LWIP_IPV6
+    static const uint8_t v4_mapped[12] = {[10] = 0xff, [11] = 0xff};
+    const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *)&sa;
+    if (sa.ss_family == AF_INET6 && memcmp(s6->sin6_addr.s6_addr, v4_mapped, 12) == 0) {
+        memcpy(ip, &s6->sin6_addr.s6_addr[12], sizeof(*ip));
+        return true;
+    }
+#endif
+    return false;
+}
+
+/* Addresses of clients that left (IPv4, network byte order; 0 = free slot): the event task
+ * fills them, reset_departed_work empties them. */
+#define LEFT_SLOTS 4
+static portMUX_TYPE s_left_lock = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t s_left_ips[LEFT_SLOTS];
+static bool s_left_queued;
+
+/*
+ * A client that leaves the access point leaves its connections behind: lwIP retransmits their
+ * unsent data for many minutes and keeps it in the heap. With ~20 kB free, Wi-Fi then cannot
+ * allocate the frames of the next key handshake, and the phone reports a wrong password until a
+ * reset. shutdown() with a zero linger is lwIP's abortive close: it sends RST and frees the data
+ * at once; httpd sees the socket fail and deletes the session. A client already back (same
+ * lease) loses its new connections too; the page polls again.
+ */
+static void reset_departed_work(void *arg)
+{
+    (void)arg;
+    uint32_t left[LEFT_SLOTS];
+    taskENTER_CRITICAL(&s_left_lock);
+    memcpy(left, s_left_ips, sizeof(left));
+    memset(s_left_ips, 0, sizeof(s_left_ips));
+    s_left_queued = false;
+    taskEXIT_CRITICAL(&s_left_lock);
+
+    size_t n = MAX_CLIENTS;
+    int fds[MAX_CLIENTS];
+    if (httpd_get_client_list(s_server, &n, fds) != ESP_OK) {
+        return;
+    }
+    for (size_t i = 0; i < n; i++) {
+        uint32_t ip;
+        if (!peer_ipv4(fds[i], &ip)) {
+            continue;
+        }
+        bool gone = false;
+        for (size_t k = 0; k < LEFT_SLOTS && !gone; k++) {
+            gone = left[k] == ip;
+        }
+        if (!gone) {
+            continue;
+        }
+        const struct linger now = {.l_onoff = 1, .l_linger = 0};
+        if (setsockopt(fds[i], SOL_SOCKET, SO_LINGER, &now, sizeof(now)) != 0) {
+            ESP_LOGW(TAG, "SO_LINGER: %s (CONFIG_LWIP_SO_LINGER off?)", strerror(errno));
+        }
+        shutdown(fds[i], SHUT_RDWR);
+        s_conn_resets++;
+        ESP_LOGI(TAG, "reset connection %d of a client that left", fds[i]);
+    }
+}
+
+void web_ui_client_left(uint32_t ip)
+{
+    if (s_server == NULL || ip == 0) {
+        return;
+    }
+    /* One queued scan covers every departure before it runs: the control socket's mailbox is
+     * small (see PUMP_MAX_QUEUED). More than LEFT_SLOTS clients leaving at once lose the rest. */
+    taskENTER_CRITICAL(&s_left_lock);
+    for (size_t k = 0; k < LEFT_SLOTS; k++) {
+        if (s_left_ips[k] == 0 || s_left_ips[k] == ip) {
+            s_left_ips[k] = ip;
+            break;
+        }
+    }
+    const bool queue = !s_left_queued;
+    s_left_queued = true;
+    taskEXIT_CRITICAL(&s_left_lock);
+    if (queue && httpd_queue_work(s_server, reset_departed_work, NULL) != ESP_OK) {
+        taskENTER_CRITICAL(&s_left_lock);
+        s_left_queued = false; /* the next departure queues it again */
+        taskEXIT_CRITICAL(&s_left_lock);
     }
 }
 

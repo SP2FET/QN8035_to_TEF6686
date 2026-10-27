@@ -84,8 +84,10 @@
  *                 history [{"reason","n","up_s","wall"}] newest first: n = resets since that
  *                 power-on, up_s = how long the run before lasted, wall = its UTC end (RDS
  *                 clock) or null; dump null or {"task","elf","pc","bt":[hex],"corrupted"}
- *   "web"         {"select_errors","select_errno"}: failed select() calls in the httpd task
- *                 since boot and the errno of the last (0 = none); httpd backs off after one
+ *   "web"         {"conn_resets","select_errors","select_errno"}: connections reset because
+ *                 their client left the access point (web_ui_client_left); failed select()
+ *                 calls in the httpd task since boot and the errno of the last (0 = none);
+ *                 httpd backs off after one
  *   GET  /api/trace?since=N   the radio's trace from sequence number N on (radio_trace_t), for
  *                        a PC recording a ride (scripts/ride_log.py): {"boot","now","first",
  *                        "lost","r":[records],"next"}. Chip units. boot changes with every start.
@@ -126,6 +128,13 @@ typedef struct {
 } web_ui_config_t;
 
 esp_err_t web_ui_start(const web_ui_config_t *cfg);
+
+/**
+ * A client with IPv4 address `ip` (network byte order) left the access point
+ * (net_wifi_config_t.on_client_left; any task, only queues work). httpd resets that address's
+ * connections so their unsent data stops holding heap.
+ */
+void web_ui_client_left(uint32_t ip);
 
 #ifdef __cplusplus
 }

@@ -315,6 +315,7 @@ void app_main(void)
         .sta_ssid = CONFIG_BRIDGE_WIFI_STA_SSID,
         .sta_password = CONFIG_BRIDGE_WIFI_STA_PASSWORD,
         .tx_power_dbm = CONFIG_BRIDGE_WIFI_TX_POWER_DBM,
+        .on_client_left = web_ui_client_left,
     };
     ESP_ERROR_CHECK(net_wifi_start(&wifi_cfg));
     const web_ui_config_t web_cfg = {
