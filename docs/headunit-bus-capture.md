@@ -2,14 +2,23 @@
 
 Logic-analyser captures of the head unit (MCU build QF30.V03.12.20250315.013021.30) driving
 its original QN8035, taken 2026-10-24 with a Saleae Logic 2. Channels: Vcc, SCL, SDA, INT.
-The files are in `captures/`, as `.sal` and as digital CSV exports.
+The original captures and CSV exports are not included in the repository. The measurements
+and decoded results below are retained here; the register sequences used in the host replay
+test are retained in `test/native/test_qn8035_emu/capture_replay.h`.
 
-Decode a CSV with:
+For a separate capture of your own, the decoder accepts a Saleae Logic 2 raw digital CSV.
+Export the SCL and SDA channels, with optional Vcc and INT channels. Its input must have
+time in seconds in the first column and columns named exactly `SCL` and `SDA`, with values
+`0` or `1`. Other digital columns are reported as edges. An `X` inside the capture indicates
+missing data and cannot be decoded reliably; remove an all-`X` end-of-data row if present.
+See [Saleae's raw-data export instructions](https://new.saleae.com/support/logic-software/saving-and-exporting-data/exporting-data).
+
+For example, with your own `capture.csv`:
 
 ```sh
-python scripts/qn_capture.py captures/preset_switch.csv                    # register accesses
-python scripts/qn_capture.py captures/seek.csv --view timeline --from 15 --to 17
-python scripts/qn_capture.py captures/seek.csv --view timing
+python scripts/qn_capture.py capture.csv                    # register accesses
+python scripts/qn_capture.py capture.csv --view timeline --from 15 --to 17
+python scripts/qn_capture.py capture.csv --view timing
 ```
 
 **Result:** V03.12 drives the chip as the V03.03 analysis in
@@ -18,7 +27,7 @@ radio-on, tune, station-check, RDS and AF reads match. The corrections are liste
 
 ## Captures
 
-| File | What was done | Length | QN8035 traffic |
+| Capture | What was done | Length | QN8035 traffic |
 |---|---|---|---|
 | `idle` | Cold start with radio as the last source, then listening on 93.3 MHz | 78 s | Pre-init tunes, init, tune, polling |
 | `preset_switch` | Presets 93.3 → 100.3 → 95.6 → 96.1 → 97.3 → 97.6 → 93.3 MHz | 23 s | 6 tunes |
@@ -26,7 +35,7 @@ radio-on, tune, station-check, RDS and AF reads match. The corrections are liste
 | `af_on_af_off` | AF switched on, then off | 7 s | RSSISIG polled 3.74–4.95 s |
 | `rds_93_9` | Listening on 93.9 MHz (PI 3222, PS `Dwojka`) | 55 s | Polling only |
 | `muteon_muteoff` | Mute at 8.39 s, unmute at 12.58 s | 17 s | None: BD37534 only |
-| `voluup_voldown` | Volume up 3 steps (16.3–17.6 s), down 3 steps (18.6–20.0 s) | 22 s | None: BD37534 only |
+| `vol_up_vol_down` | Volume up 3 steps (16.3–17.6 s), down 3 steps (18.6–20.0 s) | 22 s | None: BD37534 only |
 
 ## Bus
 

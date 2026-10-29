@@ -20,17 +20,20 @@ unit's software noticing.
 
 | Part | State |
 |---|---|
-| TEF6686 driver: boot and patch, tune, quality, RDS, audio | Runs on the bench: TEF6686 /V102, patch V102 p2.24, stereo and RDS lock on air |
+| TEF6686 driver: boot and patch, tune, quality, RDS, audio | Runs in the car: TEF6686 /V102, patch V102 p2.24, stereo and RDS lock on air |
 | Radio service: seek, RDS decoder (PI, PS, RadioText, AF list) | RDS runs on air; seek not checked yet |
-| Reception tuning (weak-signal DSP, AF and seek thresholds) in the web UI | Builds, host-tested; not tried on the device yet |
-| AF following (AF_Update checks, PI-checked switching, REG) | Builds, host-tested; not tried on air yet |
-| Web UI, web OTA, station memory (stand-alone build) | Web UI runs on the bench; OTA and memory not tried on the device yet |
-| QN8035 register model | Host-tested |
-| QN8035 I2C slave and bridge | Compiles, **disabled by default**, untested |
-| Head-unit protocol capture | Not started |
+| Reception tuning | Live changes used in the car; saved tuning values loaded on the device. Extended bandwidth words still need device testing |
+| AF following | Version 0.6.3 recorded in the car, including AF measurements, trials and jumps; 0.6.5 changes have not yet been verified on air |
+| AF memory and ride recording | AF lists were saved and loaded on the device; rides were recorded and analysed. Flash-write bus timing remains to be measured |
+| Web UI and web OTA | Web UI used in the car; 0.6.3 was uploaded over OTA and recorded running as valid. Rollback still needs device testing |
+| Station memory (stand-alone build) | Preset model host-tested; persistence needs device testing |
+| QN8035 register model | Host-tested and replayed against the captured cold start |
+| QN8035 I2C slave and bridge | Enabled in the default car build; tested on a first ride |
+| Head-unit protocol | Analysed and checked against an original-chip bus capture |
 
-Until the head unit's traffic has been captured and the emulation tested against it, the
-firmware is a stand-alone TEF6686 receiver controlled from the web UI.
+This is experimental firmware, tested with one head unit and tuner setup. See
+[head-unit bus capture](docs/headunit-bus-capture.md) and
+[firmware analysis](docs/headunit-mcu-firmware.md) for compatibility details and limitations.
 
 ## Hardware
 
@@ -78,9 +81,14 @@ pio run -e lolin_s2_mini -t ota          # build and flash over Wi-Fi (web OTA)
 pio device monitor                       # console
 pio run -e lolin_s2_mini -t menuconfig   # "QN8035 -> TEF6686 bridge" menu
 pio test -e native                       # host unit tests (needs gcc on PATH)
+python -B -m unittest discover -s test/scripts -v  # host integration and script tests
 ```
 
 On Windows the CLI is `~/.platformio/penv/Scripts/pio.exe` if `pio` is not on PATH.
+The script tests also require Python and Node.js. PlatformIO auto-detects the USB port;
+use `--upload-port` with the upload command if detection selects the wrong device.
+The default configuration enables head-unit emulation and selects a 9.216 MHz tuner
+crystal; review the configuration for your own hardware before flashing.
 
 `sdkconfig.defaults` is the source of truth for the configuration. After changing it, delete
 both `sdkconfig.lolin_s2_mini` and `.pio/build/lolin_s2_mini/`, or the old CMake cache keeps the
@@ -189,6 +197,13 @@ The public headers in `components/*/include/` are the reference for every module
 The web UI has no login. The Wi-Fi password is the only barrier, and the default one is published
 here. [SECURITY.md](SECURITY.md) lists the known weaknesses, a checklist to go through before a
 car install, and how to report a vulnerability.
+
+## License and third-party material
+
+Original project code is licensed under [GPL-3.0-or-later](LICENSE). The bundled
+TEF6686 patch and lookup tables have separate, unresolved redistribution terms;
+see [third-party material](THIRD_PARTY.md) before redistributing this repository
+or firmware images built from it.
 
 ## References
 

@@ -6,14 +6,22 @@
 # Generated from sdkconfig.defaults; delete together with .pio/build/<env> after changing defaults
 sdkconfig.lolin_s2_mini
 sdkconfig*.old
+# Generated configuration can contain Wi-Fi and OTA credentials.
+sdkconfig
 # idf.py build output
 build/
 # doxygen output (see Doxyfile)
 docs/doxygen/
 
-# Logic-analyser CSV exports are large; the .sal captures are the source
+# Local logic-analyser captures and exports
+captures/*.sal
 captures/*.csv
 # Ride recordings (scripts/ride_log.py)
 rides/
 # ELF archive of flashed builds, for core dumps (scripts/elf_archive.py)
 builds/
+# Local diagnostics and Python caches
+coredump.bin
+__pycache__/
+*.py[cod]
+*.code-workspace

@@ -63,7 +63,7 @@ included. Connections of the client that left kept their unsent data in the heap
 
 ## 0.6.2 - 2026-10-27
 
-Follow-up review of 0.6.1, recorded in `docs/review-fixes-20261027.md` (FU-01..FU-08).
+Follow-up fixes to 0.6.1.
 
 ### Fixed
 
@@ -121,7 +121,9 @@ Follow-up review of 0.6.1, recorded in `docs/review-fixes-20261027.md` (FU-01..F
   embedded-page JavaScript checks (GCC and Node.js required).
 - `scripts/check_qn_iram.py` checks linked service-path code and literal placement; SDK fatal
   assertion formatting is excluded explicitly. This does not measure interrupt latency.
-- Build/test results and remaining bench checks are recorded in `docs/review-fixes-20261027.md`.
+- Car and stand-alone target builds passed. Hardware checks remained for queue overload,
+  reset stress, AF and RDS timing, flash operations during bus traffic, held-bus recovery,
+  and OTA rollback.
 
 ## 0.6.0 - 2026-10-27
 

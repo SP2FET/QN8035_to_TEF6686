@@ -56,7 +56,7 @@ pio device monitor                       # USB CDC console
 pio run -e lolin_s2_mini -t menuconfig   # "QN8035 -> TEF6686 bridge" menu
 pio test -e native                       # host unit tests (needs gcc on PATH)
 python -B -m unittest discover -s test/scripts -v   # script tests (OTA uploader, ride logger)
-python scripts/qn_capture.py captures/seek.csv --view timeline   # decode a bus capture
+python scripts/qn_capture.py captures/seek.csv --view timeline   # requires a local CSV capture
 python scripts/ride_log.py --note "route"           # record a ride over Wi-Fi
 python scripts/ride_report.py rides/<dir>           # its HTML report and CSVs
 ```

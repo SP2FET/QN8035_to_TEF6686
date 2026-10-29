@@ -1,7 +1,7 @@
 # Head-unit MCU firmware (QF30): how it drives the tuner
 
-Static analysis of the head unit's MCU firmware, decompiled with Ghidra 12.1.4. The
-setup was language `ARM:LE:32:Cortex`, raw image at 0x08003800, STM32F030 memory map
+Static analysis of the head unit's MCU firmware. The setup used an ARM Cortex-M
+raw image at 0x08003800, the STM32F030 memory map
 and Keil RW data applied by script. Addresses below are flash addresses of the
 analysed image. Everything here comes from the code, not from a bus capture. Times and
 the bus speed are estimates from instruction counts.
@@ -23,8 +23,8 @@ board, and the folder names give this decoding:
 
 This unit reports **QF30.V03.12.20250315.013021.30**, which means BD37534 + **QN8035** +
 accessory 2. No copy of that exact release is public. The closest is
-**QF30.V03.03.20240509.013021**, the same hardware code from 2024-05, now in
-`QF30.V03.03.20240509.013021 mcu/` (SHA-256 `112a709b…90ee055`). Its revision note
+**QF30.V03.03.20240509.013021**, the same hardware code from 2024-05
+(SHA-256 `112a709b…90ee055`). Its revision note
 says "首次支持QN8035收音机" ("first support for the QN8035 radio"). Later 011021
 release notes do not mention the QN8035 driver except "radio level raised for
 37534+4745 (or 8035)" (V03.06.20240719), so the driver below is probably still what
@@ -34,14 +34,12 @@ V03.12 runs. A bus capture of V03.12 confirms it
 `QF30.V03.12.20250315.011021.30 mcu/` (BD37534 + TSC4745) was analysed first and is
 described at the end for comparison.
 
-Where the files came from:
+The MCU firmware images and vendor archives are research inputs, not included in this
+repository. The copies used for this analysis came from:
 
 - Vendor MCU pack "MCU for 8581 platforms (QF05, QF30)": 12 builds, including all
-  013021/013031/013091 QN8035 builds. Google Drive
-  `https://drive.google.com/file/d/1RgO67s8RJLTHx_CxHR2qMqsuGr7cPK0s/view`, linked from
-  the first post of the 4PDA QF001 thread
-  `https://4pda.to/forum/index.php?showtopic=1065343`. A copy is in
-  `QF30.V03.03.20240509.013021 mcu/MCU_8581_QF05_QF30_pack.zip`.
+  013021/013031/013091 QN8035 builds, referenced in the 4PDA QF001 thread
+  `https://4pda.to/forum/index.php?showtopic=1065343`.
 - QF30.V03.12.20250315.011021.30: an attachment on page 7 of the XDA thread
   `https://xdaforums.com/t/firmware-qf005-roco-k706-head-units-with-uis-8581a.4692447/page-7`.
 
@@ -197,8 +195,7 @@ AF following runs on the MCU (`0x0800864C`):
 ## Vendor TEF6686 builds (QF05 only)
 
 The vendor drives a TEF6686 directly from this MCU in the QF05 V02 branch: builds
-`…004121` (BU32107 + TEF6686), e.g. QF05.V02.12.20250917.004121, Google Drive
-`https://drive.google.com/file/d/19O4GJzT5n1bs_LznBSOajpB3JHNzZi9w/view`.
+`…004121` (BU32107 + TEF6686), e.g. QF05.V02.12.20250917.004121.
 
 What the 43 KB image shows:
 

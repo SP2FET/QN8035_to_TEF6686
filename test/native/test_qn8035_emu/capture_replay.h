@@ -1,5 +1,6 @@
 /* Register accesses of the head unit's original QN8035, for replay against the model
- * (docs/headunit-bus-capture.md). Generated, do not edit:
+ * (docs/headunit-bus-capture.md). Generated from local CSVs not included in the repository;
+ * the following commands document provenance and require those inputs. Do not edit:
  *   python scripts/qn_capture.py captures/idle.csv --view replay --from 41.80 --to 42.498
  *   python scripts/qn_capture.py captures/preset_switch.csv --view replay --from T --to T+0.015
  *     for T = 3.8046 6.7810 9.8187 12.2081 14.9990 17.9104
